@@ -1,0 +1,244 @@
+:root {
+  --bg: #0f1420;
+  --bg-panel: #161d2e;
+  --bg-panel-2: #1c2438;
+  --border: #2a3350;
+  --text: #dde3f0;
+  --text-dim: #8892ab;
+  --accent: #5b9dff;
+  --accent-dim: #2f4a7a;
+  --mono: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+
+  --critical: #ff5c7a;
+  --high: #ff9a4d;
+  --medium: #ffd24d;
+  --low: #6fb3ff;
+  --ok: #4ddb9b;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+code, .mono { font-family: var(--mono); }
+
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 24px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-panel);
+}
+.brand { font-size: 18px; font-weight: 700; color: var(--text); }
+.brand-sub { font-size: 12px; font-weight: 400; color: var(--text-dim); margin-left: 8px; }
+.conn-status { font-size: 12px; color: var(--text-dim); }
+
+.app { max-width: 1100px; margin: 0 auto; padding: 24px; }
+
+.panel {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 20px;
+  margin-bottom: 20px;
+}
+
+h1 { font-size: 22px; margin: 0 0 4px; }
+h2 { font-size: 16px; margin: 0 0 12px; color: var(--text); }
+h3 { font-size: 14px; margin: 0 0 8px; }
+.muted { color: var(--text-dim); }
+.small { font-size: 12px; }
+
+.row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+.row.between { justify-content: space-between; }
+.stack { display: flex; flex-direction: column; gap: 6px; }
+
+button, .btn {
+  background: var(--accent);
+  color: #08101f;
+  border: none;
+  border-radius: 6px;
+  padding: 8px 14px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+button:hover { filter: brightness(1.1); }
+button.secondary {
+  background: transparent;
+  color: var(--text);
+  border: 1px solid var(--border);
+}
+button:disabled { opacity: 0.5; cursor: default; }
+
+input, textarea, select {
+  background: var(--bg-panel-2);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 6px;
+  padding: 8px 10px;
+  font-size: 13px;
+  font-family: var(--sans);
+  width: 100%;
+}
+select { width: auto; }
+label { display: block; font-size: 12px; color: var(--text-dim); margin-bottom: 4px; }
+.field { margin-bottom: 12px; }
+.hidden { display: none !important; }
+
+table { border-collapse: collapse; width: 100%; font-size: 13px; }
+th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); vertical-align: top; overflow-wrap: anywhere; }
+th { color: var(--text-dim); font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: 0.03em; }
+tr:hover td { background: rgba(255,255,255,0.02); }
+.table-wrap { overflow-x: auto; }
+/* Detail/command-line columns get proportionally more room but are still
+   bounded -- a long value wraps and truncates inside the cell (see
+   .detail-cell) instead of forcing the table, and the page, wider. */
+.detail-td { max-width: 320px; }
+
+.badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+}
+.badge.critical { background: rgba(255,92,122,0.15); color: var(--critical); }
+.badge.high { background: rgba(255,154,77,0.15); color: var(--high); }
+.badge.medium { background: rgba(255,210,77,0.15); color: var(--medium); }
+.badge.low { background: rgba(111,179,255,0.15); color: var(--low); }
+.badge.status { background: rgba(255,255,255,0.08); color: var(--text); }
+.badge.status.analyzed { background: rgba(77,219,155,0.15); color: var(--ok); }
+.badge.conf { background: rgba(255,255,255,0.06); color: var(--text-dim); }
+
+.tech-chip {
+  display: inline-block;
+  background: var(--bg-panel-2);
+  border: 1px solid var(--border);
+  color: var(--accent);
+  border-radius: 4px;
+  padding: 2px 6px;
+  font-size: 11px;
+  font-family: var(--mono);
+  margin: 2px 4px 2px 0;
+}
+
+.case-card {
+  display: block;
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  margin-bottom: 10px;
+  background: var(--bg-panel-2);
+}
+.case-card:hover { border-color: var(--accent); text-decoration: none; }
+
+.summary-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 12px;
+  margin-top: 12px;
+}
+.stat { background: var(--bg-panel-2); border: 1px solid var(--border); border-radius: 8px; padding: 12px; }
+.stat .n { font-size: 22px; font-weight: 700; }
+.stat .l { font-size: 11px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.03em; }
+
+.tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--border); margin-bottom: 16px; }
+.tab {
+  padding: 8px 14px;
+  cursor: pointer;
+  color: var(--text-dim);
+  font-size: 13px;
+  border-bottom: 2px solid transparent;
+}
+.tab.active { color: var(--text); border-bottom-color: var(--accent); }
+
+.finding-card {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 14px 16px;
+  margin-bottom: 10px;
+  background: var(--bg-panel-2);
+  cursor: pointer;
+}
+.finding-card:hover { border-color: var(--accent); }
+.finding-title { font-weight: 600; margin: 4px 0; }
+/* overflow-wrap is the fix for long embedded command lines (e.g. a
+   base64-encoded PowerShell payload) blowing out the card's width --
+   without it, one unbroken long word forces the container wider no
+   matter how narrow its layout is meant to be. */
+.finding-desc { color: var(--text-dim); font-size: 13px; margin: 6px 0; overflow-wrap: anywhere; }
+.finding-detail { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border); display: none; }
+.finding-detail.open { display: block; }
+
+/* Long values (command lines, encoded scripts) inside a table cell or
+   card: truncated by default, safely wrapped if shown in full, with a
+   toggle + copy affordance so the complete value is never lost. */
+.detail-cell { overflow-wrap: anywhere; }
+.detail-cell-long { display: flex; flex-direction: column; gap: 4px; }
+.detail-text.truncated { display: inline; }
+.detail-actions { display: flex; gap: 6px; }
+.detail-actions button { padding: 3px 8px; font-size: 11px; }
+
+.chain-step {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.chain-arrow { color: var(--text-dim); margin: 0 6px; }
+
+.evidence-box {
+  background: #0a0e18;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px;
+  font-family: var(--mono);
+  font-size: 11px;
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 240px;
+  overflow-y: auto;
+}
+
+.error-box {
+  background: rgba(255,92,122,0.1);
+  border: 1px solid rgba(255,92,122,0.4);
+  color: var(--critical);
+  border-radius: 6px;
+  padding: 10px 14px;
+  margin-bottom: 16px;
+  font-size: 13px;
+}
+
+.empty { color: var(--text-dim); font-style: italic; padding: 20px 0; }
+
+/* Evidence Collections */
+.add-evidence-form {
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+}
+.collection-card {
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  margin-top: 10px;
+  background: var(--bg-panel-2);
+}
+.collection-badge { text-transform: none; letter-spacing: normal; }
+.collection-sources { display: none; margin-top: 10px; }
+.collection-sources.open { display: block; }

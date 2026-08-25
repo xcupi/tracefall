@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "tracefall",
+      "runtimeExecutable": "go",
+      "runtimeArgs": ["run", "./cmd/tracefall", "-db", "/tmp/tracefall-dev.db", "-data-dir", "/tmp/tracefall-dev-data"],
+      "port": 8080
+    }
+  ]
+}

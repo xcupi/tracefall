@@ -1,0 +1,3 @@
+HivePath,KeyPath,ValueName,ValueData,LastWriteTimestamp
+C:\Users\jdoe\NTUSER.DAT,Software\Microsoft\Windows\CurrentVersion\Run,WindowsUpdateHelper,C:\Users\jdoe\AppData\Local\Temp\update.exe,2026-01-15T09:16:02.0000000Z
+C:\Users\jdoe\NTUSER.DAT,Software\Microsoft\Windows\CurrentVersion\Run,OneDriveSync,"""C:\Program Files\Microsoft OneDrive\OneDrive.exe"" /background",2025-11-02T08:00:00.0000000Z
