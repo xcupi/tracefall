@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // Store resolves per-case, per-collection file paths under a root data
@@ -18,7 +19,8 @@ import (
 //
 //	<root>/cases/<caseID>/collections/<collectionID>/upload.zip     original archive, preserved unmodified
 //	<root>/cases/<caseID>/collections/<collectionID>/evidence/      the archive's contents, safely extracted --
-//	                                                                 this is what internal/ingest.Walk reads
+//	                                                                 this is what internal/ingest.Discover catalogs
+//	                                                                 and internal/ingest.ParseFile reads from
 //	<root>/cases/<caseID>/collections/<collectionID>/metadata.json  the collection's own self-description
 //
 // Every collection gets its own subtree so that adding a second (or
@@ -52,8 +54,8 @@ func (s *Store) UploadPath(caseID, collectionID string) string {
 }
 
 // EvidenceDir returns where a collection's extracted evidence lives --
-// the directory internal/ingest.Walk is pointed at after a successful
-// upload.
+// the directory internal/ingest.Discover/ParseFile are pointed at after
+// a successful upload.
 func (s *Store) EvidenceDir(caseID, collectionID string) string {
 	return filepath.Join(s.CollectionDir(caseID, collectionID), "evidence")
 }
@@ -75,6 +77,43 @@ func (s *Store) EnsureCollectionDir(caseID, collectionID string) error {
 	}
 	if err := os.MkdirAll(s.EvidenceDir(caseID, collectionID), 0o755); err != nil {
 		return fmt.Errorf("creating collection evidence directory: %w", err)
+	}
+	return nil
+}
+
+// RemoveCaseDir deletes everything stored for one case -- every
+// collection's upload/evidence/metadata, and the case directory itself.
+// Used by case deletion (see internal/api.Service.DeleteCase) so no
+// on-disk evidence survives the case it belonged to.
+func (s *Store) RemoveCaseDir(caseID string) error {
+	return os.RemoveAll(s.CaseDir(caseID))
+}
+
+// RemoveEvidenceFile deletes one file from within a collection's
+// extracted evidence directory -- used when a single evidence file is
+// deleted (see internal/api.Service.DeleteSourceFile) without touching
+// any of that collection's other files. relPath is validated to resolve
+// inside the collection's EvidenceDir before anything is removed, the
+// same defense-in-depth safe-join check internal/archive uses during
+// extraction -- a SourceFile's Path is always produced by
+// internal/ingest.Discover walking that same directory, so this should
+// never actually reject a legitimate call, but a deletion path is exactly
+// where a defensive check against an unexpected ".." earns its keep.
+// Removing a file that's already gone (e.g. a retried request) is not an
+// error.
+func (s *Store) RemoveEvidenceFile(caseID, collectionID, relPath string) error {
+	dir := s.EvidenceDir(caseID, collectionID)
+	dirAbs, err := filepath.Abs(dir)
+	if err != nil {
+		return fmt.Errorf("resolving evidence directory: %w", err)
+	}
+	target := filepath.Join(dirAbs, filepath.FromSlash(relPath))
+	rel, err := filepath.Rel(dirAbs, target)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("refusing to remove path outside evidence directory: %q", relPath)
+	}
+	if err := os.Remove(target); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("removing evidence file: %w", err)
 	}
 	return nil
 }

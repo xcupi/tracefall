@@ -9,13 +9,60 @@ import "time"
 
 // Case is an investigation container. All ingested evidence, events,
 // findings, and correlations are scoped to exactly one case.
+//
+// Case carries TWO independent status-like concepts, deliberately kept
+// as separate fields rather than folded into one -- see Phase 6's
+// docs/analyst-workflow.md for the full rationale:
+//
+//   - Status is the ANALYSIS lifecycle (created/ingested/analyzed --
+//     unchanged since Phase 1): does the case's current evidence set
+//     have up-to-date detection/correlation results?
+//   - CaseStatus is the analyst's own INVESTIGATIVE workflow state
+//     (open/investigating/contained/closed, added in Phase 6): where is
+//     the human investigator in handling this case? This is never set
+//     or changed by the deterministic engine -- only ever by an analyst
+//     action (or CreateCase's default).
+//
+// A case can be "analyzed" (engine ran successfully) while its
+// CaseStatus is "open" (analyst hasn't started working it yet), or
+// "ingested" (evidence changed, stale) while CaseStatus is "closed" (an
+// analyst added evidence to a closed case, which is allowed but doesn't
+// reopen it automatically). The two are never conflated.
 type Case struct {
 	ID          string    `json:"id"`
 	Name        string    `json:"name"`
 	Description string    `json:"description"`
-	Status      string    `json:"status"` // created | ingested | analyzed
+	Status      string    `json:"status"` // created | ingested | analyzed -- see doc comment above
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`
+
+	// AnalyzedAt is when AnalyzeCase last completed successfully for
+	// this case (nil if never analyzed) -- distinct from UpdatedAt
+	// (touched by ANY case change, including a pure metadata edit that
+	// has nothing to do with analysis) and from CreatedAt. This is what
+	// lets the UI show "analyzed 3 collections / 42 events ago at 14:02
+	// UTC" precisely, and what distinguishes "never analyzed" from
+	// "analyzed before, now stale" even though both currently show
+	// Status == ingested.
+	//
+	// A *time.Time, not time.Time: encoding/json's `omitempty` does NOT
+	// treat a zero-valued time.Time (0001-01-01T00:00:00Z) as "empty" --
+	// omitempty's emptiness check is reflect.Value.IsZero-adjacent for
+	// basic kinds only, and a struct is never considered empty by it. A
+	// plain time.Time field here would have serialized the zero value
+	// literally instead of omitting it, which is exactly the bug this
+	// pointer avoids.
+	AnalyzedAt *time.Time `json:"analyzed_at,omitempty"`
+
+	// CaseStatus is the analyst's investigative workflow state -- see
+	// the CaseWorkflow* constants. Defaults to CaseWorkflowOpen on
+	// creation; changed only by an explicit analyst action
+	// (Service.UpdateCaseMetadata), never by analysis.
+	CaseStatus string `json:"case_status"`
+	// Priority is the analyst's own triage priority -- see the
+	// CasePriority* constants. Purely descriptive; nothing in the
+	// deterministic engine reads or sets it.
+	Priority string `json:"priority"`
 }
 
 // Case status values. Status reflects the case's evidence set as a
@@ -28,6 +75,27 @@ const (
 	CaseStatusCreated  = "created"
 	CaseStatusIngested = "ingested"
 	CaseStatusAnalyzed = "analyzed"
+)
+
+// CaseWorkflow* are Case.CaseStatus's values (Phase 6) -- the analyst's
+// own investigative-progress state, entirely independent of Status
+// above. A small, fixed set matching how a human triage workflow
+// actually progresses; Tracefall never infers or auto-transitions these
+// from evidence/analysis activity.
+const (
+	CaseWorkflowOpen          = "open"
+	CaseWorkflowInvestigating = "investigating"
+	CaseWorkflowContained     = "contained"
+	CaseWorkflowClosed        = "closed"
+)
+
+// CasePriority* are Case.Priority's values (Phase 6) -- an analyst's own
+// triage priority, purely descriptive.
+const (
+	CasePriorityLow      = "low"
+	CasePriorityMedium   = "medium"
+	CasePriorityHigh     = "high"
+	CasePriorityCritical = "critical"
 )
 
 // Collection is one independent evidence-gathering event ingested into a
@@ -46,10 +114,11 @@ type Collection struct {
 	ArchiveHash          string    `json:"archive_hash,omitempty"`      // SHA-256 of the uploaded archive, or a deterministic content fingerprint for local-path ingest; used to reject duplicate evidence within a case
 	EvidenceDirectory    string    `json:"evidence_directory"`          // where this collection's extracted evidence lives on disk
 	IngestionStatus      string    `json:"ingestion_status"`
-	FileCount            int       `json:"file_count"`
-	SupportedFileCount   int       `json:"supported_file_count"`
-	UnsupportedFileCount int       `json:"unsupported_file_count"`
-	ParsedEventCount     int       `json:"parsed_event_count"`
+	FileCount            int       `json:"file_count"`             // active (non-deleted) files discovered, supported + unsupported
+	SupportedFileCount   int       `json:"supported_file_count"`   // of those, how many a parser recognizes (available to import, whether or not yet imported)
+	UnsupportedFileCount int       `json:"unsupported_file_count"` // of those, how many no parser recognizes
+	ImportedFileCount    int       `json:"imported_file_count"`    // of the supported files, how many have actually been imported
+	ParsedEventCount     int       `json:"parsed_event_count"`     // total events produced by imported files
 }
 
 // Collection source types.
@@ -66,20 +135,47 @@ const (
 	CollectionStatusFailed   = "failed"
 )
 
-// SourceFile records one file that was ingested as part of one of a
-// case's evidence collections, and which parser handled it. This is the
-// first link in the provenance chain: Finding -> Event -> SourceFile.
+// SourceFile is one individual evidence file discovered inside a
+// collection -- the unit an investigator now selects, imports, inspects,
+// and deletes independently (see docs/data-model.md's "Evidence file
+// model" section). This is the first link in the provenance chain:
+// Finding -> Event -> SourceFile.
+//
+// A file's life cycle is discovery, then (optionally) import:
+// upload/path-ingest catalogs every file in the package as a SourceFile
+// row the moment it's discovered -- before anything is parsed -- with
+// ImportStatus SourceFileDiscovered (or SourceFileUnsupported /
+// SourceFileDuplicate if it's not something an investigator can choose
+// to import). Only once an investigator selects specific discovered
+// files and imports them does a file gain events and move to
+// SourceFileImported (or SourceFileFailed if parsing itself failed).
 type SourceFile struct {
-	ID           string    `json:"id"`
-	CaseID       string    `json:"case_id"`
-	CollectionID string    `json:"collection_id"`
-	Path         string    `json:"path"` // path relative to the collection's evidence root
-	ArtifactType string    `json:"artifact_type"`
-	Parser       string    `json:"parser"` // parser name@version that handled this file
-	RowCount     int       `json:"row_count"`
-	SHA256       string    `json:"sha256"`
-	IngestedAt   time.Time `json:"ingested_at"`
+	ID               string     `json:"id"`
+	CaseID           string     `json:"case_id"`
+	CollectionID     string     `json:"collection_id"`
+	OriginalFilename string     `json:"original_filename"` // basename as it appeared in the package
+	Path             string     `json:"path"`              // path relative to the collection's evidence root
+	ArtifactType     string     `json:"artifact_type,omitempty"`
+	Parser           string     `json:"parser,omitempty"` // parser name@version that would/did handle this file
+	Supported        bool       `json:"supported"`        // a parser was detected for this file, whether or not it has been imported
+	SizeBytes        int64      `json:"size_bytes"`
+	SHA256           string     `json:"sha256"`
+	ImportStatus     string     `json:"import_status"`
+	EventCount       int        `json:"event_count"` // 0 until imported
+	DiscoveredAt     time.Time  `json:"discovered_at"`
+	ImportedAt       *time.Time `json:"imported_at,omitempty"`
+	DeletedAt        *time.Time `json:"deleted_at,omitempty"` // soft-delete marker; nil while the file is active evidence
 }
+
+// SourceFile import status values -- see SourceFile's doc comment for
+// the life cycle these form.
+const (
+	SourceFileDiscovered  = "discovered"  // cataloged, supported, not yet selected for import
+	SourceFileImported    = "imported"    // selected and successfully parsed into events
+	SourceFileUnsupported = "unsupported" // cataloged, but no parser recognizes it -- cannot be imported
+	SourceFileDuplicate   = "duplicate"   // cataloged, but its content (by SHA-256) already exists elsewhere in this same collection -- cannot be imported (a different collection may legitimately re-observe the same file; see docs/data-model.md)
+	SourceFileFailed      = "failed"      // selected for import, but its parser returned an error
+)
 
 // Artifact types recognized in Phase 1. New artifact types are added here
 // and in internal/ingest's detector table -- nothing else needs to change.
@@ -103,6 +199,48 @@ const (
 	EventRegistryRunKey      = "registry_run_key_set"
 	EventScheduledTaskCreate = "scheduled_task_created"
 	EventNetworkConnection   = "network_connection"
+)
+
+// Event types added in Phase 4 ("Expand Windows DFIR Triage Coverage").
+// Each one earns its place by feeding a specific detection rule or
+// correlation added in the same phase -- see internal/detect and
+// internal/correlate -- rather than being coverage for its own sake.
+const (
+	// EventLogonExplicitCreds is Security 4648 (a logon was attempted
+	// using explicit credentials) -- the classic "runas"/lateral-movement
+	// signal, and step one of the credential-abuse correlation.
+	EventLogonExplicitCreds = "logon_explicit_credentials"
+	// EventPrivilegedLogon is Security 4672 (special privileges assigned
+	// to a new logon) -- an administrator-equivalent logon indicator.
+	EventPrivilegedLogon = "privileged_logon"
+	// EventKerberosTGTRequest is Security 4768 (a Kerberos
+	// Ticket-Granting-Ticket was requested).
+	EventKerberosTGTRequest = "kerberos_tgt_request"
+	// EventKerberosServiceTicket is Security 4769 (a Kerberos service
+	// ticket was requested).
+	EventKerberosServiceTicket = "kerberos_service_ticket_request"
+	// EventNTLMAuth is Security 4776 (the domain controller attempted to
+	// validate credentials for an NTLM logon).
+	EventNTLMAuth = "ntlm_authentication"
+	// EventServiceInstall is System 7045 (a new service was installed on
+	// the system), reported by the Service Control Manager provider --
+	// the classic service-persistence/service-execution signal.
+	EventServiceInstall = "service_install"
+	// EventFileCreate is Sysmon Event ID 11 (FileCreate) -- a process
+	// wrote a file, most useful for observing a payload being dropped to
+	// disk before it's executed.
+	EventFileCreate = "file_create"
+	// EventRegistryPersistence is a registry persistence location other
+	// than a Run/RunOnce key -- Winlogon Shell/Userinit, IFEO Debugger
+	// hijacking, AppInit_DLLs, or a service's ImagePath -- classified by
+	// internal/parsers/regpersist and reported identically whether the
+	// evidence came from an RECmd hive snapshot or a real-time Sysmon
+	// registry event. Run/RunOnce keys keep using EventRegistryRunKey
+	// (unchanged from Phase 1) so existing behavior/tests are undisturbed.
+	EventRegistryPersistence = "registry_persistence"
+	// EventDNSQuery is Sysmon Event ID 22 (DNSEvent) -- a process resolved
+	// a domain name.
+	EventDNSQuery = "dns_query"
 )
 
 // Event is Tracefall's normalized evidence record. Every parser emits
@@ -247,6 +385,15 @@ const (
 	CorrelationEntity        = "entity"
 	CorrelationProcessChain  = "process_chain"
 	CorrelationActivityChain = "activity_chain"
+	// CorrelationCredentialChain (Phase 4) links a credential-related
+	// event sequence: repeated failed logons into a success, or explicit
+	// credential use into the privileged activity that followed it. See
+	// internal/correlate/credential_chain.go.
+	CorrelationCredentialChain = "credential_chain"
+	// CorrelationServiceChain (Phase 4) links a service installation to
+	// the service process actually starting, and onward to any network
+	// connection that process made. See internal/correlate/service_chain.go.
+	CorrelationServiceChain = "service_chain"
 )
 
 // Correlation is a deterministic relationship between two or more events,

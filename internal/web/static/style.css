@@ -45,6 +45,15 @@ code, .mono { font-family: var(--mono); }
 .brand-sub { font-size: 12px; font-weight: 400; color: var(--text-dim); margin-left: 8px; }
 .conn-status { font-size: 12px; color: var(--text-dim); }
 
+.lan-warning {
+  padding: 8px 24px;
+  background: rgba(255,92,122,0.12);
+  border-bottom: 1px solid rgba(255,92,122,0.4);
+  color: var(--critical);
+  font-size: 13px;
+  text-align: center;
+}
+
 .app { max-width: 1100px; margin: 0 auto; padding: 24px; }
 
 .panel {
@@ -81,6 +90,15 @@ button.secondary {
   color: var(--text);
   border: 1px solid var(--border);
 }
+/* Destructive actions (delete case, delete evidence) get their own
+   unmistakable styling -- never visually identical to a routine action
+   like "secondary", so a delete button is never clicked by mistake. */
+button.danger {
+  background: rgba(255,92,122,0.12);
+  color: var(--critical);
+  border: 1px solid rgba(255,92,122,0.5);
+}
+button.danger:hover { background: rgba(255,92,122,0.22); filter: none; }
 button:disabled { opacity: 0.5; cursor: default; }
 
 input, textarea, select {
@@ -97,6 +115,54 @@ select { width: auto; }
 label { display: block; font-size: 12px; color: var(--text-dim); margin-bottom: 4px; }
 .field { margin-bottom: 12px; }
 .hidden { display: none !important; }
+
+/* Field-level input validation (e.g. New Case's Name field): a red
+   border + right-aligned icon on the input itself, plus a compact error
+   box anchored directly beneath it -- see .field-error-box below. Kept
+   distinct from the full-width .error-box used for upload/ingest
+   failures elsewhere, which aren't scoped to one specific input. */
+.input-wrap { position: relative; }
+.input-wrap input { padding-right: 30px; }
+input.input-error { border-color: var(--critical); }
+.input-error-icon {
+  position: absolute;
+  top: 50%;
+  right: 10px;
+  transform: translateY(-50%);
+  color: var(--critical);
+  font-weight: 700;
+  font-size: 12px;
+  line-height: 1;
+  pointer-events: none;
+}
+
+/* Sits directly under the field it validates (margin-top only -- when
+   empty it takes up no space, so a valid form has no dead gap), with
+   the field's own margin-bottom providing the separation from whatever
+   comes next. */
+.field-error-box {
+  margin-top: 8px;
+  background: rgba(255,92,122,0.1);
+  border: 1px solid rgba(255,92,122,0.4);
+  color: var(--critical);
+  border-radius: 6px;
+  padding: 8px 10px;
+  font-size: 12px;
+}
+.field-error-box strong { display: block; margin-bottom: 2px; }
+
+/* Compact, non-error informational note (e.g. "names must be unique").
+   margin-bottom separates it from a following button so an error/info
+   box never reads as attached to it. */
+.field-info-box {
+  margin-bottom: 16px;
+  background: rgba(91,157,255,0.08);
+  border: 1px solid rgba(91,157,255,0.25);
+  color: var(--text-dim);
+  border-radius: 6px;
+  padding: 8px 10px;
+  font-size: 12px;
+}
 
 table { border-collapse: collapse; width: 100%; font-size: 13px; }
 th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); vertical-align: top; overflow-wrap: anywhere; }
@@ -137,6 +203,12 @@ tr:hover td { background: rgba(255,255,255,0.02); }
   margin: 2px 4px 2px 0;
 }
 
+/* The checkbox sits outside the <a> (see app.js's case-card-row markup)
+   so clicking it never also triggers navigation into the case. */
+.case-card-row { display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px; }
+.case-card-row input[type="checkbox"] { margin-top: 16px; flex-shrink: 0; }
+.case-card-row .case-card { flex: 1; margin-bottom: 0; }
+
 .case-card {
   display: block;
   padding: 14px 16px;
@@ -146,6 +218,48 @@ tr:hover td { background: rgba(255,255,255,0.02); }
   background: var(--bg-panel-2);
 }
 .case-card:hover { border-color: var(--accent); text-decoration: none; }
+
+/* Bulk-selection action bar (cases, evidence files): only ever present
+   in the DOM while something is selected -- see app.js's updateBulkBar
+   helpers -- so it never sits there empty/disabled. */
+.bulk-action-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+  padding: 10px 14px;
+  border: 1px solid var(--accent-dim);
+  border-radius: 8px;
+  background: rgba(91,157,255,0.08);
+}
+
+.evidence-file-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  margin-bottom: 6px;
+  background: var(--bg-panel-2);
+}
+.evidence-file-label { display: flex; align-items: flex-start; gap: 8px; cursor: pointer; }
+.evidence-file-label input[type="checkbox"] { margin-top: 3px; flex-shrink: 0; }
+
+/* "Evidence changed" staleness notice -- deliberately the same visual
+   language as .field-error-box but in the medium-severity color, since
+   this is a "needs attention" state, not an error. */
+.stale-banner {
+  margin-bottom: 12px;
+  padding: 10px 14px;
+  border: 1px solid rgba(255,210,77,0.4);
+  border-radius: 6px;
+  background: rgba(255,210,77,0.1);
+  color: var(--medium);
+  font-size: 13px;
+}
+.stale-banner strong { display: block; margin-bottom: 2px; }
 
 .summary-grid {
   display: grid;
@@ -176,6 +290,44 @@ tr:hover td { background: rgba(255,255,255,0.02); }
   cursor: pointer;
 }
 .finding-card:hover { border-color: var(--accent); }
+
+/* Phase 5: Investigations list -- same card visual language as
+   .finding-card (border/radius/padding/background) but rendered as an
+   <a> link (whole row navigates to the investigation detail page)
+   rather than a click-to-expand card. */
+.investigation-list { display: flex; flex-direction: column; gap: 10px; }
+.investigation-row {
+  display: block;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px 16px;
+  background: var(--bg-panel-2);
+  color: var(--text);
+  text-decoration: none;
+}
+.investigation-row:hover { border-color: var(--accent); }
+
+/* Phase 6: analyst workflow. .analyst-assessment is deliberately a
+   visually distinct box (dashed border, muted background) wherever it
+   sits next to engine-produced severity/confidence badges, per "make the
+   distinction between Engine Assessment and Analyst Assessment visually
+   obvious." */
+.analyst-assessment {
+  border: 1px dashed var(--border);
+  border-radius: 6px;
+  padding: 8px 10px;
+  margin-top: 8px;
+  background: var(--bg-panel);
+}
+.collection-integrity-detail, .finding-assessment-slot { margin-top: 0; }
+.collection-integrity-detail { display: none; margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--border); }
+.collection-integrity-detail.open { display: block; }
+.integrity-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px; }
+.note-row { padding: 6px 0; border-bottom: 1px solid var(--border); }
+.note-row:last-child { border-bottom: none; }
+.tag-chip { cursor: pointer; }
+.tag-chip:hover { opacity: 0.75; }
+
 .finding-title { font-weight: 600; margin: 4px 0; }
 /* overflow-wrap is the fix for long embedded command lines (e.g. a
    base64-encoded PowerShell payload) blowing out the card's width --
@@ -194,12 +346,65 @@ tr:hover td { background: rgba(255,255,255,0.02); }
 .detail-actions { display: flex; gap: 6px; }
 .detail-actions button { padding: 3px 8px; font-size: 11px; }
 
-.chain-step {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
+/* Activity chain visualization (Correlations/Activity Chains tab): a
+   vertical flow of steps connected by an arrow, each step a clickable
+   node that expands to its provenance -- see app.js's
+   renderActivityChain/renderChainNode. */
+.chain-flow { display: flex; flex-direction: column; align-items: stretch; margin-top: 10px; }
+.chain-connector { text-align: center; color: var(--text-dim); font-size: 16px; line-height: 1; margin: 2px 0; }
+.chain-node {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: var(--bg-panel-2);
+  cursor: pointer;
 }
-.chain-arrow { color: var(--text-dim); margin: 0 6px; }
+.chain-node:hover, .chain-node:focus-visible { border-color: var(--accent); outline: none; }
+.chain-node-detail { display: none; margin-top: 8px; }
+.chain-node-detail.open { display: block; }
+.chain-badge { text-transform: none; letter-spacing: normal; }
+
+/* ATT&CK tab, grouped by tactic in kill-chain order -- see
+   app.js's renderAttackTab/CANONICAL_TACTICS. */
+.tactic-group { margin-top: 16px; }
+.tactic-heading { margin-bottom: 8px; padding-bottom: 4px; border-bottom: 1px solid var(--border); }
+.attack-technique-detail { display: none; }
+.attack-technique-detail.open { display: block; }
+
+/* Timeline row category badges -- one color per forensic category
+   (authentication/execution/persistence/network), so the eye can scan
+   the category column without reading the label -- see app.js's
+   EVENT_CATEGORIES. */
+.badge.category-authentication { background: rgba(111,179,255,0.15); color: var(--low); }
+.badge.category-execution { background: rgba(255,154,77,0.15); color: var(--high); }
+.badge.category-persistence { background: rgba(255,92,122,0.15); color: var(--critical); }
+.badge.category-network { background: rgba(77,219,155,0.15); color: var(--ok); }
+.badge.category-other { background: rgba(255,255,255,0.08); color: var(--text-dim); }
+
+/* Timeline rows are clickable (open provenance inline, like a finding's
+   raw-evidence row) -- keyboard-focusable and visibly interactive, never
+   just a plain table row that happens to have a click handler. */
+.timeline-row { cursor: pointer; }
+.timeline-row:hover, .timeline-row:focus-visible { background: rgba(255,255,255,0.03); outline: none; }
+.timeline-row.selected { background: rgba(91,157,255,0.08); }
+
+/* Shared filter bar (Timeline + Findings) -- see app.js's
+   renderFilterBar. Compact, wraps on narrow viewports, never pushes the
+   table into horizontal scroll on its own. */
+.filter-bar { display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0; }
+.filter-input {
+  background: var(--bg-panel-2);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 6px;
+  padding: 6px 8px;
+  font-size: 12px;
+  font-family: var(--sans);
+  width: auto;
+  min-width: 110px;
+}
+
+.investigation-summary { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--border); }
 
 .evidence-box {
   background: #0a0e18;

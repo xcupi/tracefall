@@ -121,6 +121,49 @@ func uploadZip(t *testing.T, mux *http.ServeMux, caseID string, data []byte) *ht
 	return rec
 }
 
+// importAll POSTs an import request for every file in disc.SourceFiles
+// that's currently selectable (status "discovered"), and returns the
+// response recorder plus the decoded ImportResult. If there's nothing
+// selectable, it does nothing and returns a zero recorder/result --
+// callers that need to assert on "nothing was imported" should check
+// disc.SourceFiles/SupportedCount directly instead.
+func importAll(t *testing.T, mux *http.ServeMux, caseID string, disc DiscoverResult) (*httptest.ResponseRecorder, ImportResult) {
+	t.Helper()
+	var ids []string
+	for _, sf := range disc.SourceFiles {
+		if sf.ImportStatus == model.SourceFileDiscovered {
+			ids = append(ids, sf.ID)
+		}
+	}
+	if len(ids) == 0 {
+		return nil, ImportResult{}
+	}
+	rec := doJSON(t, mux, "POST", "/api/cases/"+caseID+"/evidence/"+disc.Collection.ID+"/import",
+		map[string][]string{"source_file_ids": ids}, nil)
+	var res ImportResult
+	mustDecode(t, rec, &res)
+	return rec, res
+}
+
+// uploadAndImportAll performs the full two-phase evidence-adding flow
+// (upload/discover, then import every supported file discovered) as one
+// call, reproducing the old one-shot ingest's net effect for tests that
+// care about the *result* of adding evidence rather than the mechanics
+// of file selection itself (see TestEvidenceSelection_* for tests of the
+// selection step directly). t.Fatal on a non-200 discover response,
+// since callers using this helper expect the upload itself to succeed.
+func uploadAndImportAll(t *testing.T, mux *http.ServeMux, caseID string, data []byte) (DiscoverResult, ImportResult) {
+	t.Helper()
+	discRec := uploadZip(t, mux, caseID, data)
+	if discRec.Code != http.StatusOK {
+		t.Fatalf("upload (discover): status %d, body %s", discRec.Code, discRec.Body.String())
+	}
+	var disc DiscoverResult
+	mustDecode(t, discRec, &disc)
+	_, imp := importAll(t, mux, caseID, disc)
+	return disc, imp
+}
+
 func createTestCase(t *testing.T, mux *http.ServeMux, name string) model.Case {
 	t.Helper()
 	var c model.Case
@@ -141,24 +184,29 @@ func TestUploadFlow_ValidKAPEPackage(t *testing.T) {
 	c := createTestCase(t, mux, "Uploaded KAPE case")
 
 	zipData := buildKAPEZip(t)
-	var res UploadResultSummary
-	rec := uploadZip(t, mux, c.ID, zipData)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("upload: status %d, body %s", rec.Code, rec.Body.String())
+	discRec := uploadZip(t, mux, c.ID, zipData)
+	if discRec.Code != http.StatusOK {
+		t.Fatalf("upload: status %d, body %s", discRec.Code, discRec.Body.String())
 	}
-	mustDecode(t, rec, &res)
+	var disc DiscoverResult
+	mustDecode(t, discRec, &disc)
 
-	if res.EventCount == 0 {
-		t.Fatal("upload produced 0 events")
+	if disc.SupportedCount != 5 {
+		t.Errorf("got %d supported files discovered, want 5", disc.SupportedCount)
 	}
-	if len(res.SourceFiles) != 5 {
-		t.Errorf("got %d source files, want 5", len(res.SourceFiles))
-	}
-	if res.ExtractedFiles == 0 {
+	if disc.ExtractedFiles == 0 {
 		t.Error("expected ExtractedFiles > 0")
 	}
-	if res.UploadSizeBytes != int64(len(zipData)) {
-		t.Errorf("UploadSizeBytes = %d, want %d", res.UploadSizeBytes, len(zipData))
+	if disc.UploadSizeBytes != int64(len(zipData)) {
+		t.Errorf("UploadSizeBytes = %d, want %d", disc.UploadSizeBytes, len(zipData))
+	}
+
+	_, res := importAll(t, mux, c.ID, disc)
+	if res.EventCount == 0 {
+		t.Fatal("import produced 0 events")
+	}
+	if len(res.Imported) != 5 {
+		t.Errorf("got %d imported files, want 5", len(res.Imported))
 	}
 
 	// Case must now be "ingested" and ready for analysis.
@@ -171,7 +219,7 @@ func TestUploadFlow_ValidKAPEPackage(t *testing.T) {
 	}
 
 	var analyzeRes AnalyzeResultSummary
-	rec = doJSON(t, mux, "POST", "/api/cases/"+c.ID+"/analyze", nil, &analyzeRes)
+	rec := doJSON(t, mux, "POST", "/api/cases/"+c.ID+"/analyze", nil, &analyzeRes)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("analyze: status %d, body %s", rec.Code, rec.Body.String())
 	}
@@ -202,9 +250,9 @@ func TestUploadFlow_PreservesOriginalArchive(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("upload: status %d, body %s", rec.Code, rec.Body.String())
 	}
-	var res UploadResultSummary
-	mustDecode(t, rec, &res)
-	collectionID := res.Collection.ID
+	var disc DiscoverResult
+	mustDecode(t, rec, &disc)
+	collectionID := disc.Collection.ID
 	if collectionID == "" {
 		t.Fatal("upload response did not include a collection ID")
 	}
@@ -278,15 +326,10 @@ func TestUploadFlow_FailedSecondUploadDoesNotCorruptFirst(t *testing.T) {
 	c := createTestCase(t, mux, "Failed second upload case")
 
 	zip1 := buildKAPEZip(t)
-	rec := uploadZip(t, mux, c.ID, zip1)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("first upload: status %d, body %s", rec.Code, rec.Body.String())
-	}
-	var res1 UploadResultSummary
-	mustDecode(t, rec, &res1)
+	_, res1 := uploadAndImportAll(t, mux, c.ID, zip1)
 
 	var analyzeRes AnalyzeResultSummary
-	rec = doJSON(t, mux, "POST", "/api/cases/"+c.ID+"/analyze", nil, &analyzeRes)
+	rec := doJSON(t, mux, "POST", "/api/cases/"+c.ID+"/analyze", nil, &analyzeRes)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("analyze: status %d", rec.Code)
 	}
@@ -399,32 +442,33 @@ func TestUploadFlow_UnsupportedFilesOnly(t *testing.T) {
 		"readme.txt":      "just some notes",
 		"random/data.bin": "\x00\x01\x02",
 	})
-	var res UploadResultSummary
+	var disc DiscoverResult
 	rec := uploadZip(t, mux, c.ID, zipData)
 	if rec.Code != http.StatusOK {
-		t.Fatalf("upload of unsupported-only files must still succeed: status %d, body %s", rec.Code, rec.Body.String())
+		t.Fatalf("discovering unsupported-only files must still succeed: status %d, body %s", rec.Code, rec.Body.String())
 	}
-	mustDecode(t, rec, &res)
+	mustDecode(t, rec, &disc)
 
-	if res.EventCount != 0 {
-		t.Errorf("EventCount = %d, want 0 (no supported artifacts present)", res.EventCount)
+	if disc.SupportedCount != 0 {
+		t.Errorf("SupportedCount = %d, want 0 (no supported artifacts present)", disc.SupportedCount)
 	}
-	if len(res.SourceFiles) != 0 {
-		t.Errorf("got %d source files, want 0", len(res.SourceFiles))
+	if disc.UnsupportedCount != 2 {
+		t.Errorf("got %d unsupported files, want 2", disc.UnsupportedCount)
 	}
-	if len(res.Skipped) != 2 {
-		t.Errorf("got %d skipped files, want 2, skipped=%v", len(res.Skipped), res.Skipped)
+	if len(disc.SourceFiles) != 2 {
+		t.Errorf("got %d cataloged files, want 2 (both unsupported, but still cataloged)", len(disc.SourceFiles))
 	}
 
-	// Ingestion succeeding (even with nothing to analyze) still advances
-	// case status -- an investigator should be able to see "0 supported
-	// artifacts found" rather than an ingest failure.
+	// Discovery alone never advances case status -- nothing became
+	// evidence (there was nothing importable to select), so there is
+	// nothing yet that would make a prior analysis stale. The case stays
+	// "created" until something is actually imported.
 	var caseDetail struct {
 		Case model.Case `json:"case"`
 	}
 	doJSON(t, mux, "GET", "/api/cases/"+c.ID, nil, &caseDetail)
-	if caseDetail.Case.Status != model.CaseStatusIngested {
-		t.Errorf("case status = %q, want %q", caseDetail.Case.Status, model.CaseStatusIngested)
+	if caseDetail.Case.Status != model.CaseStatusCreated {
+		t.Errorf("case status = %q, want %q (nothing was ever imported)", caseDetail.Case.Status, model.CaseStatusCreated)
 	}
 }
 
@@ -441,21 +485,26 @@ func TestUploadFlow_MixedSupportedAndUnsupported(t *testing.T) {
 		"KapeTriage/Modules/somejunk.dat":     "binary junk",
 	})
 
-	var res UploadResultSummary
+	var disc DiscoverResult
 	rec := uploadZip(t, mux, c.ID, zipData)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("upload: status %d, body %s", rec.Code, rec.Body.String())
 	}
-	mustDecode(t, rec, &res)
+	mustDecode(t, rec, &disc)
 
-	if len(res.SourceFiles) != 1 {
-		t.Fatalf("got %d source files, want 1 (only the EvtxECmd CSV is a supported artifact)", len(res.SourceFiles))
+	if disc.SupportedCount != 1 {
+		t.Fatalf("got %d supported files, want 1 (only the EvtxECmd CSV is a supported artifact)", disc.SupportedCount)
 	}
+	if disc.UnsupportedCount != 2 {
+		t.Errorf("got %d unsupported files, want 2 (readme.txt, somejunk.dat)", disc.UnsupportedCount)
+	}
+
+	_, res := importAll(t, mux, c.ID, disc)
 	if res.EventCount == 0 {
 		t.Error("expected at least one parsed event from the supported artifact")
 	}
-	if len(res.Skipped) != 2 {
-		t.Errorf("got %d skipped files, want 2 (readme.txt, somejunk.dat), skipped=%v", len(res.Skipped), res.Skipped)
+	if len(res.Imported) != 1 {
+		t.Errorf("got %d imported files, want 1", len(res.Imported))
 	}
 }
 
@@ -473,7 +522,7 @@ func TestUploadFlow_SecondUploadAddsSecondCollection(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("first upload: status %d, body %s", rec.Code, rec.Body.String())
 	}
-	var res1 UploadResultSummary
+	var res1 DiscoverResult
 	mustDecode(t, rec, &res1)
 
 	zip2 := buildZipBytes(t, map[string]string{"b_EvtxECmd_Output.csv": "TimeCreated,EventId\n"})
@@ -481,7 +530,7 @@ func TestUploadFlow_SecondUploadAddsSecondCollection(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("second upload: status = %d, want %d (adding a second collection must succeed), body: %s", rec.Code, http.StatusOK, rec.Body.String())
 	}
-	var res2 UploadResultSummary
+	var res2 DiscoverResult
 	mustDecode(t, rec, &res2)
 
 	if res1.Collection.ID == res2.Collection.ID {

@@ -1,0 +1,2 @@
+TimeCreated,EventId,Provider,Channel,ComputerName,UserName,RemoteHost,MapDescription,PayloadData1,PayloadData2,PayloadData3,PayloadData4,PayloadData5,PayloadData6,RecordNumber
+2026-02-04T09:12:00.0000000Z,7045,Service Control Manager,System,WKSTN-SIM-E,,-,Service Installed,"ServiceName: WinNetHelperSvc; ImagePath: C:\Users\Public\svchelper.exe; StartType: auto start; ServiceType: user mode service; AccountName: LocalSystem",,,,,,1

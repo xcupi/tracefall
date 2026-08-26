@@ -14,7 +14,11 @@ defined, documented heuristic with a named time window. If a step in a
 narrative isn't backed by an actual event, it's simply absent from the
 correlation — never filled in with an assumption.
 
-## The four correlation types
+## The six correlation types
+
+Types `process_chain`, `entity`, `temporal`, and `activity_chain` are from
+Phase 1. `credential_chain` and `service_chain` were added in Phase 4 —
+see that section below.
 
 ### `process_chain`
 
@@ -83,6 +87,52 @@ is, which in practice is the logon or the Office execution.
 See `internal/correlate/activity_chain.go`'s `latestBefore`,
 `findProcessCreate`, `findChild`, `findPersistence`, and `findNetwork`
 helpers for the exact matching logic behind each step.
+
+**Phase 4 broadened this chain in two ways, both backward compatible with
+the Phase 1 narrative:** the pivot step now accepts any recognized script
+host (`cmd.exe`, `wscript.exe`, `cscript.exe`, `mshta.exe`), not just
+PowerShell — matching detection rule 8's
+`office-spawns-script-interpreter` — and the persistence step now also
+matches a `registry_persistence` or `service_install` event, not just a
+Run key or scheduled task. `stepLabel` (the per-node text used both here
+and by the dashboard's Activity Chain diagram) has corresponding new
+cases for `logon_failure`, `logon_explicit_credentials`, `service_install`,
+`file_create`, and `dns_query`.
+
+## Phase 4 additions
+
+### `credential_chain`
+
+Built by `internal/correlate/credential_chain.go`'s
+`BuildCredentialChains`, covering two evidence-backed credential
+narratives:
+
+- **Brute force**: the same failed-logon-burst-then-success pattern
+  detection rule 6 (`brute-force-then-success`) fires on, reported here as
+  a correlation too so it's visible in the case's correlation list/graph,
+  not only as a finding. The windowing constants are intentionally
+  duplicated locally (not imported from `internal/detect`) — see this
+  package's doc comment on why correlation stays independent of
+  detection.
+- **Credential abuse**: an `logon_explicit_credentials` (4648) event,
+  followed by the earliest `process_create` run *as the target account*
+  (`Extra["target_user_name"]`) within 2 hours, followed by that
+  process's child process (if any) and then whatever persistence or
+  network activity followed. Only reported as a chain with 3+ evidenced
+  steps — bare 4648 activity with no follow-on stays a standalone
+  low-confidence finding (rule 12), never inflated into a chain.
+
+### `service_chain`
+
+Built by `internal/correlate/service_chain.go`'s `BuildServiceChains`: a
+`service_install` event (System 7045), linked to the service's own
+`process_create` event actually starting (same host, same executable
+name, within the same 2-hour window `activityLookWindow` uses), linked
+onward to any `network_connection` that process made. A service that was
+installed but never observed starting produces no chain — only the
+standalone `service-persistence` finding (rule 10) — since a 2-step chain
+of "installed, then nothing else observed" isn't a narrative worth
+surfacing as a correlation.
 
 ## Adding a new correlation heuristic
 

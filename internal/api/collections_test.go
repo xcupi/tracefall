@@ -96,20 +96,15 @@ func TestMultiCollection_EndToEnd(t *testing.T) {
 	mux := newTestRouter(t)
 	c := createTestCase(t, mux, "Cross-collection case")
 
-	// -- Upload collection #1 --
-	rec := uploadZip(t, mux, c.ID, buildExecutionCollectionZip(t))
-	if rec.Code != http.StatusOK {
-		t.Fatalf("upload collection #1: status %d, body %s", rec.Code, rec.Body.String())
-	}
-	var res1 UploadResultSummary
-	mustDecode(t, rec, &res1)
+	// -- Upload + import collection #1 --
+	_, res1 := uploadAndImportAll(t, mux, c.ID, buildExecutionCollectionZip(t))
 	if res1.EventCount != 5 {
 		t.Fatalf("collection #1 parsed %d events, want 5", res1.EventCount)
 	}
 
 	// -- Analyze after just collection #1 --
 	var analyze1 AnalyzeResultSummary
-	rec = doJSON(t, mux, "POST", "/api/cases/"+c.ID+"/analyze", nil, &analyze1)
+	rec := doJSON(t, mux, "POST", "/api/cases/"+c.ID+"/analyze", nil, &analyze1)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("analyze #1: status %d, body %s", rec.Code, rec.Body.String())
 	}
@@ -119,13 +114,8 @@ func TestMultiCollection_EndToEnd(t *testing.T) {
 		}
 	}
 
-	// -- Upload collection #2 --
-	rec = uploadZip(t, mux, c.ID, buildPersistenceCollectionZip(t))
-	if rec.Code != http.StatusOK {
-		t.Fatalf("upload collection #2: status %d, body %s", rec.Code, rec.Body.String())
-	}
-	var res2 UploadResultSummary
-	mustDecode(t, rec, &res2)
+	// -- Upload + import collection #2 --
+	_, res2 := uploadAndImportAll(t, mux, c.ID, buildPersistenceCollectionZip(t))
 	if res2.EventCount != 2 {
 		t.Fatalf("collection #2 parsed %d events, want 2 (registry key + scheduled task)", res2.EventCount)
 	}
@@ -278,22 +268,12 @@ func TestMultiCollection_SameEventObservedTwice(t *testing.T) {
 	zip1 := buildZipBytes(t, map[string]string{"EvtxECmd/a_EvtxECmd_Output.csv": csv1})
 	zip2 := buildZipBytes(t, map[string]string{"EvtxECmd/b_EvtxECmd_Output.csv": csv2})
 
-	rec := uploadZip(t, mux, c.ID, zip1)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("first upload: status %d, body %s", rec.Code, rec.Body.String())
-	}
-	var res1 UploadResultSummary
-	mustDecode(t, rec, &res1)
+	_, res1 := uploadAndImportAll(t, mux, c.ID, zip1)
 	if res1.NewEventCount != 2 {
 		t.Fatalf("first upload NewEventCount = %d, want 2 (jdoe + alice)", res1.NewEventCount)
 	}
 
-	rec = uploadZip(t, mux, c.ID, zip2)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("second upload: status %d, body %s (a genuinely different archive must not be rejected as a duplicate collection)", rec.Code, rec.Body.String())
-	}
-	var res2 UploadResultSummary
-	mustDecode(t, rec, &res2)
+	_, res2 := uploadAndImportAll(t, mux, c.ID, zip2)
 	if res2.NewEventCount != 1 {
 		t.Errorf("second upload NewEventCount = %d, want 1 (only bob is new)", res2.NewEventCount)
 	}
@@ -324,7 +304,7 @@ func TestMultiCollection_SameEventObservedTwice(t *testing.T) {
 
 	// Provenance must show the shared event as observed in both collections.
 	var prov EventProvenance
-	rec = doJSON(t, mux, "GET", "/api/cases/"+c.ID+"/events/"+sharedEventID, nil, &prov)
+	rec := doJSON(t, mux, "GET", "/api/cases/"+c.ID+"/events/"+sharedEventID, nil, &prov)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("get event provenance: status %d", rec.Code)
 	}

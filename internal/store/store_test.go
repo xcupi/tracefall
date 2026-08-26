@@ -2,7 +2,9 @@ package store
 
 import (
 	"database/sql"
+	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -37,8 +39,9 @@ func seedCaseAndSourceFile(t *testing.T, s *Store) {
 		t.Fatalf("seeding collection: %v", err)
 	}
 	if err := s.SaveSourceFiles([]model.SourceFile{{
-		ID: "sf-1", CaseID: "case-1", CollectionID: "collection-1", Path: "seed.csv", ArtifactType: model.ArtifactWindowsEventLog,
-		Parser: "evtxcsv@1", RowCount: 1, SHA256: "deadbeef", IngestedAt: now,
+		ID: "sf-1", CaseID: "case-1", CollectionID: "collection-1", OriginalFilename: "seed.csv", Path: "seed.csv",
+		ArtifactType: model.ArtifactWindowsEventLog, Parser: "evtxcsv@1", Supported: true, EventCount: 1,
+		SHA256: "deadbeef", ImportStatus: model.SourceFileImported, DiscoveredAt: now, ImportedAt: &now,
 	}}); err != nil {
 		t.Fatalf("seeding source file: %v", err)
 	}
@@ -74,6 +77,99 @@ func TestCaseRoundTrip(t *testing.T) {
 	}
 	if len(list) != 1 {
 		t.Errorf("got %d cases, want 1", len(list))
+	}
+}
+
+// TestCreateCase_DuplicateName covers idx_cases_name_unique directly at
+// the store level: a second case whose name only differs by whitespace
+// and casing from an existing one must be rejected with ErrDuplicateCase
+// (the internal/api layer builds its 409 response on top of this), and
+// FindCaseByName must resolve back to the original case regardless of
+// how the lookup name is trimmed/cased.
+func TestCreateCase_DuplicateName(t *testing.T) {
+	s := openTest(t)
+	now := time.Now().UTC()
+	if err := s.CreateCase(model.Case{ID: "case-1", Name: "WKSTN-042 Phishing Triage", Status: model.CaseStatusCreated, CreatedAt: now, UpdatedAt: now}); err != nil {
+		t.Fatalf("creating first case: %v", err)
+	}
+
+	err := s.CreateCase(model.Case{ID: "case-2", Name: "  wkstn-042 phishing triage  ", Status: model.CaseStatusCreated, CreatedAt: now, UpdatedAt: now})
+	if !errors.Is(err, ErrDuplicateCase) {
+		t.Fatalf("got err = %v, want ErrDuplicateCase", err)
+	}
+
+	list, err := s.ListCases()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != 1 {
+		t.Fatalf("case count after rejected duplicate = %d, want 1", len(list))
+	}
+
+	existing, found, err := s.FindCaseByName(" WKSTN-042 PHISHING TRIAGE ")
+	if err != nil {
+		t.Fatalf("FindCaseByName: %v", err)
+	}
+	if !found || existing.ID != "case-1" {
+		t.Fatalf("FindCaseByName = %+v, found=%v, want case-1", existing, found)
+	}
+}
+
+// TestMigrate_DuplicateCaseNamesBlockStartup covers the migration safety
+// requirement directly: a database that already contains two cases whose
+// names collide once trimmed/case-folded (exactly what a real
+// installation could have accumulated before this constraint existed)
+// must not be silently fixed by deleting or merging either case. Open()
+// must fail with an error that clearly identifies the problem, and both
+// original case rows must remain completely untouched.
+func TestMigrate_DuplicateCaseNamesBlockStartup(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "dupe-case-names.db")
+
+	raw, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec(schema); err != nil {
+		t.Fatalf("applying schema: %v", err)
+	}
+	// Explicit column list (not positional VALUES) so this seed stays
+	// correct regardless of how many Phase 6+ columns the current schema
+	// adds to cases with a DEFAULT -- this test cares only about name
+	// collision, not the full column set.
+	_, err = raw.Exec(`
+		INSERT INTO cases (id, name, description, status, created_at, updated_at) VALUES ('case-a', 'WKSTN-042 Phishing Triage', '', 'created', '2026-01-01T00:00:00.000000000Z', '2026-01-01T00:00:00.000000000Z');
+		INSERT INTO cases (id, name, description, status, created_at, updated_at) VALUES ('case-b', '  wkstn-042 phishing triage  ', '', 'created', '2026-01-02T00:00:00.000000000Z', '2026-01-02T00:00:00.000000000Z');
+	`)
+	if err != nil {
+		t.Fatalf("seeding duplicate-named legacy cases: %v", err)
+	}
+	raw.Close()
+
+	if _, err := Open(path); err == nil {
+		t.Fatal("Open on a database with duplicate case names must fail, not silently proceed")
+	} else {
+		msg := err.Error()
+		for _, want := range []string{"case-a", "case-b", "duplicate"} {
+			if !strings.Contains(msg, want) {
+				t.Errorf("error message %q does not mention %q -- must clearly identify the problem", msg, want)
+			}
+		}
+	}
+
+	// Nothing was deleted or merged: both original rows are still there,
+	// untouched -- Open() itself failed, so query through a raw
+	// connection instead of a *Store.
+	raw2, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw2.Close()
+	var count int
+	if err := raw2.QueryRow(`SELECT COUNT(*) FROM cases`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 2 {
+		t.Errorf("case count after failed migration = %d, want 2 (both cases must remain, untouched)", count)
 	}
 }
 
@@ -201,8 +297,9 @@ func TestEventObservations_RetainProvenanceAcrossCollections(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := s.SaveSourceFiles([]model.SourceFile{{
-		ID: "sf-2", CaseID: "case-1", CollectionID: "collection-2", Path: "seed2.csv", ArtifactType: model.ArtifactWindowsEventLog,
-		Parser: "evtxcsv@1", RowCount: 1, SHA256: "beefdead", IngestedAt: now,
+		ID: "sf-2", CaseID: "case-1", CollectionID: "collection-2", OriginalFilename: "seed2.csv", Path: "seed2.csv",
+		ArtifactType: model.ArtifactWindowsEventLog, Parser: "evtxcsv@1", Supported: true, EventCount: 1,
+		SHA256: "beefdead", ImportStatus: model.SourceFileImported, DiscoveredAt: now, ImportedAt: &now,
 	}}); err != nil {
 		t.Fatal(err)
 	}
@@ -348,6 +445,31 @@ func TestMigrate_LegacyDatabase(t *testing.T) {
 	}
 	if len(sources) != 1 || sources[0].CollectionID != collections[0].ID {
 		t.Fatalf("source file not backfilled with the legacy collection ID: %+v", sources)
+	}
+
+	// The evidence file model (discover -> select -> import, added after
+	// collections/dedup already existed) must also backfill correctly on
+	// this same legacy row: a pre-existing source_files row predates
+	// import_status entirely, so it must be treated as already fully
+	// imported under the old one-shot model, not as merely "discovered".
+	legacySF := sources[0]
+	if legacySF.ImportStatus != model.SourceFileImported {
+		t.Errorf("legacy source file import_status = %q, want %q", legacySF.ImportStatus, model.SourceFileImported)
+	}
+	if !legacySF.Supported {
+		t.Error("legacy source file not backfilled as supported")
+	}
+	if legacySF.EventCount != 1 {
+		t.Errorf("legacy source file event_count = %d, want 1 (from the old row_count column)", legacySF.EventCount)
+	}
+	if legacySF.OriginalFilename != "old.csv" {
+		t.Errorf("legacy source file original_filename = %q, want %q (derived from path)", legacySF.OriginalFilename, "old.csv")
+	}
+	if legacySF.DiscoveredAt.IsZero() || legacySF.ImportedAt == nil {
+		t.Errorf("legacy source file discovered_at/imported_at not backfilled: %+v", legacySF)
+	}
+	if legacySF.DeletedAt != nil {
+		t.Error("legacy source file should not be marked deleted")
 	}
 
 	ev, err := s.GetEvent("legacy-ev")

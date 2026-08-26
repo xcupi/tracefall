@@ -42,9 +42,65 @@ over the life of an investigation.
 | Field | Type | Notes |
 |---|---|---|
 | `id` | string (UUID) | |
-| `name`, `description` | string | |
+| `name`, `description` | string | `name` is unique across the entire installation — see below |
 | `status` | string | one of `created`, `ingested`, `analyzed` — see the case lifecycle state machine in [ARCHITECTURE.md](../ARCHITECTURE.md#api). Adding a new Collection to an `analyzed` case moves it back to `ingested`, signaling that analysis is stale. |
 | `created_at`, `updated_at` | time (UTC) | |
+
+### Case name uniqueness
+
+Case names are unique across the whole Tracefall installation, not just
+within some scope — enforced at the database level by
+`idx_cases_name_unique`, a unique index on `LOWER(TRIM(name))`
+(`internal/store/migrate.go`'s `enforceCaseNameUniqueness`, not the
+static schema — see below). `internal/api.Service.CreateCase` also
+trims the name before storing it, so what's persisted and displayed
+never carries leading/trailing whitespace either.
+
+Normalization decisions, and why:
+
+- **Leading/trailing whitespace** is trimmed before storing and before
+  comparing — `"WKSTN-042 Phishing Triage"` and
+  `"  WKSTN-042 Phishing Triage  "` are the same case. Whitespace
+  differences carry no investigative meaning and are almost always a
+  copy-paste accident, not an intentional distinction.
+- **Case differences are ignored for uniqueness** —
+  `"WKSTN-042 Phishing Triage"` and `"wkstn-042 phishing triage"` are
+  the same case. Case names are human-facing labels investigators read
+  and type, not case-sensitive identifiers, so two entries differing
+  only in capitalization are far more likely to be the same
+  investigation created twice than two deliberately distinct ones.
+  Unlike whitespace, the *stored* name keeps its original casing as
+  typed — only the uniqueness comparison folds case, via `LOWER()` in
+  the index expression and in `Store.FindCaseByName`'s query.
+- **Exact duplicates** (identical after the above normalization) are
+  always rejected — the case this feature exists for.
+
+Duplicate detection is two-layered, the same pattern
+`idx_collections_case_archive_hash` uses for evidence collections: a
+SELECT-based pre-check (`Service.checkDuplicateCase`) avoids a doomed
+`INSERT` in the common case and can identify the existing case by
+name up front, and the unique index is the authoritative, race-safe
+backstop for two concurrent requests that both pass the pre-check
+before either has inserted — `Store.CreateCase` translates that
+constraint violation to `ErrDuplicateCase`, which the API layer
+re-resolves (via `FindCaseByName`) to a `DuplicateCaseError` identifying
+whichever case actually won the race. `POST /cases` returns `409
+Conflict` with a JSON body carrying `duplicate_case_id` and
+`duplicate_case_name` so the dashboard can show "Case already exists"
+without parsing it back out of a sentence.
+
+**Migrating an existing database**: unlike the migrations described
+below, a database that already contains two cases with colliding names
+(from before this constraint existed) has no safe automatic fix —
+deleting or merging either case would destroy investigation data, and
+silently renaming one would be an unrequested, opinionated change to
+case identity that could confuse an investigator relying on that name.
+So `enforceCaseNameUniqueness` checks for existing collisions before
+creating the index, and if any exist, `Open()` (and therefore Tracefall
+itself) refuses to start, returning an error that lists exactly which
+case names collide and their case IDs. An operator resolves this by
+renaming one of the conflicting cases by hand (e.g. directly in the
+database, or via a future rename endpoint) and restarting.
 
 ## `Collection`
 
@@ -63,9 +119,10 @@ scope analysis.
 | `original_filename` | string | the uploaded ZIP's filename, or the given local path |
 | `archive_hash` | string | SHA-256 of the uploaded archive, or a deterministic fingerprint of a local-path source's relative file paths + contents (see below); empty for `legacy` collections that predate this field |
 | `evidence_directory` | string | where this collection's extracted evidence lives on disk — see [docs/deployment.md](deployment.md) for the on-disk layout |
-| `ingestion_status` | string | `pending` (created, not yet finished), `ingested`, or `failed` |
-| `file_count`, `supported_file_count`, `unsupported_file_count` | int | `file_count == supported_file_count + unsupported_file_count` |
-| `parsed_event_count` | int | how many records this collection's supported artifacts parsed to, **including** ones that turned out to be duplicates of an event from another collection |
+| `ingestion_status` | string | `pending` (discovered, nothing imported yet), `ingested` (at least one file imported), or `failed` |
+| `file_count`, `supported_file_count`, `unsupported_file_count` | int | active (non-deleted) files discovered; `file_count == supported_file_count + unsupported_file_count` |
+| `imported_file_count` | int | of the supported files, how many have actually been imported (see "Evidence selection workflow" below) |
+| `parsed_event_count` | int | total events produced by imported files, **including** ones that turned out to be duplicates of an event from another collection |
 
 ### Duplicate evidence collections
 
@@ -96,8 +153,9 @@ future enhancement, not implemented here.
 
 ## `SourceFile`
 
-One evidence file that was ingested as part of one collection, and which
-parser handled it. First link in the provenance chain below `Collection`.
+One individual evidence file *discovered* inside a collection — the
+unit an investigator selects, imports, inspects, and deletes
+independently. First link in the provenance chain below `Collection`.
 Source files are never deduplicated across collections — if the same
 physical file is present in two collections, it's two `SourceFile` rows,
 because "this file was included in this collection" is itself a fact
@@ -108,12 +166,97 @@ out to be new.
 |---|---|---|
 | `id` | string (UUID) | |
 | `case_id`, `collection_id` | string | |
+| `original_filename` | string | basename as it appeared in the package |
 | `path` | string | relative to the collection's evidence root |
-| `artifact_type` | string | one of the `model.Artifact*` constants |
-| `parser` | string | parser name **and version**, e.g. `evtxcsv@1` — bumping a parser's output shape should bump this |
-| `row_count` | int | how many events this file produced |
-| `sha256` | string | hash of the file as ingested, for integrity/chain-of-custody |
-| `ingested_at` | time (UTC) | |
+| `artifact_type` | string | one of the `model.Artifact*` constants; empty if unsupported |
+| `parser` | string | parser name **and version**, e.g. `evtxcsv@1` — bumping a parser's output shape should bump this; empty if unsupported |
+| `supported` | bool | a parser was detected for this file, whether or not it has since been imported |
+| `size_bytes` | int64 | |
+| `sha256` | string | hash of the file's content, for integrity/chain-of-custody and duplicate detection |
+| `import_status` | string | `discovered`, `imported`, `unsupported`, `duplicate`, or `failed` — see "Evidence selection workflow" below |
+| `event_count` | int | how many events this file produced; 0 until imported |
+| `discovered_at` | time (UTC) | when this file was first cataloged |
+| `imported_at` | time (UTC), nullable | when it was actually parsed; unset until imported |
+| `deleted_at` | time (UTC), nullable | soft-delete marker (see "Evidence deletion" below); unset while active |
+
+### Evidence selection workflow
+
+Adding evidence is two explicit steps, not one: **discover**, then
+**import**. `POST /cases/{id}/evidence` (upload) and `POST
+/cases/{id}/ingest` (local path) safely extract/read the package and
+catalog *every* file inside as a `SourceFile` row — supported or not —
+without parsing any of them. Nothing becomes evidence yet: no events
+exist, no finding is possible, until `POST
+/cases/{id}/evidence/{collectionId}/import` is called with the specific
+file IDs an investigator selected from that catalog. Only those files
+are actually parsed (`internal/ingest.ParseFile`), deduplicated exactly
+the way a whole-directory ingest always has (see "Deduplication"
+below), and turned into events.
+
+This is a deliberate choice, not a staging inefficiency: a real KAPE
+package routinely contains far more files than are relevant to a given
+investigation, and parsing happens once, on purpose, for exactly the
+files an investigator chose — not automatically for everything a parser
+merely recognizes.
+
+A file's `import_status` is one of:
+
+- `discovered` — cataloged, supported, selectable for import.
+- `imported` — selected and successfully parsed into events.
+- `unsupported` — no parser recognizes it; cannot be selected.
+- `duplicate` — content (by SHA-256) identical to another file already
+  discovered *in this same collection* (e.g. the same file appearing
+  twice in one package); cannot be selected. Deliberately **not**
+  checked against other collections in the case — the same file
+  legitimately reappears across separate collections all the time (a
+  follow-up KAPE triage re-collecting `Security.csv` hours later), and
+  that's exactly what event-level `DedupHash`/`EventObservation` exists
+  to handle; a file-level check spanning collections would incorrectly
+  block it. A `(collection_id, sha256)` partial unique index enforces
+  this scope race-safely, the same pattern
+  `idx_collections_case_archive_hash` uses one level up.
+- `failed` — selected for import, but its parser returned an error.
+
+### Evidence deletion
+
+Deleting a `SourceFile` (`DELETE /cases/{id}/evidence/{fileId}`, or in
+bulk via `DELETE /cases/{id}/evidence` with `source_file_ids`) is a soft
+delete (`deleted_at` set); it's excluded from every active listing and
+count from then on, and its on-disk copy is removed too — but only for
+evidence Tracefall itself extracted and owns (an uploaded ZIP's
+contents). A local-path collection's evidence directory is wherever the
+investigator's own files already live on disk; Tracefall never deletes
+files it doesn't own.
+
+Deleting a file removes its contribution to the case's events:
+
+1. Each of its `EventObservation` rows (see below) is deleted.
+2. If that was an event's *last* observation, the `Event` row itself is
+   deleted — nothing supports it anymore.
+3. If the event survives via another observation (the same real-world
+   event was also seen through a different file), it's kept, and if its
+   own denormalized provenance fields (see `Event`, below) pointed at
+   the file just deleted, they're re-pointed at a surviving observation
+   so nothing dangles.
+4. The case's status is set to `ingested` (or `created`, if that was the
+   case's last remaining event) — never left at `analyzed` — so the
+   dashboard prompts a re-run rather than continuing to show findings
+   computed from evidence that's now gone. `internal/detect` and
+   `internal/correlate` need no special-casing for deletion at all: they
+   always recompute from the case's complete *current* event list, the
+   same way they already do when evidence is added, so the next
+   `POST /analyze` naturally drops findings/correlations no longer
+   supported and keeps ones that are.
+
+Deleting a case (`DELETE /cases/{id}`, or in bulk via `DELETE /cases`
+with `case_ids`) is permanent, not soft: every row anywhere in the
+database belonging to that case (collections, source files, raw
+evidence, events, observations, findings, correlations) is removed in
+one transaction, in dependency order, followed by removing the case's
+entire on-disk directory. It never affects another case, even one that
+happens to hold evidence with an identical archive/source hash (hash
+uniqueness is scoped per case, never global — see "Duplicate evidence
+collections" above).
 
 ## `RawEvidence`
 
@@ -155,6 +298,56 @@ format it came from again.
 | `raw_evidence_id` | string | this event's first observation's raw record |
 | `dedup_hash` | string | see "Deduplication" below |
 | `extra` | `map[string]string` | see "Why `Extra` instead of more columns" below |
+
+### Phase 4 artifact coverage
+
+Phase 4 ("Expand Windows DFIR Triage Coverage") added nine new
+`event_type` values and their supporting parser coverage, prioritizing
+Event IDs/Sysmon events that feed a specific new detection rule or
+correlation over exhaustive coverage (see `docs/detection-engine.md` and
+`docs/correlation-engine.md`):
+
+| `event_type` | Source | Feeds |
+|---|---|---|
+| `logon_explicit_credentials` | Security 4648 | `explicit-credential-use`, `credential_chain` |
+| `privileged_logon` | Security 4672 | `privileged-logon-observed` |
+| `kerberos_tgt_request` | Security 4768 | timeline/correlation visibility only (no dedicated rule) |
+| `kerberos_service_ticket_request` | Security 4769 | timeline/correlation visibility only |
+| `ntlm_authentication` | Security 4776 | timeline/correlation visibility only |
+| `service_install` | System 7045 (Service Control Manager) | `service-persistence`, `service_chain`, extends `execution-persistence-temporal` |
+| `file_create` | Sysmon Event ID 11 | activity-chain step labeling (observing a payload land on disk) |
+| `registry_persistence` | Sysmon Event ID 12/13 *or* RECmd, classified by `internal/parsers/regpersist` | `registry-persistence-extended`, extends `execution-persistence-temporal` and the activity chain |
+| `dns_query` | Sysmon Event ID 22 | timeline/correlation visibility (`network_dest` carries the queried domain, not an IP, for this type specifically) |
+
+Existing types gained additional sources: `process_create` and
+`network_connection` are now also produced by Sysmon Event ID 1
+(ProcessCreate) and a corrected Event ID 3 (NetworkConnect, which now
+actually populates the typed `network_dest_port` int field — Phase 1's
+code only stashed it as a string in `Extra`, a gap Phase 4 fixed) — so a
+case collected with only Sysmon telemetry (no Security auditing enabled)
+still gets full process/network coverage, not a second-class subset.
+PowerShell 4103 (module logging) is normalized to the same
+`powershell_script_block` type as 4104 (script block logging), so
+`powershell-encoded-command` scans both sources identically;
+`Extra["log_type"]` records which one a given event actually was.
+
+**No new `Event` columns, no database migration.** Every Phase 4 field
+(target user name, service name, integrity level, run level, task path,
+volume info, DNS query name, ...) lives in the existing `Extra
+map[string]string` field, per the "why `Extra` instead of more columns"
+rationale above — Phase 4 is exactly the kind of artifact-specific,
+per-type detail that rationale was written for. `internal/store`'s schema
+was untouched by Phase 4; an existing database upgrades with zero new
+migration steps.
+
+`internal/parsers/regpersist` is a new small shared package (mirroring
+`internal/procclass`'s precedent) that classifies a registry key/value
+path against Tracefall's fixed set of recognized persistence locations
+(Run/RunOnce, Winlogon Shell/Userinit, IFEO Debugger hijacking,
+AppInit_DLLs, a service's `ImagePath`) — used identically by the RECmd
+hive-snapshot parser and the Sysmon real-time registry-event handling in
+`evtxcsv`, so the same real-world key is classified the same way
+regardless of which artifact reported it.
 
 ### Deduplication
 

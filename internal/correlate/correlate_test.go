@@ -114,6 +114,125 @@ func TestBuildActivityChains_PartialEvidenceOnlyIncludesWhatExists(t *testing.T)
 	}
 }
 
+// =====================================================================
+// Phase 4 correlation tests.
+// =====================================================================
+
+func TestBuildActivityChains_ScriptHostPivotBeyondPowerShell(t *testing.T) {
+	// Phase 4: the Office-spawns-interpreter pivot isn't PowerShell-only
+	// -- cmd.exe (and other script hosts) must be accepted too.
+	events := []model.Event{
+		{ID: "logon", Host: "H1", User: "jdoe", EventType: model.EventLogonSuccess, Timestamp: mustTime("2026-01-15T09:00:00Z")},
+		{ID: "office", Host: "H1", User: "jdoe", EventType: model.EventProcessCreate, ProcessName: "winword.exe", ParentProcessName: "explorer.exe", Timestamp: mustTime("2026-01-15T09:14:22Z")},
+		{ID: "cmd", Host: "H1", User: "jdoe", EventType: model.EventProcessCreate, ProcessName: "cmd.exe", ParentProcessName: "winword.exe", Timestamp: mustTime("2026-01-15T09:14:47Z")},
+		{ID: "payload", Host: "H1", User: "jdoe", EventType: model.EventProcessCreate, ProcessName: "update.exe", ParentProcessName: "cmd.exe", Timestamp: mustTime("2026-01-15T09:15:10Z")},
+	}
+	chains := BuildActivityChains("case-1", events)
+	if len(chains) != 1 {
+		t.Fatalf("got %d activity chains, want 1 (cmd.exe pivot must be recognized like powershell.exe)", len(chains))
+	}
+}
+
+func TestBuildActivityChains_ServiceInstallAsPersistenceStep(t *testing.T) {
+	events := []model.Event{
+		{ID: "logon", Host: "H1", User: "jdoe", EventType: model.EventLogonSuccess, Timestamp: mustTime("2026-01-15T09:00:00Z")},
+		{ID: "office", Host: "H1", User: "jdoe", EventType: model.EventProcessCreate, ProcessName: "winword.exe", ParentProcessName: "explorer.exe", Timestamp: mustTime("2026-01-15T09:14:22Z")},
+		{ID: "ps", Host: "H1", User: "jdoe", EventType: model.EventProcessCreate, ProcessName: "powershell.exe", ParentProcessName: "winword.exe", Timestamp: mustTime("2026-01-15T09:14:47Z")},
+		{ID: "payload", Host: "H1", User: "jdoe", EventType: model.EventProcessCreate, ProcessName: "update.exe", ParentProcessName: "powershell.exe", Timestamp: mustTime("2026-01-15T09:15:10Z")},
+		{ID: "svcinstall", Host: "H1", User: "jdoe", EventType: model.EventServiceInstall, ProcessName: "update.exe", Timestamp: mustTime("2026-01-15T09:16:02Z")},
+	}
+	chains := BuildActivityChains("case-1", events)
+	if len(chains) != 1 {
+		t.Fatalf("got %d activity chains, want 1", len(chains))
+	}
+	found := false
+	for _, id := range chains[0].EventIDs {
+		if id == "svcinstall" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("chain event IDs %v do not include the service-install persistence step", chains[0].EventIDs)
+	}
+}
+
+func TestBuildCredentialChains_BruteForce(t *testing.T) {
+	base := mustTime("2026-01-15T14:00:00Z")
+	events := []model.Event{
+		{ID: "1", Host: "H1", User: "svc", EventType: model.EventLogonFailure, Timestamp: base},
+		{ID: "2", Host: "H1", User: "svc", EventType: model.EventLogonFailure, Timestamp: base.Add(1 * time.Minute)},
+		{ID: "3", Host: "H1", User: "svc", EventType: model.EventLogonFailure, Timestamp: base.Add(2 * time.Minute)},
+		{ID: "4", Host: "H1", User: "svc", EventType: model.EventLogonSuccess, Timestamp: base.Add(3 * time.Minute)},
+	}
+	chains := BuildCredentialChains("case-1", events)
+	if len(chains) != 1 {
+		t.Fatalf("got %d credential chains, want 1", len(chains))
+	}
+	if chains[0].Type != model.CorrelationCredentialChain {
+		t.Errorf("correlation_type = %q, want %q", chains[0].Type, model.CorrelationCredentialChain)
+	}
+	if len(chains[0].EventIDs) != 4 {
+		t.Errorf("got %d events in chain, want 4 (3 failures + success)", len(chains[0].EventIDs))
+	}
+
+	// Below threshold: no chain.
+	if got := BuildCredentialChains("case-1", events[:2]); len(got) != 0 {
+		t.Errorf("got %d chains for below-threshold failures, want 0", len(got))
+	}
+}
+
+func TestBuildCredentialChains_CredentialAbuse(t *testing.T) {
+	base := mustTime("2026-01-15T09:20:00Z")
+	events := []model.Event{
+		{ID: "explicit", Host: "H1", User: "jdoe", EventType: model.EventLogonExplicitCreds, Extra: map[string]string{"target_user_name": "svc-backup"}, Timestamp: base},
+		{ID: "proc", Host: "H1", User: "svc-backup", EventType: model.EventProcessCreate, ProcessName: "backup-agent.exe", Timestamp: base.Add(1 * time.Minute)},
+		{ID: "net", Host: "H1", User: "svc-backup", EventType: model.EventNetworkConnection, ProcessName: "backup-agent.exe", NetworkDest: "10.0.0.9", Timestamp: base.Add(2 * time.Minute)},
+	}
+	chains := BuildCredentialChains("case-1", events)
+	if len(chains) != 1 {
+		t.Fatalf("got %d credential-abuse chains, want 1: %+v", len(chains), chains)
+	}
+	if len(chains[0].EventIDs) != 3 {
+		t.Errorf("got %d steps, want 3 (explicit creds -> process -> network)", len(chains[0].EventIDs))
+	}
+
+	// Explicit creds with no follow-on activity by that account: no chain
+	// (the bare 4648 observation is still reported by detect's
+	// explicitCredentialUse rule, just not as a correlation chain).
+	bare := []model.Event{events[0]}
+	if got := BuildCredentialChains("case-1", bare); len(got) != 0 {
+		t.Errorf("got %d chains for explicit creds alone with no follow-on activity, want 0", len(got))
+	}
+}
+
+func TestBuildServiceChains(t *testing.T) {
+	base := mustTime("2026-01-15T09:22:00Z")
+	events := []model.Event{
+		{ID: "install", Host: "H1", EventType: model.EventServiceInstall, ProcessName: "weirdsvc.exe", Extra: map[string]string{"service_name": "WeirdSvc"}, Timestamp: base},
+		{ID: "start", Host: "H1", EventType: model.EventProcessCreate, ProcessName: "weirdsvc.exe", Timestamp: base.Add(5 * time.Second)},
+		{ID: "net", Host: "H1", EventType: model.EventNetworkConnection, ProcessName: "weirdsvc.exe", NetworkDest: "203.0.113.99", Timestamp: base.Add(10 * time.Second)},
+	}
+	chains := BuildServiceChains("case-1", events)
+	if len(chains) != 1 {
+		t.Fatalf("got %d service chains, want 1", len(chains))
+	}
+	if chains[0].Type != model.CorrelationServiceChain {
+		t.Errorf("correlation_type = %q, want %q", chains[0].Type, model.CorrelationServiceChain)
+	}
+	if len(chains[0].EventIDs) != 3 {
+		t.Errorf("got %d steps, want 3 (install -> start -> network)", len(chains[0].EventIDs))
+	}
+
+	// A service that never actually starts (no matching process-create):
+	// no chain -- must not be fabricated.
+	neverStarted := []model.Event{
+		{ID: "install2", Host: "H1", EventType: model.EventServiceInstall, ProcessName: "neverruns.exe", Timestamp: base},
+	}
+	if got := BuildServiceChains("case-1", neverStarted); len(got) != 0 {
+		t.Errorf("got %d chains for a service install with no corresponding process-create, want 0", len(got))
+	}
+}
+
 func TestRun_AssignsIDsAndIsDeterministic(t *testing.T) {
 	events := []model.Event{
 		{ID: "1", Host: "H1", EventType: model.EventProcessCreate, ProcessName: "explorer.exe", Timestamp: mustTime("2026-01-15T09:00:00Z")},
@@ -129,6 +248,30 @@ func TestRun_AssignsIDsAndIsDeterministic(t *testing.T) {
 		}
 		if c.CaseID != "case-1" {
 			t.Errorf("CaseID = %q, want case-1", c.CaseID)
+		}
+	}
+}
+
+// TestRun_CorrelationIDsAreStableAcrossReanalysis is a Phase 6 regression
+// test, the correlate-package counterpart of detect's identical test:
+// Correlation.ID must be byte-identical across two separate Run() calls
+// on unchanged evidence.
+func TestRun_CorrelationIDsAreStableAcrossReanalysis(t *testing.T) {
+	events := []model.Event{
+		{ID: "1", Host: "H1", EventType: model.EventProcessCreate, ProcessName: "explorer.exe", Timestamp: mustTime("2026-01-15T09:00:00Z")},
+		{ID: "2", Host: "H1", EventType: model.EventProcessCreate, ProcessName: "winword.exe", ParentProcessName: "explorer.exe", Timestamp: mustTime("2026-01-15T09:14:22Z")},
+	}
+	out1 := Run("case-1", events)
+	out2 := Run("case-1", events)
+	if len(out1) == 0 {
+		t.Fatal("expected at least one correlation")
+	}
+	if len(out1) != len(out2) {
+		t.Fatalf("non-deterministic correlation count across runs: %d vs %d", len(out1), len(out2))
+	}
+	for i := range out1 {
+		if out1[i].ID != out2[i].ID {
+			t.Errorf("correlation %d: ID differs across runs on unchanged evidence: %q vs %q (type %s)", i, out1[i].ID, out2[i].ID, out1[i].Type)
 		}
 	}
 }

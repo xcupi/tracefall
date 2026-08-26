@@ -20,25 +20,48 @@ import (
 // internal/model.Collection), which reused two of Phase 1.5's paths for
 // a different purpose:
 //
-//   - GET  /cases/{id}/evidence               now lists collections (was: source files -- moved to /sources)
-//   - GET  /cases/{id}/evidence/{collectionId} now shows one collection (was: one event's provenance -- moved to /events/{eventID})
-//   - POST /cases/{id}/evidence                replaces the old POST .../upload
+//   - GET  /cases/{id}/evidence               lists collections (was: source files -- moved to /sources)
+//   - GET  /cases/{id}/evidence/{collectionId} shows one collection, including files merely
+//     discovered as well as imported (was: one event's provenance -- moved to /events/{eventID})
 //
-// This is a deliberate, documented rename (see docs/data-model.md), not
-// an oversight -- "evidence" now primarily means "evidence collections"
-// from the UI and API's perspective, matching how investigators think
-// about a case built from more than one KAPE triage.
-func NewRouter(svc *Service, logger *slog.Logger, maxUploadBytes int64) *http.ServeMux {
-	h := &handlers{svc: svc, log: logger, maxUploadBytes: maxUploadBytes}
+// Adding evidence is discover-then-import, not one step (see
+// docs/data-model.md's "Evidence selection workflow" section):
+//
+//   - POST   /cases/{id}/evidence                            discover: upload a ZIP, catalog every file inside it
+//   - POST   /cases/{id}/ingest                               discover: catalog every file under a local path
+//   - POST   /cases/{id}/evidence/{collectionId}/import       import: parse exactly the selected file IDs
+//   - DELETE /cases/{id}/evidence/{sourceFileId}              delete one evidence file
+//   - DELETE /cases/{id}/evidence                              bulk-delete evidence files (body: source_file_ids)
+//   - DELETE /cases/{id}                                       delete a case and everything in it
+//   - DELETE /cases                                            bulk-delete cases (body: case_ids)
+//
+// This is a deliberate, documented rename/extension (see
+// docs/data-model.md), not an oversight -- "evidence" primarily means
+// "evidence collections and the files inside them" from the UI and API's
+// perspective, matching how investigators think about a case built from
+// more than one KAPE triage, each contributing more than one artifact.
+// lanExposed tells healthz whether the server is bound to a non-loopback
+// host (see cmd/tracefall/main.go's cfg.IsLoopbackHost()) -- surfaced to
+// the dashboard so an analyst actually looking at the web UI sees the
+// "no authentication, don't expose this beyond a trusted LAN" warning
+// too, not just whoever reads the process's startup log.
+func NewRouter(svc *Service, logger *slog.Logger, maxUploadBytes int64, lanExposed bool) *http.ServeMux {
+	h := &handlers{svc: svc, log: logger, maxUploadBytes: maxUploadBytes, lanExposed: lanExposed}
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("POST /api/cases", h.createCase)
 	mux.HandleFunc("GET /api/cases", h.listCases)
+	mux.HandleFunc("DELETE /api/cases", h.deleteCases)
 	mux.HandleFunc("GET /api/cases/{id}", h.getCase)
-	mux.HandleFunc("POST /api/cases/{id}/ingest", h.ingestCase)
-	mux.HandleFunc("POST /api/cases/{id}/evidence", h.addEvidenceUpload)
+	mux.HandleFunc("PATCH /api/cases/{id}", h.updateCaseMetadata)
+	mux.HandleFunc("DELETE /api/cases/{id}", h.deleteCase)
+	mux.HandleFunc("POST /api/cases/{id}/ingest", h.discoverEvidencePath)
+	mux.HandleFunc("POST /api/cases/{id}/evidence", h.discoverEvidenceUpload)
 	mux.HandleFunc("GET /api/cases/{id}/evidence", h.listCollections)
+	mux.HandleFunc("DELETE /api/cases/{id}/evidence", h.deleteSourceFiles)
+	mux.HandleFunc("POST /api/cases/{id}/evidence/{collectionID}/import", h.importEvidence)
 	mux.HandleFunc("GET /api/cases/{id}/evidence/{collectionID}", h.collectionDetail)
+	mux.HandleFunc("DELETE /api/cases/{id}/evidence/{sourceFileID}", h.deleteSourceFile)
 	mux.HandleFunc("GET /api/cases/{id}/sources", h.sources)
 	mux.HandleFunc("GET /api/cases/{id}/events/{eventID}", h.eventProvenance)
 	mux.HandleFunc("POST /api/cases/{id}/analyze", h.analyzeCase)
@@ -47,6 +70,26 @@ func NewRouter(svc *Service, logger *slog.Logger, maxUploadBytes int64) *http.Se
 	mux.HandleFunc("GET /api/cases/{id}/findings/{findingID}", h.findingDetail)
 	mux.HandleFunc("GET /api/cases/{id}/attack", h.attack)
 	mux.HandleFunc("GET /api/cases/{id}/correlations", h.correlations)
+	mux.HandleFunc("GET /api/cases/{id}/investigations", h.investigations)
+	mux.HandleFunc("GET /api/cases/{id}/investigations/{investigationID}", h.investigationDetail)
+	mux.HandleFunc("PATCH /api/cases/{id}/investigations/{investigationID}/status", h.setInvestigationStatus)
+	mux.HandleFunc("GET /api/cases/{id}/investigations/{investigationID}/export", h.exportInvestigation)
+	mux.HandleFunc("PATCH /api/cases/{id}/findings/{findingID}/status", h.setFindingStatus)
+
+	// Phase 6: analyst workflow (notes, tags, audit log, export).
+	mux.HandleFunc("GET /api/cases/{id}/notes", h.listNotes)
+	mux.HandleFunc("POST /api/cases/{id}/notes", h.createNote)
+	mux.HandleFunc("PATCH /api/notes/{noteID}", h.updateNote)
+	mux.HandleFunc("DELETE /api/notes/{noteID}", h.deleteNote)
+	mux.HandleFunc("GET /api/cases/{id}/tags", h.listTags)
+	mux.HandleFunc("POST /api/cases/{id}/tags", h.addTag)
+	mux.HandleFunc("DELETE /api/cases/{id}/tags", h.removeTag)
+	mux.HandleFunc("GET /api/cases/{id}/audit", h.auditLog)
+	mux.HandleFunc("GET /api/cases/{id}/analyst-status", h.listAnalystStatus)
+	mux.HandleFunc("GET /api/cases/{id}/export", h.exportCase)
+	mux.HandleFunc("GET /api/cases/{id}/export/timeline.csv", h.exportTimelineCSV)
+	mux.HandleFunc("GET /api/cases/{id}/export/findings.csv", h.exportFindingsCSV)
+
 	mux.HandleFunc("GET /api/healthz", h.healthz)
 
 	return mux
@@ -56,10 +99,11 @@ type handlers struct {
 	svc            *Service
 	log            *slog.Logger
 	maxUploadBytes int64
+	lanExposed     bool
 }
 
 func (h *handlers) healthz(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "lan_exposed": h.lanExposed})
 }
 
 func (h *handlers) createCase(w http.ResponseWriter, r *http.Request) {
@@ -68,10 +112,6 @@ func (h *handlers) createCase(w http.ResponseWriter, r *http.Request) {
 		Description string `json:"description"`
 	}
 	if !decodeJSON(w, r, &req) {
-		return
-	}
-	if req.Name == "" {
-		writeError(w, http.StatusBadRequest, "name is required")
 		return
 	}
 	c, err := h.svc.CreateCase(req.Name, req.Description)
@@ -108,10 +148,42 @@ func (h *handlers) getCase(w http.ResponseWriter, r *http.Request) {
 	}{c, summary})
 }
 
-// ingestCase adds a new evidence collection to a case from a local
-// filesystem directory. Unlike Phase 1.5, this can be called more than
-// once per case -- each call adds another collection.
-func (h *handlers) ingestCase(w http.ResponseWriter, r *http.Request) {
+// deleteCase permanently deletes a case and everything associated with
+// it (see Service.DeleteCase). Confirmation is a UI responsibility --
+// internal/web always asks before calling this, since it's irreversible.
+func (h *handlers) deleteCase(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if err := h.svc.DeleteCase(id); h.fail(w, err) {
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"deleted_case_id": id})
+}
+
+// deleteCases bulk-deletes cases (see Service.DeleteCases), reporting
+// exactly which succeeded and which failed rather than treating the
+// batch as all-or-nothing.
+func (h *handlers) deleteCases(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		CaseIDs []string `json:"case_ids"`
+	}
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if len(req.CaseIDs) == 0 {
+		writeError(w, http.StatusBadRequest, "case_ids is required")
+		return
+	}
+	res := h.svc.DeleteCases(req.CaseIDs)
+	writeJSON(w, http.StatusOK, res)
+}
+
+// discoverEvidencePath catalogs a new evidence collection from a local
+// filesystem directory -- every file under it, classified but not yet
+// parsed (see Service.DiscoverEvidenceFromPath). Can be called more than
+// once per case -- each call adds another collection. Nothing becomes
+// evidence until POST .../evidence/{collectionId}/import selects specific
+// files from the returned catalog.
+func (h *handlers) discoverEvidencePath(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	var req struct {
 		Path string `json:"path"`
@@ -123,20 +195,23 @@ func (h *handlers) ingestCase(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "path is required (a local filesystem directory containing the evidence package)")
 		return
 	}
-	res, err := h.svc.AddEvidenceFromPath(id, req.Path)
+	res, err := h.svc.DiscoverEvidenceFromPath(id, req.Path)
 	if h.fail(w, err) {
 		return
 	}
 	writeJSON(w, http.StatusOK, res)
 }
 
-// addEvidenceUpload accepts a browser-uploaded KAPE package as multipart
-// form-data (field name "file") and adds it to a case as a new evidence
-// collection via Service.AddEvidenceFromUpload. Can be called more than
-// once per case. The request body is capped at h.maxUploadBytes before
-// anything else happens, so an oversized upload is rejected before it's
-// buffered or written to disk.
-func (h *handlers) addEvidenceUpload(w http.ResponseWriter, r *http.Request) {
+// discoverEvidenceUpload accepts a browser-uploaded KAPE package as
+// multipart form-data (field name "file"), safely extracts it, and
+// catalogs every file inside as a new evidence collection -- see
+// Service.DiscoverEvidenceFromUpload. Can be called more than once per
+// case. The request body is capped at h.maxUploadBytes before anything
+// else happens, so an oversized upload is rejected before it's buffered
+// or written to disk. Nothing becomes evidence until POST
+// .../evidence/{collectionId}/import selects specific files from the
+// returned catalog.
+func (h *handlers) discoverEvidenceUpload(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 
 	// A small amount of slack over the configured limit accounts for
@@ -165,7 +240,61 @@ func (h *handlers) addEvidenceUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	defer file.Close()
 
-	res, err := h.svc.AddEvidenceFromUpload(id, file)
+	res, err := h.svc.DiscoverEvidenceFromUpload(id, file)
+	if h.fail(w, err) {
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
+// importEvidence parses exactly the selected source files from a
+// collection's discovery catalog -- see Service.ImportEvidence.
+func (h *handlers) importEvidence(w http.ResponseWriter, r *http.Request) {
+	id, collectionID := r.PathValue("id"), r.PathValue("collectionID")
+	var req struct {
+		SourceFileIDs []string `json:"source_file_ids"`
+	}
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if len(req.SourceFileIDs) == 0 {
+		writeError(w, http.StatusBadRequest, "source_file_ids is required (the discovered files to import)")
+		return
+	}
+	res, err := h.svc.ImportEvidence(id, collectionID, req.SourceFileIDs)
+	if h.fail(w, err) {
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
+// deleteSourceFile removes exactly one evidence file (see
+// Service.DeleteSourceFile). Confirmation is a UI responsibility --
+// internal/web always asks before calling this.
+func (h *handlers) deleteSourceFile(w http.ResponseWriter, r *http.Request) {
+	id, sourceFileID := r.PathValue("id"), r.PathValue("sourceFileID")
+	res, err := h.svc.DeleteSourceFile(id, sourceFileID)
+	if h.fail(w, err) {
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
+// deleteSourceFiles bulk-deletes evidence files (see
+// Service.DeleteSourceFiles).
+func (h *handlers) deleteSourceFiles(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	var req struct {
+		SourceFileIDs []string `json:"source_file_ids"`
+	}
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if len(req.SourceFileIDs) == 0 {
+		writeError(w, http.StatusBadRequest, "source_file_ids is required")
+		return
+	}
+	res, err := h.svc.DeleteSourceFiles(id, req.SourceFileIDs)
 	if h.fail(w, err) {
 		return
 	}
@@ -283,6 +412,27 @@ func (h *handlers) correlations(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, corr)
 }
 
+func (h *handlers) investigations(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	invs, err := h.svc.Investigations(id)
+	if h.fail(w, err) {
+		return
+	}
+	if invs == nil {
+		invs = []model.Investigation{}
+	}
+	writeJSON(w, http.StatusOK, invs)
+}
+
+func (h *handlers) investigationDetail(w http.ResponseWriter, r *http.Request) {
+	id, investigationID := r.PathValue("id"), r.PathValue("investigationID")
+	detail, err := h.svc.Investigation(id, investigationID)
+	if h.fail(w, err) {
+		return
+	}
+	writeJSON(w, http.StatusOK, detail)
+}
+
 // ---------- helpers ----------
 
 // fail writes an appropriate error response for err (if non-nil) and
@@ -292,6 +442,7 @@ func (h *handlers) fail(w http.ResponseWriter, err error) bool {
 		return false
 	}
 	var dupErr *DuplicateEvidenceError
+	var dupCaseErr *DuplicateCaseError
 	switch {
 	case errors.Is(err, ErrCaseNotFound), errors.Is(err, ErrCollectionNotFound):
 		writeError(w, http.StatusNotFound, err.Error())
@@ -304,6 +455,16 @@ func (h *handlers) fail(w http.ResponseWriter, err error) bool {
 			"duplicate_collection_id":    dupErr.CollectionID,
 			"duplicate_collection_label": dupErr.CollectionLabel,
 		})
+	case errors.As(err, &dupCaseErr):
+		// Same pattern as dupErr above: structured so the dashboard can
+		// show "Case already exists" without parsing a sentence.
+		writeJSON(w, http.StatusConflict, map[string]string{
+			"error":               dupCaseErr.Error(),
+			"duplicate_case_id":   dupCaseErr.CaseID,
+			"duplicate_case_name": dupCaseErr.CaseName,
+		})
+	case errors.Is(err, ErrCaseNameRequired):
+		writeError(w, http.StatusBadRequest, err.Error())
 	case errors.Is(err, ErrNotIngested):
 		writeError(w, http.StatusConflict, err.Error())
 	case errors.Is(err, ErrUploadTooLarge), errors.Is(err, archive.ErrLimitExceeded):

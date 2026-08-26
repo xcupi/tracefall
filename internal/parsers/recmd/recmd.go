@@ -18,6 +18,7 @@ import (
 	"tracefall/internal/model"
 	"tracefall/internal/normalize"
 	"tracefall/internal/parsers"
+	"tracefall/internal/parsers/regpersist"
 )
 
 const parserName = "recmd@1"
@@ -79,13 +80,32 @@ func (p Parser) Parse(absPath string) (parsers.ParseResult, error) {
 			fullPath = keyPath + "\\" + valueName
 		}
 
+		// This parser's Detect() (and its RECmd batch definition, in
+		// practice) already scope the input CSV to persistence-relevant
+		// hive locations -- unlike the broader, unscoped Sysmon registry
+		// event stream (see evtxcsv.go's Event ID 12/13 handling), so a
+		// row that regpersist doesn't recognize as one of the specific
+		// known locations (Winlogon/IFEO/AppInit_DLLs/service ImagePath)
+		// still defaults to Run-key semantics rather than being dropped,
+		// preserving Phase 1 behavior for a plain Run-keys batch.
+		eventType := model.EventRegistryRunKey
+		extra := map[string]string{
+			"hive_path":  hivePath,
+			"value_name": valueName,
+			"value_data": valueData,
+		}
+		if kind := regpersist.Classify(keyPath, valueName); kind != regpersist.KindNone && kind != regpersist.KindRunKey {
+			eventType = model.EventRegistryPersistence
+			extra["registry_persistence_type"] = string(kind)
+		}
+
 		ev := model.Event{
 			Timestamp: ts,
 			// hivePath is typically "...\Users\<name>\NTUSER.DAT" for
 			// HKCU hives -- the owning user, when available, isn't
 			// carried anywhere else in RECmd's output.
 			User:            userFromHivePath(hivePath),
-			EventType:       model.EventRegistryRunKey,
+			EventType:       eventType,
 			RegistryPath:    fullPath,
 			FilePath:        valueData,
 			ProcessName:     normalize.ExecutableFromCommandLine(valueData),
@@ -93,11 +113,7 @@ func (p Parser) Parse(absPath string) (parsers.ParseResult, error) {
 			Parser:          parserName,
 			Confidence:      1.0,
 			SourceReference: "row:" + fmt.Sprint(rowNum-1),
-			Extra: map[string]string{
-				"hive_path":  hivePath,
-				"value_name": valueName,
-				"value_data": valueData,
-			},
+			Extra:           extra,
 		}
 
 		rawJSON, _ := json.Marshal(rec)

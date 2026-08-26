@@ -80,3 +80,22 @@ func withinWindow(a, b time.Time, window time.Duration) bool {
 	}
 	return d <= window
 }
+
+// eventKey builds a composite (host, secondary) map key -- see
+// internal/correlate's identical chainKey/indexEvents for the rationale:
+// a rule that finds, for each of N pivot events, the best match among M
+// candidate events by (host, process) is O(N*M) if it scans the full
+// candidate slice per pivot, but O(N+M) if the candidates are indexed by
+// (host, process) first. Every rule's own match conditions are re-checked
+// against whatever slice it's handed, so this can only narrow the
+// candidate set before the scan -- never change which event is picked.
+func eventKey(host, secondary string) string { return host + "\x00" + secondary }
+
+func indexEvents(events []model.Event, keyFn func(model.Event) string) map[string][]model.Event {
+	idx := make(map[string][]model.Event, len(events))
+	for _, e := range events {
+		k := keyFn(e)
+		idx[k] = append(idx[k], e)
+	}
+	return idx
+}

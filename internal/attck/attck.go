@@ -66,6 +66,51 @@ var registry = map[string]Technique{
 		Tactic: "Command and Control",
 		URL:    "https://attack.mitre.org/techniques/T1071/",
 	},
+
+	// Phase 4 additions -- each backed by a specific new detection rule
+	// (internal/detect/rules.go) that only assigns it when its own
+	// deterministic logic actually supports it. See
+	// docs/detection-engine.md.
+	"T1059.003": {
+		ID: "T1059.003", Name: "Command and Scripting Interpreter: Windows Command Shell",
+		Tactic: "Execution",
+		URL:    "https://attack.mitre.org/techniques/T1059/003/",
+	},
+	"T1059.005": {
+		ID: "T1059.005", Name: "Command and Scripting Interpreter: Visual Basic",
+		Tactic: "Execution",
+		URL:    "https://attack.mitre.org/techniques/T1059/005/",
+	},
+	"T1059.007": {
+		ID: "T1059.007", Name: "Command and Scripting Interpreter: JavaScript",
+		Tactic: "Execution",
+		URL:    "https://attack.mitre.org/techniques/T1059/007/",
+	},
+	"T1543.003": {
+		ID: "T1543.003", Name: "Create or Modify System Process: Windows Service",
+		Tactic: "Persistence, Privilege Escalation",
+		URL:    "https://attack.mitre.org/techniques/T1543/003/",
+	},
+	"T1218.005": {
+		ID: "T1218.005", Name: "System Binary Proxy Execution: Mshta",
+		Tactic: "Defense Evasion",
+		URL:    "https://attack.mitre.org/techniques/T1218/005/",
+	},
+	"T1547.004": {
+		ID: "T1547.004", Name: "Boot or Logon Autostart Execution: Winlogon Helper DLL",
+		Tactic: "Persistence, Privilege Escalation",
+		URL:    "https://attack.mitre.org/techniques/T1547/004/",
+	},
+	"T1546.012": {
+		ID: "T1546.012", Name: "Event Triggered Execution: Image File Execution Options Injection",
+		Tactic: "Persistence, Privilege Escalation, Defense Evasion",
+		URL:    "https://attack.mitre.org/techniques/T1546/012/",
+	},
+	"T1021.001": {
+		ID: "T1021.001", Name: "Remote Services: Remote Desktop Protocol",
+		Tactic: "Lateral Movement",
+		URL:    "https://attack.mitre.org/techniques/T1021/001/",
+	},
 }
 
 // Lookup returns the technique metadata for id, and whether it was found.

@@ -1,6 +1,9 @@
 package normalize
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestTimestamp(t *testing.T) {
 	cases := []struct {
@@ -23,6 +26,76 @@ func TestTimestamp(t *testing.T) {
 		if ok && got.Location().String() != "UTC" {
 			t.Errorf("Timestamp(%q) = %v, want UTC location", c.in, got)
 		}
+	}
+}
+
+// TestTimestamp_UTCOffsetsConvertedCorrectly is a Phase 6 time-handling
+// audit test: a timestamp carrying an explicit non-UTC offset (which
+// Windows Event Log/EZ Tools output does not normally produce, but
+// RFC3339 -- one of the accepted layouts -- allows, and a defensively
+// written parser should still handle correctly rather than silently
+// misinterpreting the offset) must convert to the exact correct UTC
+// instant, not just parse "successfully" with the offset ignored.
+func TestTimestamp_UTCOffsetsConvertedCorrectly(t *testing.T) {
+	cases := []struct {
+		in      string
+		wantUTC string
+	}{
+		// -08:00 (e.g. US Pacific Standard Time) -> add 8 hours for UTC.
+		{"2026-01-15T01:14:47-08:00", "2026-01-15T09:14:47Z"},
+		// +05:30 (e.g. India Standard Time) -> subtract 5h30m for UTC.
+		{"2026-01-15T14:44:47+05:30", "2026-01-15T09:14:47Z"},
+		// Explicit +00:00 must behave identically to a bare "Z".
+		{"2026-01-15T09:14:47+00:00", "2026-01-15T09:14:47Z"},
+	}
+	for _, c := range cases {
+		got, ok := Timestamp(c.in)
+		if !ok {
+			t.Errorf("Timestamp(%q): expected valid parse", c.in)
+			continue
+		}
+		want, err := time.Parse(time.RFC3339, c.wantUTC)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !got.Equal(want) {
+			t.Errorf("Timestamp(%q) = %v, want %v (offset not converted correctly)", c.in, got, want)
+		}
+		if got.Location().String() != "UTC" {
+			t.Errorf("Timestamp(%q) location = %v, want UTC", c.in, got.Location())
+		}
+	}
+}
+
+// TestTimestamp_DaylightSavingNotAmbiguous documents and verifies why
+// DST transitions don't create ambiguity for Tracefall: every accepted
+// layout (see timeLayouts) either carries an explicit UTC/offset marker
+// or is treated as already-UTC -- Tracefall never parses a bare
+// local-time string and guesses which UTC offset it means (the one
+// genuine source of DST ambiguity, e.g. "2026-11-01 01:30:00" during a
+// fall-back transition legitimately meaning two different UTC instants).
+// A timestamp carrying an explicit offset spanning a real DST transition
+// boundary still converts unambiguously, since the offset itself
+// disambiguates it.
+func TestTimestamp_DaylightSavingNotAmbiguous(t *testing.T) {
+	// 2026-03-08 is the US spring-forward DST transition date. Two
+	// timestamps either side of it, both with explicit offsets, must
+	// each convert to their own distinct, correct UTC instant.
+	before, ok := Timestamp("2026-03-08T01:30:00-08:00") // PST, before the transition
+	if !ok {
+		t.Fatal("expected valid parse for pre-transition timestamp")
+	}
+	after, ok := Timestamp("2026-03-08T03:30:00-07:00") // PDT, after the transition
+	if !ok {
+		t.Fatal("expected valid parse for post-transition timestamp")
+	}
+	wantBefore, _ := time.Parse(time.RFC3339, "2026-03-08T09:30:00Z")
+	wantAfter, _ := time.Parse(time.RFC3339, "2026-03-08T10:30:00Z")
+	if !before.Equal(wantBefore) {
+		t.Errorf("before-transition timestamp = %v, want %v", before, wantBefore)
+	}
+	if !after.Equal(wantAfter) {
+		t.Errorf("after-transition timestamp = %v, want %v", after, wantAfter)
 	}
 }
 

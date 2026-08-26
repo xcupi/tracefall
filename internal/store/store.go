@@ -30,6 +30,14 @@ import (
 // report which one it duplicates.
 var ErrDuplicateCollection = errors.New("a collection with this archive/source hash already exists in this case")
 
+// ErrDuplicateCase means an INSERT into cases violated the
+// idx_cases_name_unique uniqueness constraint (see schema's comment by
+// that index) -- the database-level backstop against two concurrent
+// requests both passing a SELECT-based duplicate check before either has
+// inserted. Callers should look up the case that already holds this name
+// (FindCaseByName) to report which one it duplicates.
+var ErrDuplicateCase = errors.New("a case with this name already exists")
+
 // isUniqueConstraintViolation reports whether err came from violating a
 // SQLite UNIQUE constraint/index. Matched by message substring (the
 // stable part of modernc.org/sqlite's error text -- e.g. "UNIQUE
@@ -83,12 +91,60 @@ func parseTime(s string) time.Time {
 
 // ---------- Cases ----------
 
+const caseCols = `id, name, description, status, created_at, updated_at, case_status, priority, analyzed_at`
+
+// scanCase scans one row shaped like caseCols. analyzed_at may be empty
+// (never analyzed), which leaves Case.AnalyzedAt nil so its `omitempty`
+// JSON tag hides it entirely rather than serializing a misleading
+// zero-ish timestamp.
+func scanCase(row interface{ Scan(...any) error }) (model.Case, error) {
+	var c model.Case
+	var created, updated, analyzedAt string
+	err := row.Scan(&c.ID, &c.Name, &c.Description, &c.Status, &created, &updated, &c.CaseStatus, &c.Priority, &analyzedAt)
+	if err != nil {
+		return model.Case{}, err
+	}
+	c.CreatedAt, c.UpdatedAt = parseTime(created), parseTime(updated)
+	if analyzedAt != "" {
+		t := parseTime(analyzedAt)
+		c.AnalyzedAt = &t
+	}
+	return c, nil
+}
+
 func (s *Store) CreateCase(c model.Case) error {
+	caseStatus, priority := c.CaseStatus, c.Priority
+	if caseStatus == "" {
+		caseStatus = model.CaseWorkflowOpen
+	}
+	if priority == "" {
+		priority = model.CasePriorityMedium
+	}
 	_, err := s.db.Exec(
-		`INSERT INTO cases (id, name, description, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)`,
-		c.ID, c.Name, c.Description, c.Status, fmtTime(c.CreatedAt), fmtTime(c.UpdatedAt),
+		`INSERT INTO cases (id, name, description, status, created_at, updated_at, case_status, priority, analyzed_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, '')`,
+		c.ID, c.Name, c.Description, c.Status, fmtTime(c.CreatedAt), fmtTime(c.UpdatedAt), caseStatus, priority,
 	)
+	if isUniqueConstraintViolation(err) {
+		return ErrDuplicateCase
+	}
 	return err
+}
+
+// FindCaseByName looks up a case by name, compared the same way
+// idx_cases_name_unique enforces uniqueness: trimmed of leading/trailing
+// whitespace and case-insensitively (see docs/data-model.md's "Case name
+// uniqueness" section). Returns found=false if no case has that name.
+func (s *Store) FindCaseByName(name string) (model.Case, bool, error) {
+	row := s.db.QueryRow(`SELECT `+caseCols+` FROM cases WHERE LOWER(TRIM(name)) = LOWER(TRIM(?)) LIMIT 1`, name)
+	c, err := scanCase(row)
+	if err == sql.ErrNoRows {
+		return model.Case{}, false, nil
+	}
+	if err != nil {
+		return model.Case{}, false, err
+	}
+	return c, true, nil
 }
 
 func (s *Store) UpdateCaseStatus(id, status string) error {
@@ -97,19 +153,56 @@ func (s *Store) UpdateCaseStatus(id, status string) error {
 	return err
 }
 
-func (s *Store) GetCase(id string) (model.Case, error) {
-	row := s.db.QueryRow(`SELECT id, name, description, status, created_at, updated_at FROM cases WHERE id = ?`, id)
-	var c model.Case
-	var created, updated string
-	if err := row.Scan(&c.ID, &c.Name, &c.Description, &c.Status, &created, &updated); err != nil {
-		return model.Case{}, err
+// CaseMetadataUpdate is the set of analyst-editable case fields
+// (Service.UpdateCaseMetadata) -- deliberately NOT including Status
+// (the analysis lifecycle, only ever set by AnalyzeCase/evidence
+// changes) or CreatedAt/AnalyzedAt (both system-set). A nil field means
+// "leave unchanged", letting a caller update just one of
+// name/description/case_status/priority without needing the others.
+type CaseMetadataUpdate struct {
+	Name        *string
+	Description *string
+	CaseStatus  *string
+	Priority    *string
+}
+
+// UpdateCaseMetadata applies a partial update to a case's analyst-facing
+// metadata. Name uniqueness (case-insensitive, trimmed) is enforced the
+// same way CreateCase's does, via the same idx_cases_name_unique
+// database constraint -- isUniqueConstraintViolation translates a
+// collision to ErrDuplicateCase identically.
+func (s *Store) UpdateCaseMetadata(id string, u CaseMetadataUpdate) error {
+	c, err := s.GetCase(id)
+	if err != nil {
+		return err
 	}
-	c.CreatedAt, c.UpdatedAt = parseTime(created), parseTime(updated)
-	return c, nil
+	if u.Name != nil {
+		c.Name = *u.Name
+	}
+	if u.Description != nil {
+		c.Description = *u.Description
+	}
+	if u.CaseStatus != nil {
+		c.CaseStatus = *u.CaseStatus
+	}
+	if u.Priority != nil {
+		c.Priority = *u.Priority
+	}
+	_, err = s.db.Exec(`UPDATE cases SET name = ?, description = ?, case_status = ?, priority = ?, updated_at = ? WHERE id = ?`,
+		c.Name, c.Description, c.CaseStatus, c.Priority, fmtTime(time.Now()), id)
+	if isUniqueConstraintViolation(err) {
+		return ErrDuplicateCase
+	}
+	return err
+}
+
+func (s *Store) GetCase(id string) (model.Case, error) {
+	row := s.db.QueryRow(`SELECT `+caseCols+` FROM cases WHERE id = ?`, id)
+	return scanCase(row)
 }
 
 func (s *Store) ListCases() ([]model.Case, error) {
-	rows, err := s.db.Query(`SELECT id, name, description, status, created_at, updated_at FROM cases ORDER BY created_at DESC`)
+	rows, err := s.db.Query(`SELECT ` + caseCols + ` FROM cases ORDER BY created_at DESC`)
 	if err != nil {
 		return nil, err
 	}
@@ -117,12 +210,10 @@ func (s *Store) ListCases() ([]model.Case, error) {
 
 	var out []model.Case
 	for rows.Next() {
-		var c model.Case
-		var created, updated string
-		if err := rows.Scan(&c.ID, &c.Name, &c.Description, &c.Status, &created, &updated); err != nil {
+		c, err := scanCase(rows)
+		if err != nil {
 			return nil, err
 		}
-		c.CreatedAt, c.UpdatedAt = parseTime(created), parseTime(updated)
 		out = append(out, c)
 	}
 	return out, rows.Err()
@@ -130,13 +221,13 @@ func (s *Store) ListCases() ([]model.Case, error) {
 
 // ---------- Collections ----------
 
-const collectionCols = `id, case_id, created_at, source_type, original_filename, archive_hash, evidence_directory, ingestion_status, file_count, supported_file_count, unsupported_file_count, parsed_event_count`
+const collectionCols = `id, case_id, created_at, source_type, original_filename, archive_hash, evidence_directory, ingestion_status, file_count, supported_file_count, unsupported_file_count, imported_file_count, parsed_event_count`
 
 func scanCollection(row interface{ Scan(...any) error }) (model.Collection, error) {
 	var c model.Collection
 	var createdAt string
 	err := row.Scan(&c.ID, &c.CaseID, &createdAt, &c.SourceType, &c.OriginalFilename, &c.ArchiveHash,
-		&c.EvidenceDirectory, &c.IngestionStatus, &c.FileCount, &c.SupportedFileCount, &c.UnsupportedFileCount, &c.ParsedEventCount)
+		&c.EvidenceDirectory, &c.IngestionStatus, &c.FileCount, &c.SupportedFileCount, &c.UnsupportedFileCount, &c.ImportedFileCount, &c.ParsedEventCount)
 	if err != nil {
 		return model.Collection{}, err
 	}
@@ -149,9 +240,9 @@ func scanCollection(row interface{ Scan(...any) error }) (model.Collection, erro
 // ErrDuplicateCollection (see idx_collections_case_archive_hash in
 // schema.go) instead of creating a second row.
 func (s *Store) SaveCollection(c model.Collection) error {
-	_, err := s.db.Exec(`INSERT INTO collections (`+collectionCols+`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+	_, err := s.db.Exec(`INSERT INTO collections (`+collectionCols+`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		c.ID, c.CaseID, fmtTime(c.CreatedAt), c.SourceType, c.OriginalFilename, c.ArchiveHash,
-		c.EvidenceDirectory, c.IngestionStatus, c.FileCount, c.SupportedFileCount, c.UnsupportedFileCount, c.ParsedEventCount)
+		c.EvidenceDirectory, c.IngestionStatus, c.FileCount, c.SupportedFileCount, c.UnsupportedFileCount, c.ImportedFileCount, c.ParsedEventCount)
 	if isUniqueConstraintViolation(err) {
 		return ErrDuplicateCollection
 	}
@@ -159,11 +250,13 @@ func (s *Store) SaveCollection(c model.Collection) error {
 }
 
 // UpdateCollection overwrites a collection's mutable fields (status and
-// counts) once ingestion of it has finished (successfully or not).
+// counts) -- called both when a discovery/import pass finishes and
+// whenever evidence deletion changes what a collection actually
+// contains (see Service.recomputeCollectionCounts).
 func (s *Store) UpdateCollection(c model.Collection) error {
 	_, err := s.db.Exec(`UPDATE collections SET ingestion_status = ?, file_count = ?, supported_file_count = ?,
-		unsupported_file_count = ?, parsed_event_count = ? WHERE id = ?`,
-		c.IngestionStatus, c.FileCount, c.SupportedFileCount, c.UnsupportedFileCount, c.ParsedEventCount, c.ID)
+		unsupported_file_count = ?, imported_file_count = ?, parsed_event_count = ? WHERE id = ?`,
+		c.IngestionStatus, c.FileCount, c.SupportedFileCount, c.UnsupportedFileCount, c.ImportedFileCount, c.ParsedEventCount, c.ID)
 	return err
 }
 
@@ -216,6 +309,18 @@ func (s *Store) FindCollectionByHash(caseID, hash string) (model.Collection, boo
 
 // ---------- Source files ----------
 
+// ErrDuplicateSourceFile means an UPDATE that would mark a source file
+// imported instead violated the (collection_id, sha256) uniqueness
+// constraint (idx_source_files_collection_sha256_active in schema.go) --
+// the race-safe backstop behind Service's discovery-time in-batch
+// duplicate detection. See that index's comment in migrate.go for why
+// this is scoped to one collection, not the whole case.
+var ErrDuplicateSourceFile = errors.New("a file with this content has already been imported into this collection")
+
+// SaveSourceFiles inserts freshly-discovered source file rows -- called
+// once per discovery pass, before any of them are necessarily selected
+// for import. See model.SourceFile's doc comment for the
+// discovered -> imported life cycle.
 func (s *Store) SaveSourceFiles(files []model.SourceFile) error {
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -224,36 +329,69 @@ func (s *Store) SaveSourceFiles(files []model.SourceFile) error {
 	defer tx.Rollback()
 
 	stmt, err := tx.Prepare(`INSERT INTO source_files
-		(id, case_id, collection_id, path, artifact_type, parser, row_count, sha256, ingested_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+		(id, case_id, collection_id, original_filename, path, artifact_type, parser, supported, size_bytes, sha256, import_status, event_count, discovered_at, imported_at, deleted_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
 	if err != nil {
 		return err
 	}
 	defer stmt.Close()
 
 	for _, f := range files {
-		if _, err := stmt.Exec(f.ID, f.CaseID, f.CollectionID, f.Path, f.ArtifactType, f.Parser, f.RowCount, f.SHA256, fmtTime(f.IngestedAt)); err != nil {
+		if _, err := stmt.Exec(f.ID, f.CaseID, f.CollectionID, f.OriginalFilename, f.Path, f.ArtifactType, f.Parser,
+			boolToInt(f.Supported), f.SizeBytes, f.SHA256, f.ImportStatus, f.EventCount, fmtTime(f.DiscoveredAt),
+			fmtOptionalTime(f.ImportedAt), fmtOptionalTime(f.DeletedAt)); err != nil {
 			return err
 		}
 	}
 	return tx.Commit()
 }
 
-const sourceFileCols = `id, case_id, collection_id, path, artifact_type, parser, row_count, sha256, ingested_at`
+const sourceFileCols = `id, case_id, collection_id, original_filename, path, artifact_type, parser, supported, size_bytes, sha256, import_status, event_count, discovered_at, imported_at, deleted_at`
+
+func boolToInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
+}
+
+// fmtOptionalTime formats t, or "" if t is nil -- the on-disk
+// representation of "not set yet" for imported_at/deleted_at, matching
+// the rest of this package's empty-string-means-unset convention (e.g.
+// collections.archive_hash).
+func fmtOptionalTime(t *time.Time) string {
+	if t == nil {
+		return ""
+	}
+	return fmtTime(*t)
+}
 
 func scanSourceFile(row interface{ Scan(...any) error }) (model.SourceFile, error) {
 	var f model.SourceFile
-	var ingested string
-	err := row.Scan(&f.ID, &f.CaseID, &f.CollectionID, &f.Path, &f.ArtifactType, &f.Parser, &f.RowCount, &f.SHA256, &ingested)
+	var supported int
+	var discovered, imported, deleted string
+	err := row.Scan(&f.ID, &f.CaseID, &f.CollectionID, &f.OriginalFilename, &f.Path, &f.ArtifactType, &f.Parser,
+		&supported, &f.SizeBytes, &f.SHA256, &f.ImportStatus, &f.EventCount, &discovered, &imported, &deleted)
 	if err != nil {
 		return model.SourceFile{}, err
 	}
-	f.IngestedAt = parseTime(ingested)
+	f.Supported = supported != 0
+	f.DiscoveredAt = parseTime(discovered)
+	if imported != "" {
+		t := parseTime(imported)
+		f.ImportedAt = &t
+	}
+	if deleted != "" {
+		t := parseTime(deleted)
+		f.DeletedAt = &t
+	}
 	return f, nil
 }
 
+// ListSourceFiles returns every active (non-deleted) source file across
+// a case -- every collection, imported or merely discovered.
 func (s *Store) ListSourceFiles(caseID string) ([]model.SourceFile, error) {
-	rows, err := s.db.Query(`SELECT `+sourceFileCols+` FROM source_files WHERE case_id = ? ORDER BY path`, caseID)
+	rows, err := s.db.Query(`SELECT `+sourceFileCols+` FROM source_files WHERE case_id = ? AND deleted_at = '' ORDER BY path`, caseID)
 	if err != nil {
 		return nil, err
 	}
@@ -270,10 +408,10 @@ func (s *Store) ListSourceFiles(caseID string) ([]model.SourceFile, error) {
 	return out, rows.Err()
 }
 
-// ListSourceFilesByCollection returns just one collection's source
-// files, e.g. for the collection-detail API/UI view.
+// ListSourceFilesByCollection returns just one collection's active
+// source files, e.g. for the collection-detail API/UI view.
 func (s *Store) ListSourceFilesByCollection(collectionID string) ([]model.SourceFile, error) {
-	rows, err := s.db.Query(`SELECT `+sourceFileCols+` FROM source_files WHERE collection_id = ? ORDER BY path`, collectionID)
+	rows, err := s.db.Query(`SELECT `+sourceFileCols+` FROM source_files WHERE collection_id = ? AND deleted_at = '' ORDER BY path`, collectionID)
 	if err != nil {
 		return nil, err
 	}
@@ -288,6 +426,80 @@ func (s *Store) ListSourceFilesByCollection(collectionID string) ([]model.Source
 		out = append(out, f)
 	}
 	return out, rows.Err()
+}
+
+// GetSourceFile fetches one source file by ID regardless of its
+// import/deleted status -- callers that need to distinguish those states
+// (e.g. to reject importing an already-deleted file) check the returned
+// fields themselves.
+func (s *Store) GetSourceFile(id string) (model.SourceFile, error) {
+	row := s.db.QueryRow(`SELECT `+sourceFileCols+` FROM source_files WHERE id = ?`, id)
+	return scanSourceFile(row)
+}
+
+// GetSourceFiles fetches multiple source files by ID, skipping any ID
+// that doesn't exist (callers that need to detect a missing ID compare
+// len(result) against len(ids) themselves) -- used by bulk evidence
+// deletion to resolve a batch of selected IDs in one place.
+func (s *Store) GetSourceFiles(ids []string) ([]model.SourceFile, error) {
+	out := make([]model.SourceFile, 0, len(ids))
+	for _, id := range ids {
+		f, err := s.GetSourceFile(id)
+		if err == sql.ErrNoRows {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, f)
+	}
+	return out, nil
+}
+
+// MarkSourceFileImported transitions a source file from "discovered" to
+// "imported" now that it's been successfully parsed. The WHERE clause
+// (import_status = 'discovered') makes this an idempotent, race-safe
+// compare-and-swap: applied reports whether this call actually won that
+// transition -- false means another concurrent import request already
+// claimed this file, and the caller should treat it as already handled
+// rather than importing it a second time. A uniqueness violation (two
+// different, concurrently-imported files racing to claim the same
+// content hash within this collection) is translated to
+// ErrDuplicateSourceFile.
+func (s *Store) MarkSourceFileImported(id string, eventCount int, importedAt time.Time) (applied bool, err error) {
+	res, err := s.db.Exec(`UPDATE source_files SET import_status = ?, event_count = ?, imported_at = ?
+		WHERE id = ? AND import_status = ?`,
+		model.SourceFileImported, eventCount, fmtTime(importedAt), id, model.SourceFileDiscovered)
+	if isUniqueConstraintViolation(err) {
+		return false, ErrDuplicateSourceFile
+	}
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
+// MarkSourceFileFailed records that a selected file's parser returned an
+// error, so it stays visible in the evidence list as failed rather than
+// silently vanishing.
+func (s *Store) MarkSourceFileFailed(id string) error {
+	_, err := s.db.Exec(`UPDATE source_files SET import_status = ? WHERE id = ?`, model.SourceFileFailed, id)
+	return err
+}
+
+// SoftDeleteSourceFile marks a source file removed as of deletedAt
+// without deleting the row -- see model.SourceFile.DeletedAt's doc
+// comment. Active listings (ListSourceFiles, ListSourceFilesByCollection)
+// exclude it from here on; its physical evidence file removal is the
+// caller's responsibility (internal/casefiles), since this package has
+// no filesystem knowledge.
+func (s *Store) SoftDeleteSourceFile(id string, deletedAt time.Time) error {
+	_, err := s.db.Exec(`UPDATE source_files SET deleted_at = ? WHERE id = ?`, fmtTime(deletedAt), id)
+	return err
 }
 
 // ---------- Raw evidence ----------
@@ -462,6 +674,39 @@ func (s *Store) ListEventsByCollection(collectionID string) ([]model.Event, erro
 	return out, rows.Err()
 }
 
+// DeleteEvent removes one event row entirely -- only valid once its last
+// EventObservation has also been removed (see
+// Service.deleteSourceFileEvidence), since an Event with no observations
+// left has no evidence supporting it at all.
+func (s *Store) DeleteEvent(id string) error {
+	_, err := s.db.Exec(`DELETE FROM events WHERE id = ?`, id)
+	return err
+}
+
+// RepointEventProvenance updates an Event's own denormalized provenance
+// fields (which describe its *first* observation only -- see
+// model.Event's doc comment) to point at a different, still-existing
+// observation. Needed when the observation an event's provenance
+// currently points to is the one being deleted, but the event itself
+// survives because it has other observations left -- without this, the
+// event's SourceFileID/RawEvidenceID would dangle, pointing at rows that
+// no longer exist. See Service.deleteSourceFileEvidence.
+func (s *Store) RepointEventProvenance(eventID, collectionID, sourceFileID, rawEvidenceID, sourceReference, artifactType, parser string) error {
+	_, err := s.db.Exec(`UPDATE events SET collection_id = ?, source_file_id = ?, raw_evidence_id = ?,
+		source_reference = ?, artifact_type = ?, parser = ? WHERE id = ?`,
+		collectionID, sourceFileID, rawEvidenceID, sourceReference, artifactType, parser, eventID)
+	return err
+}
+
+// DeleteRawEvidenceBySourceFile removes every raw evidence record read
+// from one source file -- safe once every event/observation that could
+// have referenced it has already been deleted or repointed elsewhere
+// (see Service.deleteSourceFileEvidence, which does so in that order).
+func (s *Store) DeleteRawEvidenceBySourceFile(sourceFileID string) error {
+	_, err := s.db.Exec(`DELETE FROM raw_evidence WHERE source_file_id = ?`, sourceFileID)
+	return err
+}
+
 // ---------- Event observations ----------
 
 func (s *Store) SaveEventObservations(observations []model.EventObservation) error {
@@ -519,6 +764,40 @@ func (s *Store) ListEventObservations(eventID string) ([]model.EventObservation,
 	return out, rows.Err()
 }
 
+// ListEventObservationsBySourceFile returns every observation that came
+// from one specific source file -- one row per event that file
+// contributed to, regardless of whether that event turned out to be
+// canonical or a dedup match against an event first seen elsewhere. This
+// is the starting point for deleting a source file's evidence: see
+// Service.deleteSourceFileEvidence.
+func (s *Store) ListEventObservationsBySourceFile(sourceFileID string) ([]model.EventObservation, error) {
+	rows, err := s.db.Query(`SELECT `+observationCols+` FROM event_observations WHERE source_file_id = ? ORDER BY id`, sourceFileID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []model.EventObservation
+	for rows.Next() {
+		o, err := scanObservation(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, o)
+	}
+	return out, rows.Err()
+}
+
+// DeleteEventObservation removes one observation row -- the first step
+// in removing a source file's contribution to an event (see
+// Service.deleteSourceFileEvidence): once an event's last observation is
+// gone, the event itself has no remaining evidence and is deleted too;
+// until then, it survives (still supported by its other observations).
+func (s *Store) DeleteEventObservation(id string) error {
+	_, err := s.db.Exec(`DELETE FROM event_observations WHERE id = ?`, id)
+	return err
+}
+
 // ---------- Findings ----------
 
 // ClearAnalysis removes all findings and correlations for a case so
@@ -530,6 +809,72 @@ func (s *Store) ClearAnalysis(caseID string) error {
 	}
 	_, err := s.db.Exec(`DELETE FROM correlations WHERE case_id = ?`, caseID)
 	return err
+}
+
+// ReplaceAnalysis atomically replaces a case's findings and correlations
+// with a freshly computed set, and marks the case analyzed -- all in one
+// transaction. This is Phase 6's fix for a real correctness gap:
+// AnalyzeCase previously called ClearAnalysis, SaveFindings,
+// SaveCorrelations, and UpdateCaseStatus as four SEPARATE transactions,
+// so a failure between the clear and the save (a disk error, a crash)
+// left the case with its analysis wiped and nothing valid to replace it
+// -- silently destroying the previous, still-valid results. With
+// everything in one transaction, ANY failure rolls back to exactly the
+// state before the call: the case's prior findings/correlations/status
+// are left completely untouched, and the caller (Service.AnalyzeCase)
+// can report the failure without ever having damaged what was there
+// before. See docs/analyst-workflow.md's "Analysis state" section.
+func (s *Store) ReplaceAnalysis(caseID string, findings []model.Finding, correlations []model.Correlation) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.Exec(`DELETE FROM findings WHERE case_id = ?`, caseID); err != nil {
+		return fmt.Errorf("clearing prior findings: %w", err)
+	}
+	if _, err := tx.Exec(`DELETE FROM correlations WHERE case_id = ?`, caseID); err != nil {
+		return fmt.Errorf("clearing prior correlations: %w", err)
+	}
+
+	findingStmt, err := tx.Prepare(`INSERT INTO findings
+		(id, case_id, rule_id, title, severity, confidence, description, supporting_events_json, techniques_json, first_seen, last_seen, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+	if err != nil {
+		return err
+	}
+	defer findingStmt.Close()
+	for _, f := range findings {
+		supJSON, _ := json.Marshal(f.SupportingEvents)
+		techJSON, _ := json.Marshal(f.Techniques)
+		if _, err := findingStmt.Exec(f.ID, f.CaseID, f.RuleID, f.Title, f.Severity, f.Confidence, f.Description,
+			string(supJSON), string(techJSON), fmtTime(f.FirstSeen), fmtTime(f.LastSeen), fmtTime(f.CreatedAt)); err != nil {
+			return fmt.Errorf("saving finding: %w", err)
+		}
+	}
+
+	corrStmt, err := tx.Prepare(`INSERT INTO correlations
+		(id, case_id, type, title, description, event_ids_json, first_seen, last_seen)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
+	if err != nil {
+		return err
+	}
+	defer corrStmt.Close()
+	for _, c := range correlations {
+		idsJSON, _ := json.Marshal(c.EventIDs)
+		if _, err := corrStmt.Exec(c.ID, c.CaseID, c.Type, c.Title, c.Description, string(idsJSON), fmtTime(c.FirstSeen), fmtTime(c.LastSeen)); err != nil {
+			return fmt.Errorf("saving correlation: %w", err)
+		}
+	}
+
+	now := fmtTime(time.Now())
+	if _, err := tx.Exec(`UPDATE cases SET status = ?, analyzed_at = ?, updated_at = ? WHERE id = ?`,
+		model.CaseStatusAnalyzed, now, now, caseID); err != nil {
+		return fmt.Errorf("updating case status: %w", err)
+	}
+
+	return tx.Commit()
 }
 
 func (s *Store) SaveFindings(findings []model.Finding) error {
@@ -643,4 +988,55 @@ func (s *Store) ListCorrelations(caseID string) ([]model.Correlation, error) {
 		out = append(out, c)
 	}
 	return out, rows.Err()
+}
+
+// ---------- Case deletion ----------
+
+// DeleteCase permanently removes a case and every row anywhere in the
+// database that belongs to it -- collections, source files, raw
+// evidence, events, event observations, findings, correlations, and
+// finally the case row itself -- in dependency order, inside one
+// transaction, so a failure partway through leaves the database exactly
+// as it was rather than an orphaned partial deletion. Foreign keys are
+// enforced (PRAGMA foreign_keys = ON, set in Open()) with no ON DELETE
+// CASCADE declared anywhere in schema.go, deliberately: an explicit,
+// ordered delete here is auditable and easy to reason about, rather than
+// relying on cascade semantics to get the order right implicitly.
+//
+// This does not touch the case's on-disk evidence directory --
+// Service.DeleteCase does that separately via internal/casefiles, since
+// this package has no filesystem knowledge.
+func (s *Store) DeleteCase(caseID string) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	stmts := []string{
+		`DELETE FROM event_observations WHERE case_id = ?`,
+		`DELETE FROM raw_evidence WHERE case_id = ?`,
+		`DELETE FROM events WHERE case_id = ?`,
+		`DELETE FROM findings WHERE case_id = ?`,
+		`DELETE FROM correlations WHERE case_id = ?`,
+		`DELETE FROM source_files WHERE case_id = ?`,
+		`DELETE FROM collections WHERE case_id = ?`,
+		// Phase 6: analyst workflow state is scoped to exactly one case
+		// and has no independent life of its own once that case is gone
+		// (unlike evidence deletion within a live case, which
+		// deliberately preserves notes -- see model.Note's doc comment).
+		// A whole-case delete is the one case where notes/tags/status/
+		// audit history are removed along with everything else.
+		`DELETE FROM notes WHERE case_id = ?`,
+		`DELETE FROM tags WHERE case_id = ?`,
+		`DELETE FROM analyst_status WHERE case_id = ?`,
+		`DELETE FROM audit_log WHERE case_id = ?`,
+		`DELETE FROM cases WHERE id = ?`,
+	}
+	for _, stmt := range stmts {
+		if _, err := tx.Exec(stmt, caseID); err != nil {
+			return fmt.Errorf("%s: %w", stmt, err)
+		}
+	}
+	return tx.Commit()
 }

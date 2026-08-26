@@ -27,22 +27,45 @@ func BuildActivityChains(caseID string, events []model.Event) []model.Correlatio
 	logons := byType(events, model.EventLogonSuccess)
 	registryRuns := byType(events, model.EventRegistryRunKey)
 	scheduledTasks := byType(events, model.EventScheduledTaskCreate)
+	// Phase 4: registry persistence beyond Run/RunOnce keys and service
+	// installation are both valid final steps of this narrative, exactly
+	// like a Run key or scheduled task -- see findPersistence.
+	registryPersistence := byType(events, model.EventRegistryPersistence)
+	serviceInstalls := byType(events, model.EventServiceInstall)
 	netConns := byType(events, model.EventNetworkConnection)
+
+	// Index every candidate stream by (host, process) -- or by host alone
+	// for logons, whose match is conditionally on user -- so each pivot
+	// below does an O(1) lookup into an already-narrow slice instead of
+	// scanning every event of that type in the whole case. See
+	// correlate.go's indexEvents doc for why this can't change results.
+	logonsByHost := indexEvents(logons, func(e model.Event) string { return e.Host })
+	createsByHostProc := indexEvents(creates, func(e model.Event) string { return chainKey(e.Host, e.ProcessName) })
+	createsByHostParent := indexEvents(creates, func(e model.Event) string { return chainKey(e.Host, e.ParentProcessName) })
+	registryRunsByHostProc := indexEvents(registryRuns, func(e model.Event) string { return chainKey(e.Host, e.ProcessName) })
+	scheduledTasksByHostProc := indexEvents(scheduledTasks, func(e model.Event) string { return chainKey(e.Host, e.ProcessName) })
+	registryPersistenceByHostProc := indexEvents(registryPersistence, func(e model.Event) string { return chainKey(e.Host, e.ProcessName) })
+	serviceInstallsByHostProc := indexEvents(serviceInstalls, func(e model.Event) string { return chainKey(e.Host, e.ProcessName) })
+	netConnsByHostProc := indexEvents(netConns, func(e model.Event) string { return chainKey(e.Host, e.ProcessName) })
 
 	var out []model.Correlation
 	for _, ps := range creates {
-		if !procclass.IsOffice(ps.ParentProcessName) || !procclass.IsPowerShell(ps.ProcessName) {
+		// Phase 4: the pivot step isn't PowerShell-only -- Office spawning
+		// cmd.exe/wscript.exe/cscript.exe/mshta.exe is the same narrative
+		// pattern (see detect's officeSpawnsScriptInterpreter), so any
+		// recognized scripting/LOLBin host is accepted here too.
+		if !procclass.IsOffice(ps.ParentProcessName) || !(procclass.IsPowerShell(ps.ProcessName) || procclass.IsScriptHost(ps.ProcessName)) {
 			continue
 		}
 		chain := []model.Event{}
 
 		// Step 1: prior successful logon by the same user on the same host.
-		if logon, ok := latestBefore(logons, ps.Host, ps.User, ps.Timestamp, activityLookWindow); ok {
+		if logon, ok := latestBefore(logonsByHost[ps.Host], ps.Host, ps.User, ps.Timestamp, activityLookWindow); ok {
 			chain = append(chain, logon)
 		}
 
 		// Step 2: the Office process-create event itself (the parent).
-		if officeEv, ok := findProcessCreate(creates, ps.Host, ps.ParentProcessName, ps.Timestamp, activityLookWindow); ok {
+		if officeEv, ok := findProcessCreate(createsByHostProc[chainKey(ps.Host, ps.ParentProcessName)], ps.Host, ps.ParentProcessName, ps.Timestamp, activityLookWindow); ok {
 			chain = append(chain, officeEv)
 		}
 
@@ -50,7 +73,7 @@ func BuildActivityChains(caseID string, events []model.Event) []model.Correlatio
 		chain = append(chain, ps)
 
 		// Step 4: a payload process spawned by this PowerShell instance.
-		payload, hasPayload := findChild(creates, ps)
+		payload, hasPayload := findChild(createsByHostParent[chainKey(ps.Host, ps.ProcessName)], ps)
 		if hasPayload {
 			chain = append(chain, payload)
 		}
@@ -60,12 +83,14 @@ func BuildActivityChains(caseID string, events []model.Event) []model.Correlatio
 		if hasPayload {
 			persistTarget = payload.ProcessName
 		}
-		if p, ok := findPersistence(registryRuns, scheduledTasks, ps.Host, persistTarget, ps.Timestamp, activityLookWindow); ok {
+		pk := chainKey(ps.Host, persistTarget)
+		if p, ok := findPersistence(ps.Host, persistTarget, ps.Timestamp, activityLookWindow,
+			registryRunsByHostProc[pk], scheduledTasksByHostProc[pk], registryPersistenceByHostProc[pk], serviceInstallsByHostProc[pk]); ok {
 			chain = append(chain, p)
 		}
 
 		// Step 6: outbound network connection from the payload (or PowerShell).
-		if n, ok := findNetwork(netConns, ps.Host, persistTarget, ps.Timestamp, activityLookWindow); ok {
+		if n, ok := findNetwork(netConnsByHostProc[pk], ps.Host, persistTarget, ps.Timestamp, activityLookWindow); ok {
 			chain = append(chain, n)
 		}
 
@@ -82,6 +107,15 @@ func BuildActivityChains(caseID string, events []model.Event) []model.Correlatio
 }
 
 func buildChainCorrelation(caseID string, chain []model.Event) model.Correlation {
+	return buildTypedChainCorrelation(caseID, model.CorrelationActivityChain, "Activity chain", chain)
+}
+
+// buildTypedChainCorrelation is buildChainCorrelation generalized to any
+// chain-shaped correlation type (activity/credential/service chains all
+// share the same "ordered narrative of evidenced steps" shape) -- see
+// credential_chain.go and service_chain.go, which reuse it rather than
+// duplicating this construction.
+func buildTypedChainCorrelation(caseID, corrType, titlePrefix string, chain []model.Event) model.Correlation {
 	ids := make([]string, len(chain))
 	steps := make([]string, len(chain))
 	for i, e := range chain {
@@ -97,13 +131,13 @@ func buildChainCorrelation(caseID string, chain []model.Event) model.Correlation
 			last = e
 		}
 	}
-	title := fmt.Sprintf("Activity chain: %s", joinArrow(steps))
+	title := fmt.Sprintf("%s: %s", titlePrefix, joinArrow(steps))
 	desc := fmt.Sprintf(
-		"A %d-step evidenced activity sequence was reconstructed on host %s between %s and %s: %s.",
+		"A %d-step evidenced sequence was reconstructed on host %s between %s and %s: %s.",
 		len(chain), first.Host, first.Timestamp.Format(time.RFC3339), last.Timestamp.Format(time.RFC3339), joinArrow(steps))
 	return model.Correlation{
 		CaseID:      caseID,
-		Type:        model.CorrelationActivityChain,
+		Type:        corrType,
 		Title:       title,
 		Description: desc,
 		EventIDs:    ids,
@@ -116,12 +150,22 @@ func stepLabel(e model.Event) string {
 	switch e.EventType {
 	case model.EventLogonSuccess:
 		return "logon(" + orDash(e.User) + ")"
+	case model.EventLogonFailure:
+		return "failed_logon(" + orDash(e.User) + ")"
+	case model.EventLogonExplicitCreds:
+		return "explicit_creds(" + orDash(e.Extra["target_user_name"]) + ")"
 	case model.EventProcessCreate:
 		return "exec(" + e.ProcessName + ")"
-	case model.EventRegistryRunKey:
+	case model.EventRegistryRunKey, model.EventRegistryPersistence:
 		return "persist(registry)"
 	case model.EventScheduledTaskCreate:
 		return "persist(scheduled task)"
+	case model.EventServiceInstall:
+		return "persist(service)"
+	case model.EventFileCreate:
+		return "drop(" + orDash(e.FilePath) + ")"
+	case model.EventDNSQuery:
+		return "dns(" + orDash(e.NetworkDest) + ")"
 	case model.EventNetworkConnection:
 		return "network(" + orDash(e.NetworkDest) + ")"
 	default:
@@ -204,11 +248,15 @@ func findChild(events []model.Event, parent model.Event) (model.Event, bool) {
 	return best, found
 }
 
-// findPersistence finds a registry-run-key or scheduled-task event on
+// findPersistence finds a persistence event (registry Run key, scheduled
+// task, other registry persistence location, or service installation) on
 // host whose target executable matches processName, at or after at and
 // within window.
-func findPersistence(registryRuns, scheduledTasks []model.Event, host, processName string, at time.Time, window time.Duration) (model.Event, bool) {
-	all := append(append([]model.Event{}, registryRuns...), scheduledTasks...)
+func findPersistence(host, processName string, at time.Time, window time.Duration, sources ...[]model.Event) (model.Event, bool) {
+	var all []model.Event
+	for _, s := range sources {
+		all = append(all, s...)
+	}
 	var best model.Event
 	found := false
 	for _, e := range all {

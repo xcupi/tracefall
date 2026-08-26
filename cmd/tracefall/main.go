@@ -39,7 +39,7 @@ func main() {
 	svc := api.NewService(db, files)
 
 	mux := http.NewServeMux()
-	apiMux := api.NewRouter(svc, logger, cfg.MaxUploadBytes())
+	apiMux := api.NewRouter(svc, logger, cfg.MaxUploadBytes(), !cfg.IsLoopbackHost())
 	mux.Handle("/api/", apiMux)
 	mux.Handle("/static/", web.StaticHandler())
 	mux.HandleFunc("/", web.Index())

@@ -84,19 +84,29 @@ In prose:
    normalized `model.Event` values. Each artifact type is its own
    package implementing one shared interface
    (`parsers.ArtifactParser`) — see [docs/adding-parsers.md](docs/adding-parsers.md).
+   `internal/parsers/regpersist` (added in Phase 4) is a small shared
+   *classification* helper, not itself an `ArtifactParser` — it lets the
+   RECmd (hive-snapshot) and Sysmon (real-time event) parsers agree on
+   which registry locations count as persistence, mirroring
+   `internal/procclass`'s precedent for process/path classification.
 4. **Normalization** (`internal/normalize`) holds parsing/canonicalization
    logic shared across parsers (timestamps, host/user casing, path→
    executable-name extraction) so every parser produces events on the
    same conventions instead of inventing its own.
 5. **Event/evidence model** (`internal/model`) is the common schema
    everything downstream depends on — see [docs/data-model.md](docs/data-model.md).
-6. **Detection engine** (`internal/detect`) runs seven deterministic rules
-   over a case's normalized events and produces evidence-backed findings
-   — see [docs/detection-engine.md](docs/detection-engine.md).
+6. **Detection engine** (`internal/detect`) runs fifteen deterministic
+   rules over a case's normalized events and produces evidence-backed
+   findings — see [docs/detection-engine.md](docs/detection-engine.md).
 7. **Correlation engine** (`internal/correlate`) builds explicit
    relationships between events (process chains, entity linkages,
    temporal bursts, full activity-chain narratives) — see
    [docs/correlation-engine.md](docs/correlation-engine.md).
+7a. **Investigation assessment layer** (`internal/investigate`, added in
+    Phase 5) groups related findings/correlations into scored,
+    narrated investigative stories — a read-time-only view, never
+    persisted. See "Investigation assessment layer" above and
+    [docs/investigation-assessment.md](docs/investigation-assessment.md).
 8. **ATT&CK mapping** (`internal/attck`) is a small static registry of
    technique metadata, referenced by ID from detection rules and resolved
    to full metadata only at the API boundary. No package other than
@@ -204,12 +214,48 @@ a malware verdict).
 
 ## Correlation engine
 
-Deterministic. Builds four kinds of relationship — process parent/child
+Deterministic. Builds six kinds of relationship — process parent/child
 chains, entity correlations (the same executable observed across
-multiple independent artifact types), temporal clusters, and full
-evidenced activity-chain narratives (e.g. logon → Office → PowerShell →
-payload → persistence → network) — never fabricating a step the evidence
-doesn't support. See [docs/correlation-engine.md](docs/correlation-engine.md).
+multiple independent artifact types), temporal clusters, full evidenced
+activity-chain narratives (e.g. logon → Office → PowerShell/script host →
+payload → persistence → network), credential chains (brute force;
+explicit-credential use into subsequent activity), and service chains
+(installation → the service actually starting → any network activity) —
+never fabricating a step the evidence doesn't support. See
+[docs/correlation-engine.md](docs/correlation-engine.md).
+
+## Investigation assessment layer (Phase 5)
+
+`internal/investigate` sits above detect/correlate, never beside or below
+them: it takes their already-persisted output (Findings, Correlations)
+plus the case's Events and groups them into a small number of
+evidence-backed "investigations" — e.g. Office → PowerShell → payload →
+persistence → network reported as one investigative story instead of
+five separate findings an analyst would otherwise have to mentally
+stitch together. Deterministic and pure, like detect/correlate: no LLM,
+no network calls, same input always produces the same investigations in
+the same order.
+
+Grouping is based entirely on real evidence links — shared supporting
+events between findings, or a correlation (process_chain, entity, or one
+of the three narrative chain types) bridging events from two different
+findings — **never** merely "same host" or "same time window" (a
+temporal cluster specifically is excluded from grouping for this reason;
+see `internal/investigate/group.go`'s doc comment). Each investigation
+carries a documented, additive, explainable 0–100 risk score and a
+confidence rating computed independently of severity (from correlation
+strength and evidence diversity, not how bad a finding looks), plus a
+deterministic, template-generated narrative — never an AI-written one.
+
+Investigations are **never persisted** — no new table, no migration.
+`Service.Investigations`/`Investigation` call `investigate.Run` at read
+time against whatever Findings/Correlations are currently in the
+database, the same "compute on read from existing store queries" pattern
+`CaseSummary` and `AttackSummary` already use. This means deleting
+evidence and re-running analysis can never leave a stale investigation
+behind: the next `GET` simply recomputes from the current state. See
+[docs/investigation-assessment.md](docs/investigation-assessment.md) for
+the full grouping/scoring/confidence/narrative model.
 
 ## MITRE ATT&CK mapping
 
@@ -237,49 +283,80 @@ See [README.md](README.md#api) for the endpoint list.
 correlate → attck get sequenced together; HTTP handlers
 (`internal/api/handlers.go`) are a thin JSON translation over it.
 
-Case lifecycle is a simple state machine: `created -> ingested ->
-analyzed`, except it isn't strictly one-way -- adding a new evidence
-**collection** to an `analyzed` case moves it back to `ingested`,
-signaling that the analysis is now stale. A case accepts any number of
-collections: `AddEvidenceFromPath` (a local directory) and
-`AddEvidenceFromUpload` (a browser-uploaded ZIP) can both be called
-repeatedly per case, each call creating a new `model.Collection` row and
-sharing a single private `ingestFromDirectory` helper, so
-`internal/ingest.Walk` -- the actual discover/parse/normalize pipeline --
-is invoked from exactly one place regardless of how or how many times
-evidence arrived. `ingestFromDirectory` also deduplicates the newly
-parsed events against everything already in the case (see
-docs/data-model.md's "Deduplication" section) before saving. Analysis is
-idempotent and re-runnable (prior findings/correlations are cleared and
-regenerated, so running it twice on unchanged evidence produces the same
-result, never duplicates) and always operates on the case's complete,
-deduplicated event list -- `internal/detect` and `internal/correlate`
-have no notion of "collection" at all, so a relationship between
-evidence in two different collections is found exactly when the same
-deterministic rule would find it within one collection. That's most of
-why cross-collection correlation "just works": the only new work this
-phase actually needed was correct multi-collection ingestion and
-deduplication, not any change to detection or correlation logic itself.
+Case names are unique across the whole installation (trimmed of
+whitespace, case-insensitive) -- `Service.CreateCase` rejects a
+duplicate with `409 Conflict` before creating anything, backed by a
+database-level unique index for race safety. See docs/data-model.md's
+"Case name uniqueness" section for the normalization rule and the
+migration story for a database with pre-existing duplicate names.
 
-Before either call creates a `model.Collection` row, it hashes the
-evidence source (the archive bytes for an upload, a deterministic
+Case lifecycle is a simple state machine: `created -> ingested ->
+analyzed`, except it isn't strictly one-way -- importing new evidence
+into an `analyzed` case, or deleting evidence from one, both move it
+back to `ingested` (or all the way back to `created` if a deletion
+removed the case's last remaining event), signaling that the analysis is
+now stale. A case accepts any number of collections.
+
+Adding evidence is two explicit calls, not one --
+`Service.DiscoverEvidenceFromPath`/`DiscoverEvidenceFromUpload` catalog
+every file in a package (supported or not) into `model.SourceFile` rows
+without parsing anything, and a separate `Service.ImportEvidence` parses
+exactly the file IDs an investigator selected from that catalog. See
+docs/data-model.md's "Evidence selection workflow" section for the full
+state machine (`discovered -> imported`, or `unsupported`/`duplicate`/
+`failed`) and why this is deliberately two steps: a real KAPE package
+routinely contains far more files than are relevant to a given
+investigation, and Tracefall must not parse all of them automatically
+just because a parser recognizes them. Both discovery calls share a
+private `catalogEvidenceDirectory` helper (built on
+`internal/ingest.Discover`), and `ImportEvidence` parses one file at a
+time via `internal/ingest.ParseFile`, deduplicating each result against
+everything already in the case (see docs/data-model.md's "Deduplication"
+section) exactly the way ingestion always has. Analysis itself is
+unchanged: idempotent and re-runnable (prior findings/correlations are
+cleared and regenerated, so running it twice on unchanged evidence
+produces the same result, never duplicates) and always operates on the
+case's complete, deduplicated event list -- `internal/detect` and
+`internal/correlate` have no notion of "collection" or "import batch" at
+all, so this two-phase workflow needed zero changes to either.
+
+Before either discovery call creates a `model.Collection` row, it hashes
+the evidence source (the archive bytes for an upload, a deterministic
 directory fingerprint for a local path — see docs/data-model.md's
 "Duplicate evidence collections" section) and rejects an exact match
 against an existing collection **in the same case** with `409
 Conflict`, identifying which collection it duplicates, before
-extracting or parsing anything. A `(case_id, archive_hash)` partial
+extracting or cataloging anything. A `(case_id, archive_hash)` partial
 unique index is the race-safe backstop behind the upfront check
-(`internal/api.Service.createCollectionOrDuplicateError`).
+(`internal/api.Service.createCollectionOrDuplicateError`). Within a
+single collection's own catalog, a file whose content (SHA-256) matches
+one already discovered there is marked `duplicate` and can't be
+selected for import -- but that check is deliberately *not* case-wide,
+since the same file legitimately reappears across separate collections
+(a follow-up triage re-collecting the same artifact); see
+docs/data-model.md's "Evidence selection workflow" section.
 
-`AddEvidenceFromUpload` additionally: creates a clean per-collection
+`DiscoverEvidenceFromUpload` additionally: creates a clean per-collection
 directory (`internal/casefiles`), saves the original archive unmodified
 (provenance requirement), safely extracts it (`internal/archive` — see
 docs/deployment.md for the full untrusted-input threat model), and — on
 *any* failure at any of those steps — removes everything written for
 that collection's attempt and marks it `failed`, without touching any
-other collection already in the case. No half-ingested collection is
+other collection already in the case. No half-discovered collection is
 left in an ambiguous state, and no failure can corrupt evidence a
 previous, successful collection already contributed.
+
+Deleting evidence (`Service.DeleteSourceFile(s)`) and deleting a case
+(`Service.DeleteCase(s)`) are the mirror image of adding it -- see
+docs/data-model.md's "Evidence deletion" section for exactly how an
+event that's still observed elsewhere survives a file deletion while
+one that isn't gets removed, and how a case deletion's ordered,
+transactional store-level cascade (`store.DeleteCase`) plus filesystem
+cleanup (`casefiles.Store.RemoveCaseDir`) leaves no orphaned data
+anywhere. Neither path touches `internal/detect`/`internal/correlate`
+directly; both rely on the existing idempotent `AnalyzeCase` to
+recompute findings/correlations correctly against whatever the current
+event list turns out to be.
 
 ## Web UI
 
@@ -300,20 +377,114 @@ The case page's primary action is **+ Add Evidence**, which reveals an
 upload form: a file picker posts a ZIP as `multipart/form-data` to `POST
 /cases/{id}/evidence` (via a dedicated `apiUpload` helper in `app.js`,
 since a plain `fetch` needs to set its own multipart boundary rather than
-the JSON `Content-Type` the rest of the dashboard uses), and the
-response's file/artifact/event counts (including how many events were
-new vs. already known from another collection) are rendered immediately
-as upload/ingestion status before the user continues into the case
-dashboard. If the archive/path exactly duplicates a collection already
-in the case, the API's `409` is shown as a distinct "Evidence already
-exists" message (naming the existing collection) rather than the
-generic error box, and no fake success/"Collection #N" result is ever
-rendered for a rejected duplicate. This can be repeated any number of
-times per case for genuinely new evidence. Ingesting
-from a local filesystem path — no browser upload involved — remains
-available as a collapsed "Advanced" option under the same form, for
-local/dev use. The **Evidence** tab lists every collection with its
-counts and status, expandable to that collection's own source files.
+the JSON `Content-Type` the rest of the dashboard uses). If the
+archive/path exactly duplicates a collection already in the case, the
+API's `409` is shown as a distinct "Evidence already exists" message
+(naming the existing collection) rather than the generic error box, and
+no fake success/"Collection #N" result is ever rendered for a rejected
+duplicate. Ingesting from a local filesystem path — no browser upload
+involved — remains available as a collapsed "Advanced" option under the
+same form, for local/dev use; both paths funnel into the same discovery
+response shape.
+
+Otherwise, the response is a **file selection screen**
+(`renderDiscoveryResults`/`wireDiscoverySelection`), not a finished
+result: every discovered file gets a row (filename, path, artifact type,
+size, SHA-256), a checkbox pre-checked for anything selectable
+(`discovered` status) and disabled for anything not (`unsupported`/
+`duplicate`), and Select All/Select Supported/Clear All controls. Only
+clicking **Import Selected** actually parses anything, via `POST
+.../evidence/{collectionId}/import`; its result (files imported, events
+parsed, new vs. already-known) is what's shown before continuing into
+the dashboard. This can be repeated any number of times per case for
+genuinely new evidence.
+
+The **Evidence** tab is where investigators manage evidence at the
+individual-file level (distinct from the dashboard's compact
+collection-level summary panel): every imported file gets its own
+checkbox and **Delete** button, grouped by the collection it came from,
+with that collection's still-merely-discovered/unsupported files tucked
+into a collapsed detail so the main list stays focused on actual
+evidence. Checking files surfaces a bulk action bar (only while
+something's selected) with a **Delete Selected (N)** action. Every
+delete — single file, bulk files, single case (from the case header), or
+bulk cases (from the case list, which gets the same checkbox/bulk-bar
+treatment) — requires an explicit confirmation dialog naming what will
+be removed before calling the corresponding `DELETE` endpoint; none of
+these are ever a plain link click. After any deletion the page reloads,
+so the "evidence changed, re-run analysis" banner (driven by the case's
+`ingested`-not-`analyzed` status, see above) is never stale.
+
+### Investigation views: cross-referencing client-side, not new APIs
+
+The **Timeline**, **Findings**, **ATT&CK**, and **Activity Chains** tabs
+were substantially reworked into a real investigation workspace without
+adding a single new read endpoint -- every cross-reference they show
+(which finding covers this event, which correlation an event
+participates in, which tactic a technique belongs to) is a join over IDs
+the existing `/timeline`, `/findings`, `/correlations`, and `/attack`
+responses already carry (`Finding.SupportingEvents`,
+`Correlation.EventIDs`, `attck.Technique.Tactic`), computed once
+client-side in `app.js` (`buildEventFindingIndex`,
+`buildEventCorrelationIndex`) after each tab's one fetch of its own
+data. This was a deliberate call, not an oversight: Tracefall's target
+scale (one KAPE-triage case at a time, hundreds to low thousands of
+events) makes loading a tab's full dataset once and filtering/joining it
+in the browser strictly cheaper than round-tripping to the server per
+filter change, and "before adding endpoints, determine whether existing
+ones already provide the data" is a standing project rule, not specific
+to this phase.
+
+The one genuine backend addition this phase needed was
+`Service.Summary.ImportedSourceFiles` (see docs/data-model.md) -- the
+existing `SourceFiles` count already active-cataloged files regardless
+of import status, and the case overview needed the imported subset
+specifically.
+
+**Timeline** rows now show PID/PPID, a category badge
+(`app.js`'s `EVENT_CATEGORIES`: authentication/execution/persistence/
+network, a fixed table over `model.Event.EventType`, never inferred from
+the string), a rolled-up severity badge and ATT&CK chips from any
+finding that covers the row, and a "chain" indicator when the event is
+part of a reconstructed activity chain. Clicking a row (or a Findings
+raw-evidence row, or an Activity Chain node -- all three now share one
+`loadProvenanceInto` helper) expands the same provenance drill-down:
+Event -> RawEvidence -> SourceFile -> every collection that observed it.
+A shared, config-driven filter bar (`renderFilterBar`/`wireFilterBar`/
+`readFilterBar`) covers severity, category, host, user, process, ATT&CK
+technique, evidence collection, and a UTC-labeled time range on Timeline,
+and severity/confidence/rule/technique/host/user/collection/time range on
+Findings -- entirely client-side over each tab's own already-fetched
+data.
+
+**ATT&CK** groups techniques by tactic in MITRE's own kill-chain order
+(`CANONICAL_TACTICS`), not alphabetically; a technique belonging to more
+than one tactic (a real, sometimes multi-valued field on
+`attck.Technique`) is shown once per tactic, which is accurate coverage,
+not duplication.
+
+**Activity Chains** get an actual visual reconstruction -- vertical
+steps connected by arrows (User Logon -> Office -> PowerShell ->
+payload -> persistence -> network), each step showing the underlying
+event's timestamp/process, a severity/ATT&CK rollup from covering
+findings, and a click-to-expand provenance panel. Steps render in
+exactly the order `correlate.BuildActivityChains` recorded them
+(`Correlation.EventIDs`, never re-sorted or re-inferred client-side) --
+`TestBuildActivityChains_FullNarrative` locks that ordering guarantee in
+on the Go side, which is what makes it safe for the frontend to trust
+positionally. Every other correlation type (process/entity/temporal)
+still renders as a compact card, unchanged.
+
+The case overview's **Investigation Summary** is a short, template-built
+paragraph from counts already on the page (`buildInvestigationSummary`)
+-- e.g. "11 finding(s) were observed across 2 evidence collection(s) (2
+execution, 2 persistence)... 2 critical and 7 high-severity finding(s)
+warrant immediate review." Every number is a direct count or grouping of
+existing finding/technique data; there is no AI narrative and nothing is
+estimated. A case with no evidence, or evidence that hasn't been
+analyzed yet, gets an explicit sentence saying so rather than an empty
+or misleading summary -- "insufficient evidence" as a stated fact, never
+fabricated certainty.
 
 ## Assumptions made
 

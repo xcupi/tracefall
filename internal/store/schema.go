@@ -20,8 +20,24 @@ CREATE TABLE IF NOT EXISTS cases (
 	description TEXT NOT NULL DEFAULT '',
 	status      TEXT NOT NULL,
 	created_at  TEXT NOT NULL,
-	updated_at  TEXT NOT NULL
+	updated_at  TEXT NOT NULL,
+	-- Phase 6 additions -- see internal/model.Case's doc comment for why
+	-- case_status is a SEPARATE concept from status above (analysis
+	-- lifecycle vs. analyst investigative workflow), never conflated.
+	-- analyzed_at is '' until AnalyzeCase first succeeds. On a database
+	-- predating these columns, migrate.go's addColumnIfMissing adds them
+	-- (CREATE TABLE IF NOT EXISTS is a no-op against an existing table).
+	case_status TEXT NOT NULL DEFAULT 'open',
+	priority    TEXT NOT NULL DEFAULT 'medium',
+	analyzed_at TEXT NOT NULL DEFAULT ''
 );
+-- idx_cases_name_unique (case names are unique, trimmed and
+-- case-insensitively) is created in migrate.go, not here: a database
+-- from before this constraint existed might already contain two cases
+-- with the same name, which migrate.go must detect and report -- not
+-- silently fix -- before it's safe to create the index. See that file's
+-- enforceCaseNameUniqueness and docs/data-model.md's "Case name
+-- uniqueness" section.
 
 -- One row per independent evidence-gathering event ingested into a case
 -- (one KAPE ZIP upload, one local-path ingest). A case's timeline,
@@ -39,6 +55,7 @@ CREATE TABLE IF NOT EXISTS collections (
 	file_count             INTEGER NOT NULL DEFAULT 0,
 	supported_file_count   INTEGER NOT NULL DEFAULT 0,
 	unsupported_file_count INTEGER NOT NULL DEFAULT 0,
+	imported_file_count    INTEGER NOT NULL DEFAULT 0,
 	parsed_event_count     INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_collections_case ON collections(case_id);
@@ -55,23 +72,39 @@ CREATE INDEX IF NOT EXISTS idx_collections_case ON collections(case_id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_collections_case_archive_hash
 	ON collections(case_id, archive_hash) WHERE archive_hash != '';
 
+-- One row per individual evidence file discovered inside a collection --
+-- the unit an investigator selects, imports, inspects, and deletes
+-- independently (see internal/model.SourceFile's doc comment for the
+-- discovered -> imported life cycle, and docs/data-model.md's "Evidence
+-- file model" section). A row exists the moment a file is *discovered*,
+-- before it's ever parsed -- import_status distinguishes a merely
+-- cataloged file from one that's actually become evidence.
 CREATE TABLE IF NOT EXISTS source_files (
-	id            TEXT PRIMARY KEY,
-	case_id       TEXT NOT NULL REFERENCES cases(id),
-	collection_id TEXT NOT NULL REFERENCES collections(id),
-	path          TEXT NOT NULL,
-	artifact_type TEXT NOT NULL,
-	parser        TEXT NOT NULL,
-	row_count     INTEGER NOT NULL,
-	sha256        TEXT NOT NULL,
-	ingested_at   TEXT NOT NULL
+	id                TEXT PRIMARY KEY,
+	case_id           TEXT NOT NULL REFERENCES cases(id),
+	collection_id     TEXT NOT NULL REFERENCES collections(id),
+	original_filename TEXT NOT NULL DEFAULT '',
+	path              TEXT NOT NULL,
+	artifact_type     TEXT NOT NULL DEFAULT '',
+	parser            TEXT NOT NULL DEFAULT '',
+	supported         INTEGER NOT NULL DEFAULT 0,
+	size_bytes        INTEGER NOT NULL DEFAULT 0,
+	sha256            TEXT NOT NULL DEFAULT '',
+	import_status     TEXT NOT NULL DEFAULT 'discovered',
+	event_count       INTEGER NOT NULL DEFAULT 0,
+	discovered_at     TEXT NOT NULL,
+	imported_at       TEXT NOT NULL DEFAULT '',
+	deleted_at        TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_source_files_case ON source_files(case_id);
--- idx_source_files_collection is created in migrate.go, not here: on a
--- database from before "collection_id" existed, this schema's
--- CREATE TABLE IF NOT EXISTS is a no-op (the table already exists
--- without that column), so an index on it here would fail before
--- migrate.go's ALTER TABLE gets a chance to add the column. See there.
+-- idx_source_files_collection and idx_source_files_collection_sha256_active
+-- (file-level duplicate protection -- see migrate.go for why it's scoped
+-- to one collection, not the whole case) are created in migrate.go, not
+-- here: on a database from before "collection_id" (or the newer
+-- source_files columns) existed, this schema's CREATE TABLE IF NOT
+-- EXISTS is a no-op (the table already exists without those columns), so
+-- an index referencing them here would fail before migrate.go's ALTER
+-- TABLE gets a chance to add them. See there.
 
 CREATE TABLE IF NOT EXISTS raw_evidence (
 	id               TEXT PRIMARY KEY,
@@ -166,4 +199,74 @@ CREATE TABLE IF NOT EXISTS correlations (
 	last_seen     TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_correlations_case ON correlations(case_id);
+
+-- ==================== Phase 6: analyst workflow ====================
+-- Everything below is analyst-entered workflow state, never forensic
+-- evidence and never produced by detect/correlate/investigate -- see
+-- internal/model/workflow.go's package doc comment. All four tables are
+-- independent of findings/correlations specifically so that
+-- ReplaceAnalysis (which deletes and rebuilds those two tables on every
+-- re-analysis) never touches any of this.
+
+-- Free-text analyst annotations attachable to any target entity. Never
+-- cascade-deleted when their target disappears (see model.Note's doc
+-- comment) -- only a full case deletion removes them, alongside
+-- everything else belonging to that case.
+CREATE TABLE IF NOT EXISTS notes (
+	id          TEXT PRIMARY KEY,
+	case_id     TEXT NOT NULL REFERENCES cases(id),
+	target_type TEXT NOT NULL,
+	target_id   TEXT NOT NULL,
+	note        TEXT NOT NULL,
+	created_at  TEXT NOT NULL,
+	updated_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_notes_case ON notes(case_id);
+CREATE INDEX IF NOT EXISTS idx_notes_target ON notes(target_type, target_id);
+
+-- Lightweight labels, user-created or chosen from model.CommonTags.
+CREATE TABLE IF NOT EXISTS tags (
+	id          TEXT PRIMARY KEY,
+	case_id     TEXT NOT NULL REFERENCES cases(id),
+	target_type TEXT NOT NULL,
+	target_id   TEXT NOT NULL,
+	tag         TEXT NOT NULL,
+	created_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_tags_case ON tags(case_id);
+CREATE INDEX IF NOT EXISTS idx_tags_target ON tags(target_type, target_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_tags_unique ON tags(target_type, target_id, tag);
+
+-- Analyst review status for one Finding or Investigation (target_type
+-- 'finding'|'investigation'). One row per target -- upserted, not
+-- appended -- since a target has exactly one CURRENT status; note is a
+-- short free-text explanation of the status change, not a full note
+-- thread (use the notes table above for that). Never joined against
+-- findings/correlations by foreign key, since target_id must remain
+-- resolvable even after ReplaceAnalysis deletes the finding it once
+-- pointed at (see model.AnalystStatus's doc comment).
+CREATE TABLE IF NOT EXISTS analyst_status (
+	case_id     TEXT NOT NULL REFERENCES cases(id),
+	target_type TEXT NOT NULL,
+	target_id   TEXT NOT NULL,
+	status      TEXT NOT NULL,
+	note        TEXT NOT NULL DEFAULT '',
+	updated_at  TEXT NOT NULL,
+	PRIMARY KEY (target_type, target_id)
+);
+CREATE INDEX IF NOT EXISTS idx_analyst_status_case ON analyst_status(case_id);
+
+-- Append-only audit trail of analyst/system actions -- never raw
+-- evidence content, never secrets (see model.AuditEvent's doc comment).
+CREATE TABLE IF NOT EXISTS audit_log (
+	id          TEXT PRIMARY KEY,
+	case_id     TEXT NOT NULL REFERENCES cases(id),
+	timestamp   TEXT NOT NULL,
+	action      TEXT NOT NULL,
+	actor       TEXT NOT NULL DEFAULT 'local-user',
+	target_type TEXT NOT NULL DEFAULT '',
+	target_id   TEXT NOT NULL DEFAULT '',
+	summary     TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_audit_log_case ON audit_log(case_id, timestamp);
 `

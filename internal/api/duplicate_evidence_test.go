@@ -32,7 +32,7 @@ func TestDuplicateEvidence_EndToEnd(t *testing.T) {
 	evidenceRoot := filepath.Join("..", "..", "testdata", "synthetic_case")
 
 	// -- Add evidence #1 --
-	var first IngestResultSummary
+	var first DiscoverResult
 	rec := doJSON(t, mux, "POST", "/api/cases/"+c.ID+"/ingest", map[string]string{"path": evidenceRoot}, &first)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("first ingest: status %d, body %s", rec.Code, rec.Body.String())
@@ -40,7 +40,8 @@ func TestDuplicateEvidence_EndToEnd(t *testing.T) {
 	if collections := listCollections(t, mux, c.ID); len(collections) != 1 {
 		t.Fatalf("collection count after first ingest = %d, want 1", len(collections))
 	}
-	firstEventCount := first.EventCount
+	_, firstImport := importAll(t, mux, c.ID, first)
+	firstEventCount := firstImport.EventCount
 
 	// -- Add the exact same evidence again --
 	rec = doJSON(t, mux, "POST", "/api/cases/"+c.ID+"/ingest", map[string]string{"path": evidenceRoot}, nil)
@@ -65,8 +66,8 @@ func TestDuplicateEvidence_EndToEnd(t *testing.T) {
 	if len(collections) != 1 {
 		t.Fatalf("collection count after duplicate ingest = %d, want 1 (still just Collection #1)", len(collections))
 	}
-	if collections[0].ID != first.Collection.ID || collections[0].ParsedEventCount != first.Collection.ParsedEventCount {
-		t.Errorf("existing collection changed after the rejected duplicate: got %+v, want unchanged from %+v", collections[0], first.Collection)
+	if collections[0].ID != first.Collection.ID || collections[0].ParsedEventCount != firstImport.Collection.ParsedEventCount {
+		t.Errorf("existing collection changed after the rejected duplicate: got %+v, want unchanged from %+v", collections[0], firstImport.Collection)
 	}
 	var timeline []model.Event
 	doJSON(t, mux, "GET", "/api/cases/"+c.ID+"/timeline", nil, &timeline)
@@ -98,7 +99,7 @@ func TestDuplicateEvidence_UploadRejected(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("first upload: status %d, body %s", rec.Code, rec.Body.String())
 	}
-	var first UploadResultSummary
+	var first DiscoverResult
 	mustDecode(t, rec, &first)
 
 	rec = uploadZip(t, mux, c.ID, zipData)

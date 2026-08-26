@@ -3,6 +3,13 @@
 // case-scoped SourceFile/Event/RawEvidence records ready for storage.
 // This is the only place parser output gets IDs and a CaseID stamped onto
 // it -- parsers themselves stay case-agnostic and storage-agnostic.
+//
+// Discovery and parsing are deliberately separate operations (see
+// Discover and ParseFile below): internal/api.Service catalogs every file
+// in a newly-added evidence package as soon as it's discovered, before
+// parsing anything, so an investigator can select exactly which files
+// become evidence -- see docs/data-model.md's "Evidence selection
+// workflow" section for why.
 package ingest
 
 import (
@@ -13,7 +20,6 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"time"
 
 	"github.com/google/uuid"
 
@@ -38,37 +44,26 @@ func Registry() []parsers.ArtifactParser {
 	}
 }
 
-// Result is the full output of ingesting one evidence root directory.
-type Result struct {
-	SourceFiles []model.SourceFile
-	Events      []model.Event
-	Raw         []model.RawEvidence
-	Skipped     []string    // relative paths that matched no parser
-	Errors      []FileError // relative paths a matched parser failed on
+// DiscoveredFile is one file found while cataloging an evidence root --
+// classified and hashed, but not yet parsed. See Discover.
+type DiscoveredFile struct {
+	Path         string // relative to the evidence root, forward-slash
+	OriginalName string // basename
+	ArtifactType string // "" if no parser recognizes this file
+	Parser       string // "" if no parser recognizes this file
+	Supported    bool
+	SizeBytes    int64
+	SHA256       string
 }
 
-type FileError struct {
-	Path string
-	Err  error
-}
-
-// Walk discovers every regular file under root, matches it against the
-// parser registry (first match wins), and parses it. Files matching no
-// parser are recorded in Result.Skipped rather than failing the ingest --
-// a real KAPE package routinely contains far more files than Phase 1 has
-// parsers for, and that's expected, not an error.
-//
-// collectionID identifies which of the case's evidence collections this
-// walk belongs to (see internal/model.Collection) -- a case can be
-// ingested from more than one KAPE package over time, and every
-// SourceFile/Event this produces is stamped with it so later evidence
-// can always be traced back to which collection it came from.
-// Deduplicating events *across* collections is deliberately not this
-// package's job: Walk has no visibility into what's already stored for
-// the case, so that happens one layer up, in internal/api.Service.
-func Walk(caseID, collectionID, root string, registry []parsers.ArtifactParser) (Result, error) {
-	var res Result
-
+// Discover walks every regular file under root and classifies each one
+// against the parser registry (first match wins), without parsing any of
+// them. This is the first phase of adding evidence: it produces the
+// catalog an investigator selects from (see internal/api.Service's
+// discovery methods) -- Parse/import happens later, only for the files
+// actually selected, via ParseFile.
+func Discover(root string, registry []parsers.ArtifactParser) ([]DiscoveredFile, error) {
+	var out []DiscoveredFile
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -89,68 +84,85 @@ func Walk(caseID, collectionID, root string, registry []parsers.ArtifactParser) 
 				break
 			}
 		}
-		if matched == nil {
-			res.Skipped = append(res.Skipped, relPath)
-			return nil
+
+		info, err := d.Info()
+		if err != nil {
+			return err
 		}
 
-		parsed, perr := matched.Parse(path)
-		if perr != nil {
-			res.Errors = append(res.Errors, FileError{Path: relPath, Err: perr})
-			return nil
-		}
-
-		sf := model.SourceFile{
-			ID:           uuid.NewString(),
-			CaseID:       caseID,
-			CollectionID: collectionID,
+		df := DiscoveredFile{
 			Path:         relPath,
-			ArtifactType: matched.ArtifactType(),
-			Parser:       matched.Name(),
-			RowCount:     len(parsed.Events),
+			OriginalName: filepath.Base(relPath),
+			SizeBytes:    info.Size(),
 			SHA256:       sha256File(path),
-			IngestedAt:   time.Now().UTC(),
 		}
-		res.SourceFiles = append(res.SourceFiles, sf)
-
-		for i := range parsed.Events {
-			ev := parsed.Events[i]
-			ev.ID = uuid.NewString()
-			ev.CaseID = caseID
-			ev.CollectionID = collectionID
-			ev.SourceFileID = sf.ID
-
-			if i < len(parsed.Raw) {
-				raw := parsed.Raw[i]
-				raw.ID = uuid.NewString()
-				raw.CaseID = caseID
-				raw.SourceFileID = sf.ID
-				ev.RawEvidenceID = raw.ID
-				res.Raw = append(res.Raw, raw)
-			}
-
-			res.Events = append(res.Events, ev)
+		if matched != nil {
+			df.ArtifactType = matched.ArtifactType()
+			df.Parser = matched.Name()
+			df.Supported = true
 		}
+		out = append(out, df)
 		return nil
 	})
 	if err != nil {
-		return res, fmt.Errorf("ingest: walking %s: %w", root, err)
+		return nil, fmt.Errorf("ingest: discovering %s: %w", root, err)
+	}
+	return out, nil
+}
+
+// ParsedFile is the result of parsing exactly one already-discovered
+// file -- the events/raw records it produced, ready for deduplication
+// and storage.
+type ParsedFile struct {
+	Events []model.Event
+	Raw    []model.RawEvidence
+}
+
+// ParseFile parses one file at root/relPath with p, stamping every
+// resulting Event/RawEvidence with caseID/collectionID/sourceFileID.
+// Events are backfilled with a host the same way Walk's batch parse is
+// (see backfillHost) -- since this parses one file at a time now, that
+// backfill only has this one file's own events to learn a dominant host
+// from; internal/api.Service.enrichMissingHosts covers the case-wide
+// fallback exactly as it already does for Walk's output.
+func ParseFile(caseID, collectionID, sourceFileID, root, relPath string, p parsers.ArtifactParser) (ParsedFile, error) {
+	abs := filepath.Join(root, filepath.FromSlash(relPath))
+	parsed, err := p.Parse(abs)
+	if err != nil {
+		return ParsedFile{}, err
 	}
 
-	backfillHost(res.Events)
-	return res, nil
+	events := make([]model.Event, len(parsed.Events))
+	raw := make([]model.RawEvidence, 0, len(parsed.Raw))
+	for i := range parsed.Events {
+		ev := parsed.Events[i]
+		ev.ID = uuid.NewString()
+		ev.CaseID = caseID
+		ev.CollectionID = collectionID
+		ev.SourceFileID = sourceFileID
+
+		if i < len(parsed.Raw) {
+			r := parsed.Raw[i]
+			r.ID = uuid.NewString()
+			r.CaseID = caseID
+			r.SourceFileID = sourceFileID
+			ev.RawEvidenceID = r.ID
+			raw = append(raw, r)
+		}
+		events[i] = ev
+	}
+	backfillHost(events)
+	return ParsedFile{Events: events, Raw: raw}, nil
 }
 
 // backfillHost fills in Host on events that don't carry one natively.
 // Some artifact formats (Prefetch, registry hives) don't record a
-// hostname at all -- Phase 1 assumes one KAPE evidence package
-// corresponds to one host, so any event missing a host inherits the
-// dominant host seen among events that do carry one (Windows Event Log
-// records always do). Leaving Host blank instead would silently make
-// host-scoped correlation (internal/correlate) match those events
-// against each other by their shared emptiness rather than by any real
-// evidence -- a multi-host case is a Phase 2 concern, noted in
-// ARCHITECTURE.md.
+// hostname at all -- Tracefall assumes one evidence file corresponds to
+// one host, so any event missing a host inherits the dominant host seen
+// among events that do carry one (Windows Event Log records always do).
+// Leaving Host blank instead would silently make host-scoped correlation
+// (internal/correlate) match those events against each other by their
+// shared emptiness rather than by any real evidence.
 func backfillHost(events []model.Event) {
 	counts := map[string]int{}
 	for _, e := range events {

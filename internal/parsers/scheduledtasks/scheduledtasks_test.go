@@ -90,6 +90,76 @@ func TestParseUTF16(t *testing.T) {
 	}
 }
 
+// TestParse_Phase4RunLevelAndTaskPath covers the two new fields Phase 4A
+// added: Principal/RunLevel (a genuine privilege-escalation signal when
+// "HighestAvailable") and the reconstructed Task Scheduler namespace path
+// (derived from where KAPE preserved the file under a "Tasks" root, since
+// Parse only receives an absolute path).
+func TestParse_Phase4RunLevelAndTaskPath(t *testing.T) {
+	xml := `<?xml version="1.0" encoding="UTF-8"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo><Date>2026-01-15T09:17:30.0000000</Date><Author>CORP\jdoe</Author></RegistrationInfo>
+  <Principals>
+    <Principal id="Author">
+      <UserId>S-1-5-21-111-222-333-1001</UserId>
+      <RunLevel>HighestAvailable</RunLevel>
+    </Principal>
+  </Principals>
+  <Actions Context="Author"><Exec><Command>C:\Users\Public\bad.exe</Command></Exec></Actions>
+</Task>`
+	dir := t.TempDir()
+	tasksDir := filepath.Join(dir, "C", "Windows", "System32", "Tasks", "Microsoft", "Windows", "UpdateOrchestrator")
+	if err := os.MkdirAll(tasksDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(tasksDir, "Schedule Scan.xml")
+	if err := os.WriteFile(path, []byte(xml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := New().Parse(path)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if len(res.Events) != 1 {
+		t.Fatalf("got %d events, want 1", len(res.Events))
+	}
+	e := res.Events[0]
+	if e.Extra["run_level"] != "HighestAvailable" {
+		t.Errorf("run_level = %q, want HighestAvailable", e.Extra["run_level"])
+	}
+	wantPath := `\Microsoft\Windows\UpdateOrchestrator\Schedule Scan`
+	if e.Extra["task_path"] != wantPath {
+		t.Errorf("task_path = %q, want %q", e.Extra["task_path"], wantPath)
+	}
+	if e.Extra["principal_user_id"] != "S-1-5-21-111-222-333-1001" {
+		t.Errorf("principal_user_id = %q", e.Extra["principal_user_id"])
+	}
+}
+
+// A task with no "Tasks" segment in its path (e.g. an isolated test
+// fixture, or an unusual collection layout) must still parse successfully
+// and fall back to a bare "\"+taskName rather than erroring.
+func TestParse_TaskPathFallsBackWithoutTasksSegment(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "StandaloneTask.xml")
+	xml := `<?xml version="1.0" encoding="UTF-8"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo><Date>2026-01-15T09:17:30.0000000</Date><Author>SYSTEM</Author></RegistrationInfo>
+  <Actions Context="Author"><Exec><Command>C:\Windows\System32\cleanmgr.exe</Command></Exec></Actions>
+</Task>`
+	if err := os.WriteFile(path, []byte(xml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	res, err := New().Parse(path)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if res.Events[0].Extra["task_path"] != `\StandaloneTask` {
+		t.Errorf("task_path = %q, want \\StandaloneTask", res.Events[0].Extra["task_path"])
+	}
+}
+
 func TestParseUTF8Fallback(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "PlainUTF8Task.xml")

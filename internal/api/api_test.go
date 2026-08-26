@@ -29,12 +29,24 @@ func newTestService(t *testing.T) *Service {
 
 func routerFor(svc *Service) *http.ServeMux {
 	logger := slog.New(slog.NewTextHandler(bytes.NewBuffer(nil), nil))
-	return NewRouter(svc, logger, testMaxUploadBytes)
+	return NewRouter(svc, logger, testMaxUploadBytes, false)
 }
 
 func newTestRouter(t *testing.T) *http.ServeMux {
 	t.Helper()
 	return routerFor(newTestService(t))
+}
+
+func TestHealthz_ReportsLANExposure(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(bytes.NewBuffer(nil), nil))
+	for _, lanExposed := range []bool{false, true} {
+		mux := NewRouter(newTestService(t), logger, testMaxUploadBytes, lanExposed)
+		var resp map[string]any
+		doJSON(t, mux, "GET", "/api/healthz", nil, &resp)
+		if resp["lan_exposed"] != lanExposed {
+			t.Errorf("lanExposed=%v: healthz lan_exposed = %v, want %v", lanExposed, resp["lan_exposed"], lanExposed)
+		}
+	}
 }
 
 func doJSON(t *testing.T, mux *http.ServeMux, method, path string, body any, out any) *httptest.ResponseRecorder {
@@ -61,6 +73,30 @@ func doJSON(t *testing.T, mux *http.ServeMux, method, path string, body any, out
 	return rec
 }
 
+// discoverPath POSTs a local-path discovery request to
+// /api/cases/{id}/ingest and returns the response recorder, mirroring
+// uploadZip for the upload path.
+func discoverPath(t *testing.T, mux *http.ServeMux, caseID, path string) *httptest.ResponseRecorder {
+	t.Helper()
+	return doJSON(t, mux, "POST", "/api/cases/"+caseID+"/ingest", map[string]string{"path": path}, nil)
+}
+
+// discoverPathAndImportAll performs the full two-phase evidence-adding
+// flow for a local path (discover, then import every supported file
+// discovered) as one call -- the local-path-ingest counterpart of
+// uploadAndImportAll in upload_test.go.
+func discoverPathAndImportAll(t *testing.T, mux *http.ServeMux, caseID, path string) (DiscoverResult, ImportResult) {
+	t.Helper()
+	rec := doJSON(t, mux, "POST", "/api/cases/"+caseID+"/ingest", map[string]string{"path": path}, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("discover from path %s: status %d, body %s", path, rec.Code, rec.Body.String())
+	}
+	var disc DiscoverResult
+	mustDecode(t, rec, &disc)
+	_, imp := importAll(t, mux, caseID, disc)
+	return disc, imp
+}
+
 // TestEndToEnd_SyntheticCase is Tracefall's required end-to-end test: it
 // drives the synthetic dataset through the real API surface --
 // ingestion -> normalization -> detection -> correlation -> ATT&CK
@@ -82,27 +118,30 @@ func TestEndToEnd_SyntheticCase(t *testing.T) {
 		t.Fatalf("new case status = %q, want %q", c.Status, model.CaseStatusCreated)
 	}
 
-	// 2. Ingest the synthetic evidence package (ingestion -> parsing -> normalization).
+	// 2. Discover, then import, the synthetic evidence package (discovery
+	// -> selection -> parsing -> normalization). Every supported file
+	// discovered is selected, reproducing the old one-shot ingest's net
+	// effect end to end.
 	evidenceRoot := filepath.Join("..", "..", "testdata", "synthetic_case")
-	var ingestRes IngestResultSummary
-	rec = doJSON(t, mux, "POST", "/api/cases/"+c.ID+"/ingest", map[string]string{"path": evidenceRoot}, &ingestRes)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("ingest: got status %d, body %s", rec.Code, rec.Body.String())
+	disc, ingestRes := discoverPathAndImportAll(t, mux, c.ID, evidenceRoot)
+	if disc.SupportedCount != 5 {
+		t.Fatalf("got %d supported files discovered, want 5", disc.SupportedCount)
 	}
 	if ingestRes.EventCount == 0 {
-		t.Fatal("ingest produced 0 events")
+		t.Fatal("import produced 0 events")
 	}
-	if len(ingestRes.SourceFiles) != 5 {
-		t.Errorf("got %d source files, want 5", len(ingestRes.SourceFiles))
+	if len(ingestRes.Imported) != 5 {
+		t.Errorf("got %d imported files, want 5", len(ingestRes.Imported))
 	}
 
-	// Ingesting the exact same evidence a second time must be rejected as
-	// a duplicate collection -- see TestDuplicateEvidence_EndToEnd for the
-	// dedicated test of this behavior (collection count, event count, and
-	// the existing collection all unaffected).
-	rec = doJSON(t, mux, "POST", "/api/cases/"+c.ID+"/ingest", map[string]string{"path": evidenceRoot}, nil)
+	// Discovering the exact same evidence a second time (as a new
+	// collection) must be rejected as a duplicate collection -- see
+	// TestDuplicateEvidence_EndToEnd for the dedicated test of this
+	// behavior (collection count, event count, and the existing
+	// collection all unaffected).
+	rec = discoverPath(t, mux, c.ID, evidenceRoot)
 	if rec.Code != http.StatusConflict {
-		t.Fatalf("second identical ingest: got status %d, want %d, body %s", rec.Code, http.StatusConflict, rec.Body.String())
+		t.Fatalf("second identical discovery: got status %d, want %d, body %s", rec.Code, http.StatusConflict, rec.Body.String())
 	}
 
 	// 3. Run analysis (detection -> correlation).
@@ -240,14 +279,16 @@ func TestEndToEnd_SyntheticCase(t *testing.T) {
 		t.Error("expected at least one activity_chain correlation")
 	}
 
-	// 10. GET sources (source files, across all collections). Two
-	// ingests of the same directory produced two collections' worth of
-	// source files -- one per collection.
+	// 10. GET sources (every cataloged source file, across all
+	// collections -- imported and merely-discovered/unsupported alike).
+	// The synthetic package has 5 supported (all imported above) plus its
+	// own README.md, which is discovered but unsupported.
 	var sources []model.SourceFile
 	doJSON(t, mux, "GET", "/api/cases/"+c.ID+"/sources", nil, &sources)
-	if len(sources) != 5 {
-		t.Errorf("got %d source files, want 5", len(sources))
+	if len(sources) != 6 {
+		t.Errorf("got %d source files, want 6 (5 imported + 1 unsupported README.md)", len(sources))
 	}
+	var importedCount int
 	for _, sf := range sources {
 		if sf.SHA256 == "" {
 			t.Errorf("source file %s missing SHA-256", sf.Path)
@@ -255,6 +296,12 @@ func TestEndToEnd_SyntheticCase(t *testing.T) {
 		if sf.CollectionID == "" {
 			t.Errorf("source file %s missing collection ID", sf.Path)
 		}
+		if sf.ImportStatus == model.SourceFileImported {
+			importedCount++
+		}
+	}
+	if importedCount != 5 {
+		t.Errorf("got %d imported source files, want 5", importedCount)
 	}
 
 	// 11. GET evidence (the list of collections) and confirm the rejected
@@ -271,19 +318,23 @@ func TestEndToEnd_SyntheticCase(t *testing.T) {
 		if col.SupportedFileCount != 5 {
 			t.Errorf("collection %s supported_file_count = %d, want 5", col.ID, col.SupportedFileCount)
 		}
+		if col.ImportedFileCount != 5 {
+			t.Errorf("collection %s imported_file_count = %d, want 5", col.ID, col.ImportedFileCount)
+		}
 		if col.ArchiveHash == "" {
 			t.Errorf("collection %s has no archive_hash recorded", col.ID)
 		}
 	}
 
-	// 12. GET the collection's detail.
+	// 12. GET the collection's detail: every cataloged file, imported or
+	// not (5 imported + 1 unsupported README.md).
 	var collDetail CollectionDetail
 	rec = doJSON(t, mux, "GET", "/api/cases/"+c.ID+"/evidence/"+collections[0].ID, nil, &collDetail)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("get collection detail: status %d, body %s", rec.Code, rec.Body.String())
 	}
-	if len(collDetail.SourceFiles) != 5 {
-		t.Errorf("collection detail source files = %d, want 5", len(collDetail.SourceFiles))
+	if len(collDetail.SourceFiles) != 6 {
+		t.Errorf("collection detail source files = %d, want 6", len(collDetail.SourceFiles))
 	}
 }
 

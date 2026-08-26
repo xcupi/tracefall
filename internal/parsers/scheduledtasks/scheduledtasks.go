@@ -50,7 +50,8 @@ type taskXML struct {
 	} `xml:"RegistrationInfo"`
 	Principals struct {
 		Principal []struct {
-			UserId string `xml:"UserId"`
+			UserId   string `xml:"UserId"`
+			RunLevel string `xml:"RunLevel"`
 		} `xml:"Principal"`
 	} `xml:"Principals"`
 	Actions struct {
@@ -89,9 +90,14 @@ func (p Parser) Parse(absPath string) (parsers.ParseResult, error) {
 	// Prefer the human-readable Author (e.g. "CORP\jdoe"); Task Scheduler
 	// XML's Principal/UserId is frequently a raw SID, which is only
 	// useful as a fallback when no Author was recorded.
+	principalUserId, runLevel := "", ""
+	if len(t.Principals.Principal) > 0 {
+		principalUserId = t.Principals.Principal[0].UserId
+		runLevel = t.Principals.Principal[0].RunLevel
+	}
 	user := t.RegistrationInfo.Author
-	if user == "" && len(t.Principals.Principal) > 0 {
-		user = t.Principals.Principal[0].UserId
+	if user == "" {
+		user = principalUserId
 	}
 
 	var command, args string
@@ -100,6 +106,18 @@ func (p Parser) Parse(absPath string) (parsers.ParseResult, error) {
 		args = t.Actions.Exec[0].Arguments
 	}
 	commandLine := strings.TrimSpace(command + " " + args)
+
+	extra := map[string]string{
+		"task_name":         taskName,
+		"author":            t.RegistrationInfo.Author,
+		"principal_user_id": principalUserId,
+		// RunLevel is "HighestAvailable" or "LeastPrivilege" per the Task
+		// Scheduler XML schema -- "HighestAvailable" is a genuine
+		// triage-relevant signal (the task runs elevated), so it's kept
+		// distinct rather than folded into a generic field.
+		"run_level": runLevel,
+		"task_path": taskPathFrom(absPath, taskName),
+	}
 
 	ev := model.Event{
 		Timestamp:       ts,
@@ -112,10 +130,7 @@ func (p Parser) Parse(absPath string) (parsers.ParseResult, error) {
 		Parser:          parserName,
 		Confidence:      1.0,
 		SourceReference: "task:" + taskName,
-		Extra: map[string]string{
-			"task_name": taskName,
-			"author":    t.RegistrationInfo.Author,
-		},
+		Extra:           extra,
 	}
 
 	rawJSON, _ := json.Marshal(t)
@@ -126,6 +141,26 @@ func (p Parser) Parse(absPath string) (parsers.ParseResult, error) {
 			Raw:             string(rawJSON),
 		}},
 	}, nil
+}
+
+// taskPathFrom reconstructs the task's Task Scheduler namespace path (e.g.
+// `\Microsoft\Windows\UpdateOrchestrator\Schedule Scan`) from its absolute
+// filesystem location, which KAPE preserves faithfully under a "Tasks"
+// root (e.g. ".../Tasks/Microsoft/Windows/UpdateOrchestrator/Schedule
+// Scan"). Falls back to just "\"+taskName if no "Tasks" segment is found,
+// since Parse only receives an absolute path, not the evidence root or a
+// relative path the way Detect does.
+func taskPathFrom(absPath, taskName string) string {
+	norm := filepath.ToSlash(absPath)
+	segments := strings.Split(norm, "/")
+	for i, seg := range segments {
+		if strings.EqualFold(seg, "Tasks") && i+1 < len(segments) {
+			rest := segments[i+1:]
+			rest[len(rest)-1] = taskName // drop the .xml extension on the final segment
+			return `\` + strings.Join(rest, `\`)
+		}
+	}
+	return `\` + taskName
 }
 
 // decodeUTF16 converts UTF-16 (LE or BE, detected by BOM) bytes to UTF-8.
