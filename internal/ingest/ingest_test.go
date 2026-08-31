@@ -21,19 +21,49 @@ func findParser(registry []parsers.ArtifactParser, relPath string) parsers.Artif
 	return nil
 }
 
-func TestBackfillHost(t *testing.T) {
-	events := []model.Event{
-		{Host: "WKSTN-042"},
-		{Host: "WKSTN-042"},
-		{Host: ""}, // e.g. a Prefetch/registry event with no native host field
-		{Host: "OTHER-HOST"},
+// TestParseFile_LeavesHostToTheServiceLayer pins ParseFile's Phase 7.1
+// contract: it reports the host the artifact itself recorded and nothing
+// more. Prefetch records structurally have no host field, so parsing a
+// Prefetch file alone must yield blank hosts here rather than a value
+// guessed from this one file -- resolving those is
+// internal/api.Service.enrichBatchHosts's job, done once over the whole
+// import batch so the answer can't depend on which file was parsed
+// first (see that function, and internal/api's host-enrichment tests).
+//
+// This replaces the old TestBackfillHost, which asserted the removed
+// per-file backfillHost's majority-vote behavior -- the exact behavior
+// Phase 7.1 removed as both order-dependent in aggregate and, on a
+// genuinely multi-host file, a fabricated answer.
+func TestParseFile_LeavesHostToTheServiceLayer(t *testing.T) {
+	root := filepath.Join("..", "..", "testdata", "synthetic_case")
+	files, err := Discover(root, Registry())
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
 	}
-	backfillHost(events)
-	if events[2].Host != "WKSTN-042" {
-		t.Errorf("blank host backfilled to %q, want the dominant host WKSTN-042", events[2].Host)
+	registry := Registry()
+
+	var prefetchPath string
+	for _, df := range files {
+		if df.ArtifactType == model.ArtifactPrefetch {
+			prefetchPath = df.Path
+			break
+		}
 	}
-	if events[3].Host != "OTHER-HOST" {
-		t.Errorf("non-blank host was overwritten: got %q", events[3].Host)
+	if prefetchPath == "" {
+		t.Fatal("test setup: no Prefetch file in the synthetic dataset")
+	}
+
+	res, err := ParseFile("case-1", "collection-1", "sf-1", root, prefetchPath, findParser(registry, prefetchPath))
+	if err != nil {
+		t.Fatalf("ParseFile(%s): %v", prefetchPath, err)
+	}
+	if len(res.Events) == 0 {
+		t.Fatal("got 0 events from the Prefetch file")
+	}
+	for _, e := range res.Events {
+		if e.Host != "" {
+			t.Errorf("Prefetch event carries Host %q -- ParseFile must not infer a host from a single file", e.Host)
+		}
 	}
 }
 
@@ -93,12 +123,11 @@ func TestDiscover_SyntheticCase(t *testing.T) {
 // (the way the select-then-import workflow does, one file at a time --
 // see internal/api.Service.ImportEvidence) and checks provenance
 // stamping. It deliberately does not assert every event ends up with a
-// host: ParseFile's own backfillHost only has the one file it just
-// parsed to learn a dominant host from, and several artifact types here
-// (Prefetch, registry, Scheduled Tasks) never carry a host natively at
-// all -- filling those in from the rest of the case is
-// Service.enrichMissingHosts's job, exercised at the API level in
-// internal/api's tests, not this package's.
+// host: several artifact types here (Prefetch, registry, Scheduled
+// Tasks) never carry a host natively at all, and ParseFile reports only
+// what the artifact recorded -- filling those in from the rest of the
+// import batch is Service.enrichBatchHosts's job, exercised at the API
+// level in internal/api's tests, not this package's.
 func TestParseFile_SyntheticCase(t *testing.T) {
 	root := filepath.Join("..", "..", "testdata", "synthetic_case")
 	files, err := Discover(root, Registry())

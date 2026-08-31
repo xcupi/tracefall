@@ -12,6 +12,14 @@ const connStatus = document.getElementById("conn-status");
 // numbered by upload order, not stored -- see collectionLabel().
 let currentCollections = [];
 
+// Which case/tab is currently mounted, and each tab's last scroll offset.
+// Together these let a tab change re-render only #tab-content and put the
+// investigator back where they were, instead of rebuilding the page and
+// losing their position -- see switchTab.
+let renderedCaseId = null;
+let renderedTab = null;
+const tabScroll = new Map();
+
 // apiError builds an Error from a failed response body. A 409 carrying
 // duplicate_collection_label (see api.DuplicateEvidenceError) or
 // duplicate_case_name (see api.DuplicateCaseError) is tagged so callers
@@ -117,7 +125,17 @@ function errorBox(err) {
       <div>This evidence package has already been added to this case as ${esc(err.duplicateCollectionLabel)}.</div>
     </div>`;
   }
-  return `<div class="error-box">${esc(err.message || String(err))}</div>`;
+  return `<div class="error-box">${esc(sentenceCase(err.message || String(err)))}</div>`;
+}
+
+// sentenceCase capitalizes the first letter of a backend error message.
+// Go error strings are lowercase by convention ("evidence path does not
+// exist..."), which is right for a log line and wrong for a sentence
+// shown to an investigator. Presentation-only: the API contract keeps
+// the Go convention.
+function sentenceCase(msg) {
+  const s = String(msg);
+  return s ? s.charAt(0).toUpperCase() + s.slice(1) : s;
 }
 
 // nameFieldError/setNameFieldError/clearNameFieldError render the New
@@ -168,7 +186,26 @@ const SOURCE_TYPE_LABELS = {
   kape_upload: "KAPE Upload",
   local_path: "Local Path",
   legacy: "Legacy",
+  ad1_image: "AD1 Forensic Image",
 };
+
+// ARTIFACT_TYPE_LABELS renders internal/model's Artifact* constants for
+// an investigator. The raw constants are stable identifiers meant for
+// code and provenance, not for reading -- "windows_event_log" tells an
+// analyst less than "Windows Event Log (EVTX)" does, especially now that
+// the same artifact type can arrive either as a raw .evtx or as an
+// EvtxECmd CSV export of one.
+const ARTIFACT_TYPE_LABELS = {
+  windows_event_log: "Windows Event Log (EVTX)",
+  prefetch: "Prefetch",
+  registry_run_key: "Registry (RECmd export)",
+  registry_hive: "Windows Registry Hive",
+  scheduled_task: "Scheduled Task",
+};
+function artifactLabel(t) {
+  if (!t) return "-";
+  return ARTIFACT_TYPE_LABELS[t] || t;
+}
 
 // ---------------- Investigation cross-referencing ----------------
 //
@@ -206,6 +243,9 @@ const EVENT_CATEGORIES = {
   registry_persistence: "persistence",
   file_create: "execution",
   dns_query: "network",
+  // Phase 9: a registry key's last-write time, observed in a raw hive.
+  // Not persistence in itself -- see model.EventRegistryKeyLastWrite.
+  registry_key_last_write: "other",
 };
 const EVENT_CATEGORY_LABELS = {
   authentication: "Authentication",
@@ -390,100 +430,697 @@ function categoryBadge(cat) {
   return `<span class="badge status category-${esc(cat)}">${esc(EVENT_CATEGORY_LABELS[cat] || cat)}</span>`;
 }
 
-function filterSelect(prefix, field, allLabel, options) {
-  return `<select id="${prefix}-f-${field}" class="filter-input"><option value="">${esc(allLabel)}</option>${options
-    .map(([v, l]) => `<option value="${esc(v)}">${esc(l)}</option>`)
-    .join("")}</select>`;
+// FILTER_UNKNOWN is the option value standing in for "this record has no
+// value for this field" (a Prefetch event with no user, say). Records
+// with a blank value are neither silently dropped nor shown as an
+// unlabelled blank row -- they're selectable explicitly, under this
+// sentinel. A NUL would be mangled inside an HTML attribute, so the
+// bracketed form is used: it round-trips through the checkbox value
+// intact and can't collide with a real host/user/process/rule value.
+const FILTER_UNKNOWN = "<<tracefall:unknown>>";
+
+const FILTER_FIELD_LABELS = {
+  severity: "Severity",
+  confidence: "Confidence",
+  category: "Category",
+  host: "Host",
+  user: "User",
+  process: "Process",
+  technique: "ATT&CK",
+  rule: "Rule",
+  collection: "Collection",
+  // Phase 9A: the evidence-selection toolbar reuses this same filter
+  // component rather than growing a second one -- so search inside a
+  // dropdown, the selected/total counts, keyboard handling and the
+  // active-filter chips all behave identically to the Timeline and
+  // Findings bars an investigator already knows.
+  family: "Artifact type",
+  priority: "Priority",
+  status: "Status",
+};
+
+// filterStates holds ONE state object per filter bar (keyed by prefix).
+// Both the dropdown checkboxes and the active-filter chips read and
+// write this same object -- the selection is never mirrored into a
+// second place that could drift out of sync with it.
+const filterStates = new Map();
+
+// filterOptions turns raw values into deduped, sorted {value,label}
+// options. Blank/missing values collapse into a single explicit
+// "Unknown" entry rather than appearing as an unlabelled blank row.
+function filterOptions(values, labelFor) {
+  const seen = new Map();
+  let sawBlank = false;
+  for (const v of values) {
+    if (v === undefined || v === null || v === "") {
+      sawBlank = true;
+      continue;
+    }
+    if (!seen.has(v)) seen.set(v, labelFor ? labelFor(v) : String(v));
+  }
+  const out = Array.from(seen, ([value, label]) => ({ value, label }));
+  out.sort((a, b) => a.label.localeCompare(b.label));
+  if (sawBlank) out.push({ value: FILTER_UNKNOWN, label: "(Unknown)" });
+  return out;
 }
 
-// renderFilterBar builds the filter controls present in cfg. Supported
-// keys: severity, confidence, category, host, user, process (booleans),
-// technique/rule (arrays to populate a dropdown), collection (the
-// case's collections, only rendered when there's more than one), and
-// timeRange (boolean).
+const SEVERITY_FILTER_OPTIONS = [
+  { value: "critical", label: "Critical" },
+  { value: "high", label: "High" },
+  { value: "medium", label: "Medium" },
+  { value: "low", label: "Low" },
+];
+const CONFIDENCE_FILTER_OPTIONS = [
+  { value: "high", label: "High" },
+  { value: "medium", label: "Medium" },
+  { value: "low", label: "Low" },
+];
+
+// hasSel / selMatches / selMatchesAny are the multi-select predicates
+// every tab's filter logic runs through. An empty set means "no filter
+// on this field" (matches everything), which is what keeps an untouched
+// filter a no-op exactly as the previous single-select version was.
+function hasSel(set) {
+  return !!set && set.size > 0;
+}
+function selMatches(set, value) {
+  if (!hasSel(set)) return true;
+  return set.has(value ? value : FILTER_UNKNOWN);
+}
+function selMatchesAny(set, values) {
+  if (!hasSel(set)) return true;
+  if (!values || values.length === 0) return set.has(FILTER_UNKNOWN);
+  return values.some((v) => set.has(v));
+}
+
+// renderFilterBar builds a compact filter bar: one dropdown button per
+// categorical field, an optional date-range popover, a Clear all button,
+// and a reserved row beneath for the active-filter chips.
+//
+// cfg keys map to FILTER_FIELD_LABELS. severity/confidence take `true`
+// (their vocabularies are fixed); every other field takes an options
+// array built by the calling tab from its own already-loaded dataset --
+// see renderTimelineTab/renderFindingsTab. A field with no options is
+// omitted entirely rather than rendered as an empty dropdown.
 function renderFilterBar(prefix, cfg) {
-  const parts = [];
-  if (cfg.severity) {
-    parts.push(
-      filterSelect(prefix, "severity", "All severities", [
-        ["critical", "Critical"],
-        ["high", "High"],
-        ["medium", "Medium"],
-        ["low", "Low"],
-      ])
-    );
+  const fields = [];
+  const add = (key, options) => {
+    if (options && options.length) fields.push({ key, label: FILTER_FIELD_LABELS[key], options });
+  };
+  if (cfg.severity) add("severity", SEVERITY_FILTER_OPTIONS);
+  if (cfg.confidence) add("confidence", CONFIDENCE_FILTER_OPTIONS);
+  add("category", cfg.category);
+  add("host", cfg.host);
+  add("user", cfg.user);
+  add("process", cfg.process);
+  add("technique", cfg.technique);
+  add("rule", cfg.rule);
+  // Evidence-selection fields (Phase 9A).
+  add("family", cfg.family);
+  add("priority", cfg.priority);
+  add("status", cfg.status);
+  // A single-collection case has nothing to filter between.
+  if (cfg.collection && cfg.collection.length > 1) add("collection", cfg.collection);
+
+  // Carry the previous selection across a re-render of this same bar.
+  // Switching tabs re-runs the owning tab's render (see switchTab), and
+  // an investigator who filters the Timeline, glances at Findings and
+  // comes back expects their filter still applied -- especially now that
+  // their scroll position is restored, which would otherwise put them at
+  // the same offset in a silently unfiltered list. Selections whose
+  // value no longer exists in the data (evidence deleted since) are
+  // dropped rather than silently matching nothing.
+  // Carry-over is scoped to one case. A date range set while triaging
+  // case A must never silently pre-filter case B's timeline: unlike a
+  // host selection, a range can't be validated away against the new
+  // case's data, so it would survive into an unrelated investigation
+  // and hide events the analyst never chose to exclude.
+  const stored = filterStates.get(prefix);
+  const prev = stored && stored.scope === cfg.scope ? stored : null;
+  const state = {
+    fields,
+    scope: cfg.scope,
+    sel: {},
+    from: prev ? prev.from : null,
+    to: prev ? prev.to : null,
+    raw: prev ? prev.raw : {},
+    timeRange: !!cfg.timeRange,
+    // q is the free-text search term. It lives in the same carried state
+    // as the dropdowns, so a search survives a tab switch exactly as a
+    // filter selection does -- an investigator who searched the Timeline,
+    // glanced at Findings and came back expects their search still
+    // applied, and their scroll position restored into a list that still
+    // matches it.
+    hasSearch: !!cfg.search,
+    q: prev ? prev.q || "" : "",
+  };
+  fields.forEach((f) => {
+    const carried = prev && prev.sel[f.key] ? f.options.filter((o) => prev.sel[f.key].has(o.value)).map((o) => o.value) : [];
+    state.sel[f.key] = new Set(carried);
+  });
+  filterStates.set(prefix, state);
+
+  const dropdowns = fields.map((f) => renderFilterDropdown(prefix, f, state.sel[f.key])).join("");
+  const dateBtn = cfg.timeRange
+    ? `<div class="filter-dd" data-field="__date">
+         <button type="button" class="filter-trigger" id="${prefix}-f-date-btn"
+                 aria-haspopup="dialog" aria-expanded="false" aria-controls="${prefix}-f-date-pop">
+           <span class="filter-trigger-label">Date range</span><span class="filter-caret">&#9662;</span>
+         </button>
+         ${renderDatePopover(prefix)}
+       </div>`
+    : "";
+
+  // The search box sits ABOVE the dropdown row: search is how an
+  // investigator finds something they can already name, filters are how
+  // they narrow a set they cannot. They reach for them in that order.
+  const searchBox = cfg.search
+    ? `<div class="filter-search-row">
+         <input type="search" class="filter-q" id="${prefix}-f-q"
+                placeholder="${esc(cfg.search)}" aria-label="${esc(cfg.search)}" autocomplete="off"
+                value="${esc(state.q)}" />
+       </div>`
+    : "";
+
+  return `
+    ${searchBox}
+    <div class="filter-bar" id="${prefix}-filter-bar">
+      ${dropdowns}
+      ${dateBtn}
+      <button type="button" class="secondary small" id="${prefix}-f-clear">Clear all</button>
+    </div>
+    <div class="filter-chips-host" id="${prefix}-filter-chips"></div>`;
+}
+
+// Search haystacks.
+//
+// Each builds the lower-cased text one row is searchable by, from fields
+// the investigator can actually see or would reasonably type. They are
+// cached on the object (a non-enumerable property, so it never reaches
+// JSON or a re-render) because a 100,000-event timeline would otherwise
+// rebuild every string on every keystroke.
+function searchHaystack(obj, build) {
+  let v = obj.__hay;
+  if (v === undefined) {
+    v = build().filter(Boolean).join(" \u0001 ").toLowerCase();
+    Object.defineProperty(obj, "__hay", { value: v, enumerable: false, configurable: true });
   }
-  if (cfg.confidence) {
-    parts.push(
-      filterSelect(prefix, "confidence", "All confidence", [
-        ["high", "High"],
-        ["medium", "Medium"],
-        ["low", "Low"],
-      ])
-    );
+  return v;
+}
+
+function eventSearchHaystack(e, eventFindingIdx) {
+  return searchHaystack(e, () => [
+    e.host, e.user, e.process_name, e.process_path, e.parent_process, e.parent_process_path,
+    e.event_type, e.command_line, e.file_path, e.registry_path,
+    e.network_source, e.network_dest, e.provider, e.artifact_type, e.parser,
+    e.event_id ? "eventid:" + e.event_id : "",
+    // ATT&CK techniques reach a timeline row through the findings that
+    // cite it, which the tab has already indexed.
+    (eventFindingIdx[e.id] || []).flatMap((f) => f.attack_techniques || []).join(" "),
+  ]);
+}
+
+function findingSearchHaystack(f) {
+  return searchHaystack(f, () => [
+    f.title, f.description, f.detection_rule, f.severity, f.confidence,
+    (f.attack_techniques || []).join(" "),
+  ]);
+}
+
+function investigationSearchHaystack(inv) {
+  return searchHaystack(inv, () => [
+    inv.title, inv.summary, inv.severity, inv.confidence,
+    (inv.attack_techniques || []).join(" "),
+    (inv.hosts || []).join(" "),
+    (inv.users || []).join(" "),
+  ]);
+}
+
+// Below this many options a search field is more visual noise than help
+// -- a four-item Severity list is faster to read than to type into.
+const FILTER_SEARCH_THRESHOLD = 10;
+
+function renderFilterDropdown(prefix, f, selected) {
+  const id = `${prefix}-f-${f.key}`;
+  const sel = selected || new Set();
+  const withSearch = f.options.length > FILTER_SEARCH_THRESHOLD;
+  const searchBox = withSearch
+    ? `<input type="search" class="filter-search" id="${id}-search"
+              placeholder="Search ${esc(f.label.toLowerCase())}..."
+              aria-label="Search ${esc(f.label)} options" autocomplete="off" />`
+    : "";
+
+  return `
+    <div class="filter-dd" data-field="${esc(f.key)}">
+      <button type="button" class="filter-trigger" id="${id}-btn"
+              aria-haspopup="true" aria-expanded="false" aria-controls="${id}-pop">
+        <span class="filter-trigger-label">${esc(f.label)}</span><span class="filter-caret">&#9662;</span>
+      </button>
+      <div class="filter-pop" id="${id}-pop" role="group" aria-label="${esc(f.label)} filter" hidden>
+        <div class="filter-pop-head">
+          <span class="filter-pop-title">${esc(f.label)}</span>
+          <span class="filter-pop-count" id="${id}-count"></span>
+        </div>
+        ${searchBox}
+        <div class="filter-pop-list">
+          ${f.options
+            .map(
+              (o) => `<label class="filter-opt" title="${esc(o.label)}" data-search="${esc(o.label.toLowerCase())}">
+                        <input type="checkbox" data-field="${esc(f.key)}" value="${esc(o.value)}" ${sel.has(o.value) ? "checked" : ""} />
+                        <span class="filter-opt-label">${esc(o.label)}</span>
+                      </label>`
+            )
+            .join("")}
+        </div>
+        <p class="filter-pop-empty empty" hidden>No matching options.</p>
+        <div class="filter-pop-actions">
+          <button type="button" class="secondary small" data-act="all">Select all</button>
+          <button type="button" class="secondary small" data-act="none">Clear</button>
+        </div>
+      </div>
+    </div>`;
+}
+
+// filterSearchApply hides option rows that don't match the search term.
+// It only ever changes row VISIBILITY -- never a checkbox's checked state
+// and never the selection set -- so an option selected earlier stays
+// selected while hidden, and reappears still ticked when the term is
+// cleared. That separation is what makes "search then select more"
+// behave the way an investigator expects.
+function filterSearchApply(dd) {
+  const input = dd.querySelector(".filter-search");
+  const term = input ? input.value.trim().toLowerCase() : "";
+  let visible = 0;
+  dd.querySelectorAll(".filter-opt").forEach((opt) => {
+    const match = !term || opt.dataset.search.includes(term);
+    opt.hidden = !match;
+    if (match) visible++;
+  });
+  const empty = dd.querySelector(".filter-pop-empty");
+  if (empty) empty.hidden = visible !== 0;
+}
+
+// browserUtcOffsetLabel renders the browser's CURRENT offset from UTC,
+// computed live (never hardcoded) so it's correct for the running
+// machine and for whichever side of a DST boundary today falls on.
+// getTimezoneOffset returns minutes BEHIND UTC, hence the negation.
+function browserUtcOffsetLabel() {
+  const mins = -new Date().getTimezoneOffset();
+  if (mins === 0) return "UTC";
+  const sign = mins > 0 ? "+" : "-";
+  const abs = Math.abs(mins);
+  const pad = (n) => String(n).padStart(2, "0");
+  return `UTC${sign}${pad(Math.floor(abs / 60))}:${pad(abs % 60)}`;
+}
+
+// True when the browser is already on UTC, in which case there is no
+// local-vs-UTC ambiguity to warn about and the extra wording is noise.
+function browserIsUTC() {
+  return new Date().getTimezoneOffset() === 0;
+}
+
+// The date range is entered through native date/time inputs, kept inside
+// a compact popover instead of stretched across the bar as four
+// full-width rows.
+//
+// The timezone line is the point of this popover's header: the Timeline
+// column displays timestamps in UTC, while these native inputs are read
+// in the browser's local zone (unchanged, deliberately -- see
+// readDateTime). Rather than silently converting either one, the two
+// readings are labelled so the investigator can see exactly which is
+// which.
+function renderDatePopover(prefix) {
+  const tz = browserUtcOffsetLabel();
+  return `
+    <div class="filter-pop filter-pop-date" id="${prefix}-f-date-pop" role="dialog" aria-label="Date range filter" hidden>
+      <div class="filter-pop-head">
+        <span class="filter-pop-title">Date range</span>
+      </div>
+      <p class="filter-tz-note small muted">
+        Timezone: <strong>${esc(tz)}</strong>${browserIsUTC() ? "" : " (browser local)"}
+        ${browserIsUTC() ? "" : `<br/>Timeline timestamps are shown in UTC.`}
+      </p>
+      <div class="filter-date-row">
+        <label for="${prefix}-f-from-d">From</label>
+        <div class="row" style="gap:var(--space-2)">
+          <input type="date" id="${prefix}-f-from-d" class="filter-date-input" />
+          <input type="time" id="${prefix}-f-from-t" class="filter-time-input" step="1" />
+        </div>
+      </div>
+      <div class="filter-date-row">
+        <label for="${prefix}-f-to-d">To</label>
+        <div class="row" style="gap:var(--space-2)">
+          <input type="date" id="${prefix}-f-to-d" class="filter-date-input" />
+          <input type="time" id="${prefix}-f-to-t" class="filter-time-input" step="1" />
+        </div>
+      </div>
+      <div class="filter-pop-actions">
+        <button type="button" class="secondary small" data-act="clear-date">Clear</button>
+        <button type="button" class="small" data-act="apply-date">Apply</button>
+      </div>
+    </div>`;
+}
+
+// fmtFilterDate renders a bound compactly for the trigger label, e.g.
+// "Jan 15, 09:00". Uses the same local-time reading the input itself
+// shows (see readFilterBar's note on bound parsing).
+function fmtFilterDate(d) {
+  const month = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][d.getMonth()];
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${month} ${d.getDate()}, ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+// dateRangeLabel appends the offset the bounds were entered in whenever
+// that differs from UTC, so a range read off the filter bar can't be
+// mistaken for the UTC timestamps shown in the Timeline column. On a
+// UTC browser the suffix is omitted -- there's nothing to disambiguate.
+function dateRangeLabel(state) {
+  const tz = browserIsUTC() ? "" : ` (${browserUtcOffsetLabel()})`;
+  if (state.from && state.to) return `Date: ${fmtFilterDate(state.from)} → ${fmtFilterDate(state.to)}${tz}`;
+  if (state.from) return `Date: From ${fmtFilterDate(state.from)}${tz}`;
+  if (state.to) return `Date: Until ${fmtFilterDate(state.to)}${tz}`;
+  return "Date range";
+}
+
+// refreshFilterBar re-paints every trigger label and the chip row from
+// the single state object, then calls onChange. Only text/ chips are
+// rewritten -- the dropdown checkboxes are left in the DOM as-is, so an
+// open popover doesn't close or lose scroll while the investigator is
+// still ticking boxes.
+function refreshFilterBar(prefix, onChange) {
+  const state = filterStates.get(prefix);
+  if (!state) return;
+
+  for (const f of state.fields) {
+    const btn = document.getElementById(`${prefix}-f-${f.key}-btn`);
+    if (!btn) continue;
+    const sel = state.sel[f.key];
+    const labelEl = btn.querySelector(".filter-trigger-label");
+
+    // "3 of 12 selected" inside the popover -- the context the compact
+    // trigger label deliberately can't carry.
+    const countEl = document.getElementById(`${prefix}-f-${f.key}-count`);
+    if (countEl) countEl.textContent = sel.size ? `${sel.size} of ${f.options.length} selected` : `${f.options.length} available`;
+    if (sel.size === 0) {
+      labelEl.textContent = f.label;
+      btn.classList.remove("active");
+      btn.title = "";
+    } else if (sel.size === 1) {
+      const only = f.options.find((o) => sel.has(o.value));
+      labelEl.textContent = `${f.label}: ${only ? only.label : ""}`;
+      btn.classList.add("active");
+      btn.title = only ? only.label : "";
+    } else {
+      labelEl.textContent = `${f.label}: ${sel.size} selected`;
+      btn.classList.add("active");
+      btn.title = f.options.filter((o) => sel.has(o.value)).map((o) => o.label).join(", ");
+    }
   }
-  if (cfg.category) {
-    parts.push(filterSelect(prefix, "category", "All categories", Object.entries(EVENT_CATEGORY_LABELS)));
+
+  if (state.timeRange) {
+    const dbtn = document.getElementById(`${prefix}-f-date-btn`);
+    if (dbtn) {
+      dbtn.querySelector(".filter-trigger-label").textContent = dateRangeLabel(state);
+      dbtn.classList.toggle("active", !!(state.from || state.to));
+    }
   }
-  if (cfg.host) parts.push(`<input type="text" id="${prefix}-f-host" class="filter-input" placeholder="Host" />`);
-  if (cfg.user) parts.push(`<input type="text" id="${prefix}-f-user" class="filter-input" placeholder="User" />`);
-  if (cfg.process) parts.push(`<input type="text" id="${prefix}-f-process" class="filter-input" placeholder="Process" />`);
-  if (cfg.technique && cfg.technique.length) {
-    parts.push(filterSelect(prefix, "technique", "All ATT&CK techniques", cfg.technique.map((t) => [t, t])));
+
+  renderFilterChips(prefix);
+  if (onChange) onChange();
+}
+
+// Active filters, each individually removable. Rendered into a host row
+// whose height is reserved by CSS (.filter-chips-host) so chips
+// appearing or disappearing never shift the table below them.
+function renderFilterChips(prefix) {
+  const state = filterStates.get(prefix);
+  const host = document.getElementById(`${prefix}-filter-chips`);
+  if (!state || !host) return;
+
+  const chips = [];
+  for (const f of state.fields) {
+    for (const o of f.options) {
+      if (state.sel[f.key].has(o.value)) {
+        chips.push(`<button type="button" class="filter-chip" data-field="${esc(f.key)}" data-value="${esc(o.value)}"
+                      title="Remove ${esc(f.label)} filter: ${esc(o.label)}"
+                      aria-label="Remove ${esc(f.label)} filter ${esc(o.label)}">
+                      <span class="filter-chip-text">${esc(o.label)}</span><span aria-hidden="true">&times;</span>
+                    </button>`);
+      }
+    }
   }
-  if (cfg.rule && cfg.rule.length) {
-    parts.push(filterSelect(prefix, "rule", "All rules", cfg.rule.map((r) => [r.id, r.title])));
+  if (state.from || state.to) {
+    chips.push(`<button type="button" class="filter-chip" data-field="__date"
+                  title="Remove date range filter" aria-label="Remove date range filter">
+                  <span class="filter-chip-text">${esc(dateRangeLabel(state))}</span><span aria-hidden="true">&times;</span>
+                </button>`);
   }
-  if (cfg.collection && cfg.collection.length > 1) {
-    parts.push(filterSelect(prefix, "collection", "All collections", cfg.collection.map((c, i) => [c.collection_id, `Collection #${i + 1}`])));
+  if ((state.q || "").trim()) {
+    chips.push(`<button type="button" class="filter-chip" data-field="__search"
+                  title="Clear search" aria-label="Clear search">
+                  <span class="filter-chip-text">Search: ${esc(state.q.trim())}</span><span aria-hidden="true">&times;</span>
+                </button>`);
   }
-  if (cfg.timeRange) {
-    parts.push(`<input type="datetime-local" id="${prefix}-f-from" class="filter-input" title="From (UTC)" />`);
-    parts.push(`<input type="datetime-local" id="${prefix}-f-to" class="filter-input" title="To (UTC)" />`);
-  }
-  parts.push(`<button type="button" class="secondary small" id="${prefix}-f-clear">Clear filters</button>`);
-  return `<div class="filter-bar" id="${prefix}-filter-bar">${parts.join("")}</div>`;
+
+  host.innerHTML = chips.length
+    ? `<span class="filter-chips-label muted small">Active filters:</span>${chips.join("")}`
+    : "";
 }
 
 function wireFilterBar(prefix, onChange) {
   const bar = document.getElementById(`${prefix}-filter-bar`);
-  bar.querySelectorAll("select").forEach((el) => el.addEventListener("change", onChange));
-  bar.querySelectorAll('input[type="text"]').forEach((el) => el.addEventListener("input", onChange));
-  bar.querySelectorAll('input[type="datetime-local"]').forEach((el) => el.addEventListener("change", onChange));
-  const clearBtn = document.getElementById(`${prefix}-f-clear`);
-  clearBtn.addEventListener("click", () => {
-    bar.querySelectorAll("select, input").forEach((el) => (el.value = ""));
-    onChange();
+  const state = filterStates.get(prefix);
+  if (!bar || !state) return;
+
+  const closeAll = (except) => {
+    bar.querySelectorAll(".filter-pop").forEach((pop) => {
+      if (pop === except) return;
+      pop.hidden = true;
+      const btn = pop.parentElement.querySelector(".filter-trigger");
+      if (btn) btn.setAttribute("aria-expanded", "false");
+    });
+  };
+
+  // Trigger buttons open their own popover and close any other.
+  bar.querySelectorAll(".filter-dd").forEach((dd) => {
+    const btn = dd.querySelector(".filter-trigger");
+    const pop = dd.querySelector(".filter-pop");
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const willOpen = pop.hidden;
+      closeAll(pop);
+      pop.hidden = !willOpen;
+      btn.setAttribute("aria-expanded", String(willOpen));
+      if (!willOpen) return;
+      positionFilterPop(dd, pop);
+      // Focus goes where typing is most likely to be useful: the search
+      // box when there is one, otherwise the first option. Focus is not
+      // trapped -- Tab continues out of the popover normally.
+      const search = dd.querySelector(".filter-search");
+      if (search) {
+        search.focus();
+        search.select();
+      } else {
+        const first = dd.querySelector('.filter-opt:not([hidden]) input[type="checkbox"]');
+        if (first) first.focus();
+      }
+    });
   });
+
+  // Type-ahead: filters which options are VISIBLE only (see
+  // filterSearchApply) -- selections are untouched.
+  bar.querySelectorAll(".filter-search").forEach((input) => {
+    const dd = input.closest(".filter-dd");
+    input.addEventListener("input", () => filterSearchApply(dd));
+    // Keep typing (and the native clear "x") from closing the popover.
+    input.addEventListener("click", (e) => e.stopPropagation());
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") return; // let the bar-level Escape handler close it
+      e.stopPropagation();
+    });
+  });
+
+  // Checkbox toggles write straight into the shared state.
+  bar.querySelectorAll('.filter-pop-list input[type="checkbox"]').forEach((cb) => {
+    cb.addEventListener("change", () => {
+      const set = state.sel[cb.dataset.field];
+      if (cb.checked) set.add(cb.value);
+      else set.delete(cb.value);
+      refreshFilterBar(prefix, onChange);
+    });
+  });
+
+  // Per-dropdown Select all / Clear.
+  bar.querySelectorAll(".filter-pop .filter-pop-actions [data-act]").forEach((btn) => {
+    const act = btn.dataset.act;
+    if (act !== "all" && act !== "none") return;
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const dd = btn.closest(".filter-dd");
+      const key = dd.dataset.field;
+      // Scoped to what the search currently shows: with a term typed,
+      // "Select all" means "all of these matches", which is the obvious
+      // reading and the useful one. With no term every option is
+      // visible, so this is a plain select-all/clear.
+      const rows = Array.from(dd.querySelectorAll(".filter-opt")).filter((r) => !r.hidden);
+      rows.forEach((row) => {
+        const cb = row.querySelector('input[type="checkbox"]');
+        cb.checked = act === "all";
+        if (act === "all") state.sel[key].add(cb.value);
+        else state.sel[key].delete(cb.value);
+      });
+      refreshFilterBar(prefix, onChange);
+    });
+  });
+
+  // Date popover Apply / Clear.
+  const dateDD = bar.querySelector('.filter-dd[data-field="__date"]');
+  if (dateDD) {
+    // Restore any previously-applied range into the inputs, so a bar
+    // re-rendered by a tab switch shows the range it's actually applying.
+    ["from-d", "from-t", "to-d", "to-t"].forEach((s) => {
+      const el = document.getElementById(`${prefix}-f-${s}`);
+      if (el && state.raw[s]) el.value = state.raw[s];
+    });
+
+    dateDD.querySelector('[data-act="apply-date"]').addEventListener("click", (e) => {
+      e.stopPropagation();
+      ["from-d", "from-t", "to-d", "to-t"].forEach((s) => {
+        const el = document.getElementById(`${prefix}-f-${s}`);
+        state.raw[s] = el ? el.value : "";
+      });
+      state.from = readDateTime(prefix, "from");
+      state.to = readDateTime(prefix, "to");
+      dateDD.querySelector(".filter-pop").hidden = true;
+      dateDD.querySelector(".filter-trigger").setAttribute("aria-expanded", "false");
+      refreshFilterBar(prefix, onChange);
+    });
+    dateDD.querySelector('[data-act="clear-date"]').addEventListener("click", (e) => {
+      e.stopPropagation();
+      ["from-d", "from-t", "to-d", "to-t"].forEach((s) => {
+        const el = document.getElementById(`${prefix}-f-${s}`);
+        if (el) el.value = "";
+        state.raw[s] = "";
+      });
+      state.from = null;
+      state.to = null;
+      refreshFilterBar(prefix, onChange);
+    });
+    // Keep clicks inside the date popover from bubbling to the
+    // close-on-outside-click handler below.
+    dateDD.querySelector(".filter-pop").addEventListener("click", (e) => e.stopPropagation());
+  }
+
+  // Chips remove exactly one selection (or the whole date range).
+  document.getElementById(`${prefix}-filter-chips`).addEventListener("click", (e) => {
+    const chip = e.target.closest(".filter-chip");
+    if (!chip) return;
+    if (chip.dataset.field === "__search") {
+      state.q = "";
+      const q = document.getElementById(`${prefix}-f-q`);
+      if (q) q.value = "";
+      refreshFilterBar(prefix, onChange);
+      return;
+    }
+    if (chip.dataset.field === "__date") {
+      ["from-d", "from-t", "to-d", "to-t"].forEach((s) => {
+        const el = document.getElementById(`${prefix}-f-${s}`);
+        if (el) el.value = "";
+        state.raw[s] = "";
+      });
+      state.from = null;
+      state.to = null;
+    } else {
+      state.sel[chip.dataset.field].delete(chip.dataset.value);
+      const cb = bar.querySelector(`.filter-pop-list input[data-field="${CSS.escape(chip.dataset.field)}"][value="${CSS.escape(chip.dataset.value)}"]`);
+      if (cb) cb.checked = false;
+    }
+    refreshFilterBar(prefix, onChange);
+  });
+
+  // Filtering is entirely client-side over data the tab already loaded,
+  // so there is no network call per keystroke. The debounce exists only
+  // to avoid re-rendering a large table on every character.
+  const qInput = document.getElementById(`${prefix}-f-q`);
+  if (qInput) {
+    let timer = null;
+    qInput.addEventListener("input", () => {
+      state.q = qInput.value;
+      clearTimeout(timer);
+      timer = setTimeout(() => refreshFilterBar(prefix, onChange), 120);
+    });
+  }
+
+  document.getElementById(`${prefix}-f-clear`).addEventListener("click", () => {
+    state.fields.forEach((f) => state.sel[f.key].clear());
+    state.from = null;
+    state.to = null;
+    state.raw = {};
+    state.q = "";
+    const q = document.getElementById(`${prefix}-f-q`);
+    if (q) q.value = "";
+    bar.querySelectorAll('input[type="checkbox"]').forEach((cb) => (cb.checked = false));
+    bar.querySelectorAll('input[type="date"], input[type="time"]').forEach((el) => (el.value = ""));
+    closeAll(null);
+    refreshFilterBar(prefix, onChange);
+  });
+
+  // Keeping the popover open while ticking boxes is the point of the
+  // stopPropagation here -- only clicks outside any popover dismiss.
+  bar.querySelectorAll(".filter-pop-list").forEach((list) => list.addEventListener("click", (e) => e.stopPropagation()));
+  document.addEventListener("click", () => closeAll(null));
+  document.addEventListener("keydown", (e) => {
+    if (e.key !== "Escape") return;
+    const open = bar.querySelector(".filter-pop:not([hidden])");
+    if (!open) return;
+    closeAll(null);
+    const btn = open.parentElement.querySelector(".filter-trigger");
+    if (btn) btn.focus();
+  });
+
+  refreshFilterBar(prefix, null);
 }
 
-// readFilterBar reads whatever controls renderFilterBar actually
-// rendered for prefix; a field this tab didn't configure simply reads as
-// empty/falsy and its filter is a no-op. datetime-local values are
-// parsed by the browser as local time -- comparisons below are against
-// each event's own UTC timestamp, so filter bounds are intentionally
-// entered in the browser's local time zone, same as the input control
-// itself displays.
+// positionFilterPop flips a popover to right-aligned when opening it
+// left-aligned would push it past the viewport edge, so a dropdown near
+// the right of the bar stays fully visible instead of being clipped.
+function positionFilterPop(dd, pop) {
+  pop.classList.remove("align-right");
+  const r = pop.getBoundingClientRect();
+  if (r.right > window.innerWidth - 8) pop.classList.add("align-right");
+}
+
+// readDateTime combines the date + time inputs of one bound into a Date,
+// or null if no date was given (a time alone has nothing to anchor to).
+// An empty time defaults to 00:00:00 for `from` and 23:59:59 for `to`,
+// so picking whole days does the obviously-intended thing.
+function readDateTime(prefix, which) {
+  const d = (document.getElementById(`${prefix}-f-${which}-d`) || {}).value || "";
+  const t = (document.getElementById(`${prefix}-f-${which}-t`) || {}).value || "";
+  if (!d) return null;
+  const time = t || (which === "from" ? "00:00:00" : "23:59:59");
+  // Same construction the previous datetime-local control used: the
+  // string is parsed in the browser's local time zone and compared
+  // against each record's absolute timestamp, so bounds are entered in
+  // local time exactly as before. Deliberately unchanged -- see
+  // readFilterBar's note.
+  const parsed = new Date(`${d}T${time}`);
+  return isNaN(parsed.getTime()) ? null : parsed;
+}
+
+// readFilterBar returns the live state object for prefix. Fields this
+// tab didn't configure are absent, and their predicates (selMatches /
+// selMatchesAny) treat that as "no filter", so an unconfigured field is
+// a no-op exactly as before.
+//
+// Time bounds keep the original semantics: the value is read in the
+// browser's local time zone and compared against each record's own
+// absolute timestamp. That comparison is instant-against-instant and is
+// intentionally unchanged from the previous datetime-local controls.
 function readFilterBar(prefix) {
-  const get = (field) => {
-    const el = document.getElementById(`${prefix}-f-${field}`);
-    return el ? el.value.trim() : "";
-  };
-  const from = get("from");
-  const to = get("to");
-  return {
-    severity: get("severity"),
-    confidence: get("confidence"),
-    category: get("category"),
-    host: get("host").toLowerCase(),
-    user: get("user").toLowerCase(),
-    process: get("process").toLowerCase(),
-    technique: get("technique"),
-    rule: get("rule"),
-    collection: get("collection"),
-    from: from ? new Date(from) : null,
-    to: to ? new Date(to) : null,
-  };
+  const state = filterStates.get(prefix);
+  if (!state) return { from: null, to: null };
+  return { ...state.sel, from: state.from, to: state.to, q: (state.q || "").trim().toLowerCase() };
 }
 
 // ---------------- Long-value rendering (findings UI fix) ----------------
@@ -591,9 +1228,23 @@ function route() {
   }
   const caseMatch = hash.match(/^\/cases\/([^/]+)(?:\/(\w+))?$/);
   if (caseMatch) {
-    renderCaseDetail(caseMatch[1], caseMatch[2] || "summary");
+    const [, caseId, rawTab] = caseMatch;
+    const tab = rawTab || "summary";
+    // Same case already on screen: swap just the tab body. Falls through
+    // to a full render when switchTab declines (different case, or the
+    // chrome isn't mounted).
+    if (renderedCaseId === caseId && renderedTab !== null) {
+      switchTab(caseId, tab).then((handled) => {
+        if (!handled) renderCaseDetail(caseId, tab);
+      });
+      return;
+    }
+    renderCaseDetail(caseId, tab);
     return;
   }
+  renderedCaseId = null;
+  renderedTab = null;
+  tabScroll.clear();
   renderCaseList();
 }
 
@@ -623,8 +1274,8 @@ async function renderCaseList() {
           <button type="button" class="secondary small" id="case-clear-btn">Clear Selection</button>
         </div>
       </div>
-      <div id="case-bulk-bar" class="hidden"></div>
-      <div id="case-list"><p class="empty">Loading...</p></div>
+      <div id="case-bulk-bar" class="bulk-bar-host"></div>
+      <div id="case-list" class="case-list"><p class="empty">Loading...</p></div>
     </div>
   `;
 
@@ -664,12 +1315,12 @@ async function renderCaseList() {
       <div class="case-card-row">
         <input type="checkbox" class="case-checkbox" data-id="${esc(c.id)}" aria-label="Select case ${esc(c.name)}" />
         <a class="case-card" href="#/cases/${c.id}">
-          <div class="row between">
-            <strong>${esc(c.name)}</strong>
+          <div class="case-card-head">
+            <span class="case-card-name">${esc(c.name)}</span>
             ${statusBadge(c.status)}
           </div>
-          <div class="muted small">${esc(c.description || "")}</div>
-          <div class="muted small mono">${esc(c.id)} &middot; created ${fmtTime(c.created_at)}</div>
+          ${c.description ? `<div class="muted small case-card-meta">${esc(c.description)}</div>` : ""}
+          <div class="muted small mono case-card-meta">${esc(c.id)} &middot; created ${fmtTime(c.created_at)}</div>
         </a>
       </div>`
       )
@@ -692,12 +1343,12 @@ function wireCaseSelection() {
     const selected = checkboxes()
       .filter((cb) => cb.checked)
       .map((cb) => cb.dataset.id);
+    // The host reserves its height either way (.bulk-bar-host), so
+    // showing/hiding the bar never shifts the list beneath it.
     if (selected.length === 0) {
-      bulkBar.classList.add("hidden");
       bulkBar.innerHTML = "";
       return;
     }
-    bulkBar.classList.remove("hidden");
     bulkBar.innerHTML = `
       <div class="bulk-action-bar">
         <span>${selected.length} case(s) selected</span>
@@ -782,7 +1433,15 @@ async function renderCaseDetail(caseId, tab) {
         </div>
         <div class="row">
           ${statusBadge(c.status)}
-          <button type="button" class="secondary small" id="export-case-btn">Export &#9662;</button>
+          <div class="dropdown">
+            <button type="button" class="secondary small" id="export-case-btn"
+                    aria-haspopup="true" aria-expanded="false" aria-controls="export-menu">Export &#9662;</button>
+            <div id="export-menu" class="dropdown-menu hidden" role="menu" aria-labelledby="export-case-btn">
+              <a role="menuitem" href="/api/cases/${caseId}/export" target="_blank" rel="noopener">Case JSON</a>
+              <a role="menuitem" href="/api/cases/${caseId}/export/timeline.csv" target="_blank" rel="noopener">Timeline CSV</a>
+              <a role="menuitem" href="/api/cases/${caseId}/export/findings.csv" target="_blank" rel="noopener">Findings CSV</a>
+            </div>
+          </div>
           <button type="button" class="danger small" id="delete-case-btn">Delete Case</button>
         </div>
       </div>
@@ -811,11 +1470,6 @@ async function renderCaseDetail(caseId, tab) {
         </div>
       </div>
       <div id="case-metadata-error"></div>
-      <div id="export-menu" class="hidden" style="margin-top:8px">
-        <a class="secondary small" href="/api/cases/${caseId}/export" target="_blank" rel="noopener">Case JSON</a>
-        <a class="secondary small" href="/api/cases/${caseId}/export/timeline.csv" target="_blank" rel="noopener">Timeline CSV</a>
-        <a class="secondary small" href="/api/cases/${caseId}/export/findings.csv" target="_blank" rel="noopener">Findings CSV</a>
-      </div>
 
       ${
         staleAnalysis
@@ -871,20 +1525,20 @@ async function renderCaseDetail(caseId, tab) {
         <button id="add-evidence-btn">+ Add Evidence</button>
       </div>
       <div id="add-evidence-form" class="add-evidence-form hidden">
-        <h3>Upload KAPE package</h3>
-        <p class="muted small">Upload a ZIP archive of a KAPE triage collection. Tracefall safely extracts it and discovers every file inside (EvtxECmd/PECmd/RECmd CSV, Scheduled Task XML, and anything else) -- you choose which discovered files to import next.</p>
+        <h3>Upload evidence</h3>
+        <p class="muted small">Upload a ZIP archive of a KAPE triage collection, or a single AD1 forensic image (FTK Imager's logical/custom-content format, detected from the file's contents, not just its <code>.ad1</code> extension). Tracefall safely inspects it and catalogs every file inside (EvtxECmd/PECmd/RECmd CSV, Scheduled Task XML, and anything else, or the files inside the AD1) without extracting or parsing anything yet -- you choose which discovered files to import next.</p>
         <div class="row">
-          <input type="file" id="upload-file" accept=".zip,application/zip" />
-          <button id="upload-btn">Upload KAPE Package</button>
+          <input type="file" id="upload-file" accept=".zip,.ad1,application/zip" />
+          <button id="upload-btn">Upload Evidence</button>
         </div>
         <div id="upload-error"></div>
         <div id="upload-progress"></div>
 
         <details style="margin-top:16px">
           <summary class="muted small" style="cursor:pointer">Advanced: ingest from a local path instead</summary>
-          <p class="muted small">For local/dev use (e.g. the bundled synthetic dataset at <code>testdata/synthetic_case</code>) when the evidence is already on the machine running Tracefall.</p>
+          <p class="muted small">For local/dev use, when the evidence is already on the machine running Tracefall: point this at a KAPE-style directory (e.g. the bundled synthetic dataset at <code>testdata/synthetic_case</code>), or directly at a single AD1 file (e.g. <code>DiskDrigger.ad1</code>) -- detected the same way an upload is.</p>
           <div class="row">
-            <div style="flex:1"><input id="ingest-path" placeholder="/path/to/evidence" value="testdata/synthetic_case" /></div>
+            <div style="flex:1"><input id="ingest-path" placeholder="/path/to/evidence or /path/to/image.ad1" value="testdata/synthetic_case" /></div>
             <button id="ingest-btn" class="secondary">Discover</button>
           </div>
           <div id="ingest-error"></div>
@@ -920,7 +1574,18 @@ async function renderCaseDetail(caseId, tab) {
     })
   );
 
+  renderedCaseId = caseId;
+  renderedTab = tab;
+  await renderTabContent(caseId, tab, collections);
+}
+
+// renderTabContent renders exactly one tab into #tab-content. Split out
+// of renderCaseDetail so switching tabs can re-render only this, leaving
+// the page chrome (header, evidence, analysis panels) untouched -- see
+// switchTab.
+async function renderTabContent(caseId, tab, collections) {
   const content = document.getElementById("tab-content");
+  if (!content) return;
   try {
     switch (tab) {
       case "investigations":
@@ -949,16 +1614,75 @@ async function renderCaseDetail(caseId, tab) {
   }
 }
 
+// switchTab handles a tab change within the case already on screen.
+//
+// The whole point is NOT re-running renderCaseDetail: that starts by
+// blanking #app to "Loading case..." while it refetches, which collapses
+// the document to ~190px. The browser clamps scrollY to 0 against that
+// height, and the position is gone before the new content restores the
+// height -- which is exactly the "clicking a tab jumps me back to the
+// top" the investigator sees after scrolling deep into a Timeline.
+//
+// Instead the chrome stays mounted and only #tab-content is replaced.
+// Each tab's scroll offset is remembered on the way out and restored on
+// the way back in, so returning to a tab returns to where you were.
+async function switchTab(caseId, tab) {
+  if (renderedCaseId !== caseId) return false; // different case -- full render needed
+  const content = document.getElementById("tab-content");
+  if (!content) return false;
+
+  tabScroll.set(renderedTab, window.scrollY);
+  renderedTab = tab;
+
+  document.querySelectorAll(".tabs .tab").forEach((a) => {
+    a.classList.toggle("active", a.dataset.tab === tab);
+  });
+
+  // Hold the content box at its current height while the new tab loads,
+  // so the page can't collapse (and lose scroll) in the gap between
+  // clearing the old content and the new content arriving.
+  const heightFloor = content.getBoundingClientRect().height;
+  content.style.minHeight = `${heightFloor}px`;
+  try {
+    await renderTabContent(caseId, tab, currentCollections);
+  } finally {
+    content.style.minHeight = "";
+  }
+
+  const saved = tabScroll.get(tab);
+  if (saved !== undefined) {
+    // Only restore if the new content is actually tall enough; otherwise
+    // leave the browser's own clamped position rather than fighting it.
+    const max = document.documentElement.scrollHeight - window.innerHeight;
+    window.scrollTo({ top: Math.min(saved, Math.max(max, 0)), behavior: "instant" });
+  }
+  return true;
+}
+
 function tabLink(caseId, key, label, active) {
   const cls = key === active || (key === "summary" && active === "summary") ? "tab active" : "tab";
-  return `<a class="${cls}" href="#/cases/${caseId}/${key}">${label}</a>`;
+  // data-tab lets switchTab move the active marker without re-rendering
+  // the strip (and so without losing scroll position).
+  return `<a class="${cls}" data-tab="${key}" href="#/cases/${caseId}/${key}">${label}</a>`;
 }
 
 // ---------------- Evidence Collections header ----------------
 
+// FAILED_COLLECTION_NOTE explains a collection that only a database
+// written by an older Tracefall version can contain. Discovery is now
+// atomic -- it either creates a fully-cataloged collection or creates
+// nothing -- so no new collection can reach this state. The note exists
+// so an investigator meeting a legacy row understands it is a dead end
+// holding no evidence, rather than assuming evidence was lost.
+const FAILED_COLLECTION_NOTE = `<p class="collection-failed-note small">This collection was left behind by a discovery that never finished cataloging. It contains no evidence and cannot be imported or analyzed. Add the evidence again to create a new collection; this one can be ignored.</p>`;
+
 function renderCollectionsList(caseId, collections) {
   if (collections.length === 0) {
-    return `<p class="empty">No evidence yet. Click "+ Add Evidence" to upload a KAPE package.</p>`;
+    // Shown for a genuinely empty case AND after a failed discovery --
+    // a failed discovery creates no collection (see
+    // internal/store.Store.CreateCollectionWithSourceFiles), so the case
+    // correctly remains empty rather than showing a phantom FAILED row.
+    return `<p class="empty">No evidence yet. Add evidence to begin discovery -- click "+ Add Evidence" to upload a KAPE package or an AD1 forensic image.</p>`;
   }
   return collections
     .map((col, i) => {
@@ -972,6 +1696,7 @@ function renderCollectionsList(caseId, collections) {
         <div class="muted small">${esc(SOURCE_TYPE_LABELS[col.source_type] || col.source_type)}${col.original_filename ? " &middot; " + esc(col.original_filename) : ""}</div>
         <div class="muted small">${esc(fmtDate(col.created_at))}</div>
         <div class="small" style="margin-top:4px">${col.file_count} file(s) discovered &middot; ${col.imported_file_count} imported &middot; ${col.parsed_event_count} event(s)${col.unsupported_file_count ? ` &middot; ${col.unsupported_file_count} unsupported` : ""}</div>
+        ${col.ingestion_status === "failed" ? FAILED_COLLECTION_NOTE : ""}
         <div class="muted small" style="margin-top:4px; cursor:pointer">Evidence integrity &amp; metadata &#9662;</div>
         <div class="collection-integrity-detail"></div>
       </div>`;
@@ -999,6 +1724,13 @@ function wireCollectionIntegrity(caseId, root) {
       detail.innerHTML = `<p class="empty">Loading...</p>`;
       try {
         const cd = await api(`/cases/${caseId}/evidence/${card.dataset.collection}`);
+        // The backend guarantees these are arrays (see
+        // internal/store.Store.ListSourceFilesByCollection). This is the
+        // secondary safety net for a database written by an older build,
+        // where a collection with no files served `"source_files": null`
+        // and this panel threw "Cannot read properties of null (reading
+        // 'map')" -- taking the whole Evidence tab down with it.
+        const files = Array.isArray(cd.source_files) ? cd.source_files : [];
         detail.innerHTML = `
           <div class="integrity-grid">
             <div><span class="muted small">Collection ID</span><div class="mono small">${esc(cd.collection_id)}</div></div>
@@ -1010,19 +1742,21 @@ function wireCollectionIntegrity(caseId, root) {
           ${
             cd.parser_coverage && cd.parser_coverage.length
               ? `<div class="table-wrap"><table><thead><tr><th>Parser</th><th>Artifact type</th><th>Files</th><th>Events</th></tr></thead><tbody>
-                  ${cd.parser_coverage.map((p) => `<tr><td class="mono small">${esc(p.parser)}</td><td class="small">${esc(p.artifact_type)}</td><td class="small">${p.file_count}</td><td class="small">${p.event_count}</td></tr>`).join("")}
+                  ${cd.parser_coverage.map((p) => `<tr><td class="mono small">${esc(p.parser)}</td><td class="small">${esc(artifactLabel(p.artifact_type))}</td><td class="small">${p.file_count}</td><td class="small">${p.event_count}</td></tr>`).join("")}
                  </tbody></table></div>`
               : `<p class="empty">Unknown -- no files imported from this collection yet.</p>`
           }
           <div class="muted small" style="margin-top:8px">Per-file integrity</div>
-          <div class="table-wrap"><table>
+          ${
+            files.length
+              ? `<div class="table-wrap"><table class="data-table">
             <thead><tr><th>Filename</th><th>SHA-256</th><th>Size</th><th>Discovered</th><th>Imported</th><th>Status</th><th>Events</th></tr></thead>
             <tbody>
-              ${cd.source_files
+              ${files
                 .map(
                   (sf) => `<tr>
                 <td class="mono small">${esc(sf.original_filename)}</td>
-                <td class="mono small">${esc(sf.sha256)}</td>
+                <td class="mono small">${sha256Cell(sf, "Unknown")}</td>
                 <td class="small">${fmtBytes(sf.size_bytes)}</td>
                 <td class="small">${esc(fmtTime(sf.discovered_at))}</td>
                 <td class="small">${sf.imported_at ? esc(fmtTime(sf.imported_at)) : "-"}</td>
@@ -1032,7 +1766,13 @@ function wireCollectionIntegrity(caseId, root) {
                 )
                 .join("")}
             </tbody>
-          </table></div>
+          </table></div>`
+              : `<p class="empty">No files recorded in this collection.${
+                  cd.ingestion_status === "failed"
+                    ? " This collection was left behind by a discovery that failed before it finished cataloging (an older Tracefall version); it holds no evidence and cannot be imported."
+                    : ""
+                }</p>`
+          }
         `;
         detail.dataset.loaded = "1";
       } catch (e) {
@@ -1069,7 +1809,31 @@ function wireCaseMetadataControls(caseId) {
   statusSel.addEventListener("change", () => update({ case_status: statusSel.value }));
   prioritySel.addEventListener("change", () => update({ priority: prioritySel.value }));
 
-  exportBtn.addEventListener("click", () => exportMenu.classList.toggle("hidden"));
+  // The menu is absolutely positioned (see .dropdown-menu), so opening it
+  // overlays the page instead of growing it -- it previously sat in normal
+  // flow and shoved everything below it down by its own height.
+  const setExportOpen = (open) => {
+    exportMenu.classList.toggle("hidden", !open);
+    exportBtn.setAttribute("aria-expanded", String(open));
+  };
+  exportBtn.addEventListener("click", (e) => {
+    e.stopPropagation(); // don't immediately re-close via the document handler below
+    setExportOpen(exportMenu.classList.contains("hidden"));
+  });
+  // Clicking anywhere outside closes it; clicks on the menu's own links
+  // are allowed to proceed (and close it, since navigation follows).
+  document.addEventListener("click", (e) => {
+    if (!exportMenu.classList.contains("hidden") && !exportMenu.contains(e.target)) setExportOpen(false);
+  });
+  exportMenu.addEventListener("click", () => setExportOpen(false));
+  // Escape closes and returns focus to the trigger, so keyboard users
+  // aren't stranded inside a dismissed menu.
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && !exportMenu.classList.contains("hidden")) {
+      setExportOpen(false);
+      exportBtn.focus();
+    }
+  });
 }
 
 // renderNotesSection is reused for every target type Phase 6 supports
@@ -1230,7 +1994,7 @@ async function renderAuditTab(content, caseId) {
   content.innerHTML = `
     <h2>Audit History (${events.length})</h2>
     <p class="muted small">Actor is always "local-user" -- Tracefall has no authentication yet, so this is not an authoritative identity. See docs/analyst-workflow.md.</p>
-    <div class="table-wrap"><table>
+    <div class="table-wrap"><table class="data-table">
       <thead><tr><th>Time (UTC)</th><th>Action</th><th>Actor</th><th>Target</th><th>Summary</th></tr></thead>
       <tbody>
         ${events
@@ -1267,24 +2031,24 @@ function wireEvidenceHeader(caseId) {
 
     const file = fileInput.files[0];
     if (!file) {
-      errBox.innerHTML = errorBox(new Error("Choose a .zip file first"));
+      errBox.innerHTML = errorBox(new Error("Choose a .zip or .ad1 file first"));
       return;
     }
 
     uploadBtn.disabled = true;
     uploadBtn.textContent = "Uploading...";
-    progress.innerHTML = uploadStep("Uploading and extracting archive...", false);
+    progress.innerHTML = uploadStep("Uploading and inspecting evidence...", false);
 
     try {
       const disc = await apiUpload(`/cases/${caseId}/evidence`, file);
       progress.innerHTML = renderDiscoveryResults(disc);
-      wireDiscoverySelection(progress, caseId, disc.collection.collection_id);
+      wireDiscoverySelection(progress, caseId, disc.collection.collection_id, disc);
     } catch (e) {
       errBox.innerHTML = errorBox(e);
       progress.innerHTML = "";
     } finally {
       uploadBtn.disabled = false;
-      uploadBtn.textContent = "Upload KAPE Package";
+      uploadBtn.textContent = "Upload Evidence";
     }
   });
 
@@ -1300,7 +2064,7 @@ function wireEvidenceHeader(caseId) {
     try {
       const disc = await api(`/cases/${caseId}/ingest`, { method: "POST", body: JSON.stringify({ path }) });
       progress.innerHTML = renderDiscoveryResults(disc);
-      wireDiscoverySelection(progress, caseId, disc.collection.collection_id);
+      wireDiscoverySelection(progress, caseId, disc.collection.collection_id, disc);
     } catch (e) {
       errBox.innerHTML = errorBox(e);
     } finally {
@@ -1326,107 +2090,472 @@ const SOURCE_FILE_STATUS_LABELS = {
   failed: "failed to parse",
 };
 
-// renderDiscoveryResults is the FILE SELECTION SCREEN: every file
-// Tracefall just discovered (upload or local-path), with a checkbox per
-// selectable (supported, non-duplicate) file, Select All / Select
-// Supported / Clear All controls, and an Import Selected action. Nothing
-// here has been parsed yet -- only the files actually selected here
-// become evidence, via wireDiscoverySelection's import call.
+// ---------------- Phase 9A: evidence triage & selection ----------------
+//
+// The selection screen used to be one table of every discovered file. On
+// a KAPE ZIP or an AD1 image that is thousands of rows, of which a
+// handful matter, with nothing to say which -- an investigator had no
+// way to find the six registry hives inside seven thousand files, and no
+// way to know that the eighty-four Prefetch files were being ignored.
+//
+// This replaces it with a triage view: a coverage summary of what the
+// collection actually holds, a compact search/filter toolbar, and a
+// table that renders only what the current filter matches.
+//
+// Two behaviors are load-bearing and easy to get wrong:
+//
+//   - SELECTION IS NOT THE DOM. Which files are selected lives in a Set
+//     of IDs (evidenceSelection), so filtering, searching and re-rendering
+//     never lose a selection. A file selected then filtered out stays
+//     selected -- and the count says so -- because the investigator chose
+//     it and nothing since has unchosen it.
+//   - SELECT ALL MEANS THE FILTERED VIEW. Acting on hidden rows would be
+//     the single most dangerous thing this screen could do: an
+//     investigator who filtered to "Registry" and pressed Select All
+//     must not silently queue seven thousand files for import.
+
+// evidenceCatalog holds the discovery result currently being triaged,
+// keyed by the container element's collection ID so the upload and
+// local-path screens never read each other's state.
+const evidenceCatalogs = new Map();
+
+// MAX_EVIDENCE_ROWS caps how many rows are rendered at once. Filtering
+// is what makes a large catalog usable, so the cap exists to keep the
+// unfiltered first render cheap rather than to hide evidence: the count
+// line always states the true total, and narrowing the filter reveals
+// anything beyond the cap.
+const MAX_EVIDENCE_ROWS = 400;
+
+const PRIORITY_LABELS = { critical: "Critical", high: "High", medium: "Medium", low: "Low", unknown: "Unknown" };
+
+// renderDiscoveryResults is the FILE SELECTION SCREEN.
 function renderDiscoveryResults(disc) {
-  const rows = (disc.source_files || []).map(rowForDiscoveredFile).join("");
+  const files = disc.source_files || [];
+  const coverage = disc.coverage || {};
+  const prefix = "ev";
+
+  // Filter vocabularies are derived from the catalog itself, so a
+  // dropdown only ever offers values that are actually present.
+  const families = filterOptions(files.map((f) => f.family_label));
+  const priorities = filterOptions(
+    files.map((f) => f.priority),
+    (p) => PRIORITY_LABELS[p] || p
+  );
+  const statuses = filterOptions(files.map(evidenceStatusValue), (v) => EVIDENCE_STATUS_LABELS[v] || v);
+
   return `
     <div class="panel" style="background:var(--bg-panel-2); margin-top:12px; margin-bottom:0">
       <h3>Select evidence to import</h3>
-      <p class="small">${disc.discovered_count} file(s) discovered &middot; ${disc.supported_count} supported${
-    disc.duplicate_count ? ` (${disc.duplicate_count} duplicate within this package)` : ""
-  }</p>
-      <p class="muted small">Only selected files will be parsed and imported as evidence. Unsupported files are listed but cannot be selected.</p>
-      <div class="row" style="margin:10px 0">
-        <button type="button" class="secondary small" id="discover-select-all-btn">Select All</button>
-        <button type="button" class="secondary small" id="discover-select-supported-btn">Select Supported</button>
-        <button type="button" class="secondary small" id="discover-clear-btn">Clear All</button>
+      ${renderEvidenceCoverage(coverage)}
+      <p class="muted small" style="margin-top:var(--space-3)">
+        Only selected files are parsed and imported. Unsupported files are listed with the reason Tracefall cannot read them --
+        they are evidence you may still need to collect another way, not broken files.
+      </p>
+
+      <div class="evidence-toolbar">
+        <input type="search" id="ev-search" class="evidence-search" placeholder="Search evidence..."
+               aria-label="Search evidence by filename, path, artifact type or source" autocomplete="off" />
+        ${renderFilterBar(prefix, { scope: disc.collection.collection_id, family: families, priority: priorities, status: statuses })}
       </div>
-      <div class="table-wrap"><table>
-        <thead><tr><th></th><th>Filename</th><th>Path</th><th>Artifact type</th><th>Size</th><th>SHA-256</th><th></th></tr></thead>
-        <tbody>${rows}</tbody>
+
+      <div class="row evidence-actions">
+        <button type="button" class="secondary small" id="ev-select-recommended">Select recommended (<span id="ev-recommended-count">${coverage.recommended || 0}</span>)</button>
+        <button type="button" class="secondary small" id="ev-select-filtered">Select all shown</button>
+        <button type="button" class="secondary small" id="ev-clear">Clear selection</button>
+        <span class="evidence-counts small muted" id="ev-counts"></span>
+      </div>
+
+      <div class="table-wrap"><table class="data-table">
+        <thead><tr>
+          <th></th><th>Filename</th><th>Path</th><th>Artifact type</th><th>Priority</th><th>Size</th><th>Status</th>
+        </tr></thead>
+        <tbody id="ev-rows"></tbody>
       </table></div>
-      <div class="row" style="margin-top:12px; align-items:center; gap:12px">
+      <p class="empty" id="ev-empty" hidden>No files match the current search and filters.</p>
+      <p class="muted small" id="ev-truncated" hidden></p>
+
+      <div class="row" style="margin-top:var(--space-3); align-items:center; gap:var(--space-3)">
         <button id="import-selected-btn" disabled>Import Selected (<span id="import-selected-count">0</span>)</button>
       </div>
       <div id="import-error"></div>
+      <div id="import-progress-panel"></div>
       <div id="import-result"></div>
     </div>`;
 }
 
-function rowForDiscoveredFile(f) {
-  const selectable = f.import_status === "discovered";
-  const statusBadgeHTML = selectable ? "" : `<span class="badge status">${esc(SOURCE_FILE_STATUS_LABELS[f.import_status] || f.import_status)}</span>`;
-  return `<tr class="${selectable ? "" : "muted"}">
-    <td><input type="checkbox" class="discover-file-checkbox" data-id="${esc(f.id)}" ${selectable ? "checked" : "disabled"} /></td>
-    <td class="mono small">${esc(f.original_filename)}</td>
-    <td class="mono small">${esc(f.path)}</td>
-    <td class="small">${esc(f.artifact_type || "-")}</td>
-    <td class="small">${fmtBytes(f.size_bytes)}</td>
-    <td class="mono small">${f.sha256 ? esc(f.sha256.slice(0, 12)) + "&hellip;" : "-"}</td>
-    <td class="small">${statusBadgeHTML}</td>
+// EVIDENCE_STATUS_LABELS maps the status vocabulary the toolbar filters
+// on. "Supported"/"Unsupported" is a capability fact; the rest are
+// import states -- deliberately in one list because that is the single
+// question an investigator asks ("what is the state of this file?").
+const EVIDENCE_STATUS_LABELS = {
+  supported: "Supported (not imported)",
+  unsupported: "Unsupported",
+  imported: "Imported",
+  duplicate: "Duplicate",
+  failed: "Parse error",
+};
+
+// evidenceStatusValue collapses a file's capability and import state into
+// the one status value the filter offers.
+function evidenceStatusValue(f) {
+  if (f.import_status === "imported") return "imported";
+  if (f.import_status === "duplicate") return "duplicate";
+  if (f.import_status === "failed") return "failed";
+  return f.supported ? "supported" : "unsupported";
+}
+
+// renderEvidenceCoverage summarizes what the collection holds. Every
+// number comes from the catalog the server actually built.
+function renderEvidenceCoverage(cov) {
+  if (!cov || !cov.discovered) return "";
+  const buckets = cov.by_type || [];
+  return `
+    <div class="coverage">
+      <div class="coverage-totals">
+        <div class="coverage-stat"><div class="n">${fmtCount(cov.discovered)}</div><div class="l">Files discovered</div></div>
+        <div class="coverage-stat"><div class="n ok">${fmtCount(cov.supported)}</div><div class="l">Supported</div></div>
+        <div class="coverage-stat"><div class="n muted">${fmtCount(cov.unsupported)}</div><div class="l">Unsupported</div></div>
+        <div class="coverage-stat"><div class="n muted">${fmtCount(cov.duplicates)}</div><div class="l">Duplicates</div></div>
+        ${cov.parse_failed ? `<div class="coverage-stat"><div class="n bad">${fmtCount(cov.parse_failed)}</div><div class="l">Parse errors</div></div>` : ""}
+      </div>
+      ${
+        buckets.length
+          ? `<details class="coverage-detail" open>
+               <summary class="muted small" style="cursor:pointer">Coverage by artifact type</summary>
+               <div class="table-wrap" style="margin-top:var(--space-2)"><table class="data-table">
+                 <thead><tr><th>Artifact type</th><th>Priority</th><th class="num">Files</th><th class="num">Supported</th><th>Notes</th></tr></thead>
+                 <tbody>${buckets.map(coverageRow).join("")}</tbody>
+               </table></div>
+             </details>`
+          : ""
+      }
+    </div>`;
+}
+
+function coverageRow(b) {
+  return `<tr>
+    <td class="small">${esc(b.type_label)}</td>
+    <td class="small">${priorityBadge(b.priority)}</td>
+    <td class="small num">${fmtCount(b.files)}</td>
+    <td class="small num">${b.supported ? fmtCount(b.supported_files) : "0"}</td>
+    <td class="small muted">${b.reason ? esc(b.reason) : ""}</td>
   </tr>`;
 }
 
-// wireDiscoverySelection powers the file-selection screen's checkboxes,
-// Select All/Supported/Clear controls, and the Import Selected action --
-// scoped to `container` (not the whole document) so the upload and
-// local-path forms' selection screens never interfere with each other if
-// both happen to have been used.
-function wireDiscoverySelection(container, caseId, collectionId) {
-  const checkboxes = () => Array.from(container.querySelectorAll(".discover-file-checkbox"));
-  const importBtn = container.querySelector("#import-selected-btn");
-  const countSpan = container.querySelector("#import-selected-count");
+// priorityBadge renders forensic triage priority. Deliberately styled
+// apart from finding severity: they are different judgements and must
+// never be read as the same thing. A HIGH-priority artifact Tracefall
+// cannot parse is normal and worth saying out loud.
+function priorityBadge(p) {
+  if (!p) return "";
+  return `<span class="badge prio prio-${esc(p)}">${esc(PRIORITY_LABELS[p] || p)}</span>`;
+}
 
-  function updateCount() {
-    const n = checkboxes().filter((cb) => cb.checked).length;
-    countSpan.textContent = String(n);
-    importBtn.disabled = n === 0;
+function fmtCount(n) {
+  return typeof n === "number" ? n.toLocaleString() : "0";
+}
+
+function rowForDiscoveredFile(f, selected) {
+  const selectable = f.import_status === "discovered" && f.supported;
+  const status = evidenceStatusValue(f);
+  const statusHTML = selectable
+    ? `<span class="badge status ok-badge">supported</span>`
+    : `<span class="badge status${status === "failed" ? " critical" : ""}" ${
+        f.unsupported_reason ? `title="${esc(f.unsupported_reason)}"` : ""
+      }>${esc(EVIDENCE_STATUS_LABELS[status] || status)}</span>`;
+
+  return `<tr class="${selectable ? "" : "muted"}" data-id="${esc(f.id)}">
+    <td><input type="checkbox" class="discover-file-checkbox" data-id="${esc(f.id)}" ${selected ? "checked" : ""} ${
+    selectable ? "" : "disabled"
+  } /></td>
+    <td class="mono small">${esc(f.original_filename)}</td>
+    <td class="mono small">${esc(f.path)}</td>
+    <td class="small">${esc(f.type_label || artifactLabel(f.artifact_type))}</td>
+    <td class="small">${priorityBadge(f.priority)}</td>
+    <td class="small nowrap">${fmtBytes(f.size_bytes)}</td>
+    <td class="small">${statusHTML}${
+    f.unsupported_reason ? `<div class="muted evidence-reason">${esc(f.unsupported_reason)}</div>` : ""
+  }</td>
+  </tr>`;
+}
+
+// evidenceMatches applies the search box and the toolbar filters to one
+// file. Search is case-insensitive substring matching across the fields
+// an investigator would actually type: filename, path, artifact type,
+// and the source/parser that produced it.
+function evidenceMatches(f, term, filters) {
+  if (term) {
+    const haystack = [
+      f.original_filename,
+      f.path,
+      f.type_label,
+      f.family_label,
+      f.artifact_type,
+      f.parser,
+    ]
+      .filter(Boolean)
+      .join(" ")
+      .toLowerCase();
+    if (!haystack.includes(term)) return false;
   }
-  checkboxes().forEach((cb) => cb.addEventListener("change", updateCount));
-  container.querySelector("#discover-select-all-btn").addEventListener("click", () => {
-    checkboxes().forEach((cb) => {
-      if (!cb.disabled) cb.checked = true;
-    });
-    updateCount();
-  });
-  container.querySelector("#discover-select-supported-btn").addEventListener("click", () => {
-    checkboxes().forEach((cb) => (cb.checked = !cb.disabled));
-    updateCount();
-  });
-  container.querySelector("#discover-clear-btn").addEventListener("click", () => {
-    checkboxes().forEach((cb) => (cb.checked = false));
-    updateCount();
-  });
-  updateCount();
+  if (!selMatches(filters.family, f.family_label)) return false;
+  if (!selMatches(filters.priority, f.priority)) return false;
+  if (!selMatches(filters.status, evidenceStatusValue(f))) return false;
+  if (filters.recommendedOnly && !f.recommended) return false;
+  return true;
+}
 
+// wireDiscoverySelection powers the triage screen: search, filters,
+// selection, and the import action. Scoped to `container` so the upload
+// and local-path screens never interfere with each other.
+function wireDiscoverySelection(container, caseId, collectionId, disc) {
+  const prefix = "ev";
+  const files = (disc && disc.source_files) || [];
+
+  // Selection is held here, not in the DOM -- see this section's header.
+  const selected = new Set(files.filter((f) => f.recommended).map((f) => f.id));
+  evidenceCatalogs.set(collectionId, { files, selected });
+
+  const searchInput = container.querySelector("#ev-search");
+  const rowsHost = container.querySelector("#ev-rows");
+  const emptyEl = container.querySelector("#ev-empty");
+  const truncatedEl = container.querySelector("#ev-truncated");
+  const countsEl = container.querySelector("#ev-counts");
+  const importBtn = container.querySelector("#import-selected-btn");
+  const importCount = container.querySelector("#import-selected-count");
+
+  let recommendedOnly = false;
+
+  const currentFilters = () => ({ ...readFilterBar(prefix), recommendedOnly });
+  const visibleFiles = () => {
+    const term = (searchInput.value || "").trim().toLowerCase();
+    const filters = currentFilters();
+    return files.filter((f) => evidenceMatches(f, term, filters));
+  };
+
+  function render() {
+    const shown = visibleFiles();
+    const capped = shown.slice(0, MAX_EVIDENCE_ROWS);
+    rowsHost.innerHTML = capped.map((f) => rowForDiscoveredFile(f, selected.has(f.id))).join("");
+
+    emptyEl.hidden = shown.length !== 0;
+    truncatedEl.hidden = shown.length <= MAX_EVIDENCE_ROWS;
+    if (shown.length > MAX_EVIDENCE_ROWS) {
+      truncatedEl.textContent = `Showing the first ${MAX_EVIDENCE_ROWS.toLocaleString()} of ${shown.length.toLocaleString()} matching files. Narrow the search or filters to see the rest; selection and "Select all shown" still apply to all ${shown.length.toLocaleString()}.`;
+    }
+
+    // The counts line is where the "selected files you filtered away are
+    // still selected" promise is made visible, so it is never a surprise.
+    const hiddenSelected = files.filter((f) => selected.has(f.id) && !shown.includes(f)).length;
+    countsEl.textContent =
+      `${shown.length.toLocaleString()} of ${files.length.toLocaleString()} files shown` +
+      ` · ${selected.size.toLocaleString()} selected` +
+      (hiddenSelected ? ` (${hiddenSelected.toLocaleString()} not currently shown)` : "");
+
+    importCount.textContent = selected.size.toLocaleString();
+    importBtn.disabled = selected.size === 0 || importInFlight;
+  }
+
+  rowsHost.addEventListener("change", (e) => {
+    const cb = e.target.closest(".discover-file-checkbox");
+    if (!cb) return;
+    if (cb.checked) selected.add(cb.dataset.id);
+    else selected.delete(cb.dataset.id);
+    render();
+  });
+
+  searchInput.addEventListener("input", debounceRender(render));
+  container.querySelector("#ev-clear-search")?.addEventListener("click", () => {
+    searchInput.value = "";
+    render();
+  });
+
+  wireFilterBar(prefix, render);
+
+  container.querySelector("#ev-select-recommended").addEventListener("click", () => {
+    files.forEach((f) => {
+      if (f.recommended) selected.add(f.id);
+    });
+    render();
+  });
+  // Scoped to the CURRENT FILTERED VIEW, never the whole catalog.
+  container.querySelector("#ev-select-filtered").addEventListener("click", () => {
+    visibleFiles().forEach((f) => {
+      if (f.import_status === "discovered" && f.supported) selected.add(f.id);
+    });
+    render();
+  });
+  container.querySelector("#ev-clear").addEventListener("click", () => {
+    selected.clear();
+    render();
+  });
+
+  let importInFlight = false;
   importBtn.addEventListener("click", async () => {
-    const ids = checkboxes()
-      .filter((cb) => cb.checked)
-      .map((cb) => cb.dataset.id);
-    const errBox = container.querySelector("#import-error");
-    errBox.innerHTML = "";
+    if (importInFlight) return; // belt and braces; the button is disabled too
+    importInFlight = true;
     importBtn.disabled = true;
-    const original = importBtn.textContent;
+    const originalLabel = importBtn.textContent;
     importBtn.textContent = "Importing...";
+
+    const errBox = container.querySelector("#import-error");
+    const progressHost = container.querySelector("#import-progress-panel");
+    errBox.innerHTML = "";
+
     try {
-      const res = await api(`/cases/${caseId}/evidence/${collectionId}/import`, {
-        method: "POST",
-        body: JSON.stringify({ source_file_ids: ids }),
-      });
-      container.querySelector("#import-result").innerHTML = renderImportResults(res);
-      container.querySelector("#import-continue-btn").addEventListener("click", () => window.location.reload());
+      await runImportWithProgress(caseId, collectionId, [...selected], progressHost, container);
     } catch (e) {
       errBox.innerHTML = errorBox(e);
-      importBtn.disabled = false;
-      importBtn.textContent = original;
+      progressHost.innerHTML = "";
+      importInFlight = false;
+      importBtn.textContent = originalLabel;
+      render();
     }
   });
+
+  render();
 }
+
+// debounceRender keeps typing responsive on a large catalog: filtering
+// 7,000 objects is fast, but rebuilding the table on every keystroke is
+// not, so renders coalesce.
+function debounceRender(fn) {
+  let timer = null;
+  return () => {
+    clearTimeout(timer);
+    timer = setTimeout(fn, 120);
+  };
+}
+
+// ---------------- import progress ----------------
+
+// runImportWithProgress starts a background import and polls it. The
+// progress shown is entirely server-reported: percentages come from work
+// units the server actually completed, and when the total is unknown the
+// bar is indeterminate rather than guessing (see internal/api/importjob.go).
+async function runImportWithProgress(caseId, collectionId, ids, progressHost, container) {
+  const started = await api(`/cases/${caseId}/evidence/${collectionId}/import/start`, {
+    method: "POST",
+    body: JSON.stringify({ source_file_ids: ids }),
+  });
+
+  progressHost.innerHTML = renderImportProgress({ phase: "preparing", files_total: ids.length, percent: 0 });
+
+  // Poll at a human cadence: fast enough to feel live, slow enough not to
+  // spend the browser's time on requests instead of rendering.
+  for (;;) {
+    await sleep(400);
+    const p = await api(`/cases/${caseId}/import-jobs/${started.job_id}`);
+    progressHost.innerHTML = renderImportProgress(p);
+    if (!p.done) continue;
+
+    if (p.phase === "failed") {
+      throw new Error(p.error || "the import failed");
+    }
+    progressHost.innerHTML = "";
+    container.querySelector("#import-result").innerHTML = renderImportResults(p.result || {});
+    const cont = container.querySelector("#import-continue-btn");
+    if (cont) cont.addEventListener("click", () => window.location.reload());
+    wireParseFailureToggle(container);
+    return;
+  }
+}
+
+const IMPORT_PHASE_LABELS = {
+  preparing: "Preparing",
+  parsing: "Parsing files",
+  enriching: "Resolving hosts",
+  persisting: "Saving evidence",
+  finalizing: "Finalizing",
+  complete: "Complete",
+  failed: "Failed",
+};
+
+function renderImportProgress(p) {
+  const pct = typeof p.percent === "number" ? p.percent : -1;
+  const indeterminate = pct < 0;
+  return `
+    <div class="panel import-progress" style="background:var(--bg-panel); margin-top:var(--space-3); margin-bottom:0">
+      <h3>Importing evidence</h3>
+      <div class="small">${esc(IMPORT_PHASE_LABELS[p.phase] || p.phase || "Working")}</div>
+      <div class="progress-track${indeterminate ? " indeterminate" : ""}" role="progressbar"
+           ${indeterminate ? 'aria-valuetext="in progress"' : `aria-valuenow="${pct}" aria-valuemin="0" aria-valuemax="100"`}>
+        <div class="progress-fill" style="${indeterminate ? "" : `width:${pct}%`}"></div>
+      </div>
+      <div class="row between small" style="margin-top:var(--space-2)">
+        <span>${indeterminate ? "Working..." : `${pct}%`}</span>
+        <span class="muted">${fmtCount(p.files_parsed || 0)} / ${fmtCount(p.files_total || 0)} selected files parsed</span>
+      </div>
+      ${
+        p.current_file
+          ? `<div class="muted small mono import-current" title="${esc(p.current_file)}">${esc(p.current_file)}</div>`
+          : ""
+      }
+      <div class="small muted" style="margin-top:var(--space-2)">
+        ${fmtCount(p.events_parsed || 0)} event(s) parsed
+        &middot; ${fmtCount(p.events_skipped || 0)} already known
+        &middot; ${fmtCount(p.parse_errors || 0)} parse error(s)
+        &middot; elapsed ${fmtElapsed(p.elapsed_seconds || 0)}
+      </div>
+    </div>`;
+}
+
+function fmtElapsed(seconds) {
+  const m = Math.floor(seconds / 60);
+  const s = seconds % 60;
+  return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+}
+
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+// wireParseFailureToggle makes the parse-error list expandable in place.
+function wireParseFailureToggle(container) {
+  const btn = container.querySelector("#view-parse-errors-btn");
+  const panel = container.querySelector("#parse-errors-panel");
+  if (!btn || !panel) return;
+  btn.addEventListener("click", () => {
+    panel.hidden = !panel.hidden;
+    btn.textContent = panel.hidden ? "View parse errors" : "Hide parse errors";
+  });
+}
+
+// renderParseFailures lists the files that were selected and supported
+// but could not be parsed. This is deliberately separate from
+// "unsupported": an unsupported file is one Tracefall was never able to
+// read, while a parse failure is evidence that SHOULD have been readable
+// and was not -- which is a finding about the evidence itself.
+function renderParseFailures(failures) {
+  if (!failures || !failures.length) return "";
+  return `
+    <div style="margin-top:var(--space-3)">
+      <button type="button" class="secondary small" id="view-parse-errors-btn">View parse errors</button>
+      <div id="parse-errors-panel" hidden style="margin-top:var(--space-2)">
+        <div class="table-wrap"><table class="data-table">
+          <thead><tr><th>File</th><th>Artifact type</th><th>Stage</th><th>Problem</th><th>Events kept</th></tr></thead>
+          <tbody>
+            ${failures
+              .map(
+                (f) => `<tr>
+                  <td class="mono small" title="${esc(f.path)}">${esc(f.filename || f.path)}</td>
+                  <td class="small">${esc(artifactLabel(f.artifact_type))}</td>
+                  <td class="small">${esc(PARSE_STAGE_LABELS[f.stage] || f.stage)}</td>
+                  <td class="small">${esc(f.message)}</td>
+                  <td class="small">${f.partial_events ? "partial" : "none"}</td>
+                </tr>`
+              )
+              .join("")}
+          </tbody>
+        </table></div>
+      </div>
+    </div>`;
+}
+
+const PARSE_STAGE_LABELS = {
+  extract: "Extracting from container",
+  parse: "Parsing",
+};
 
 // renderImportResults shows what the import endpoint actually parsed --
 // how many files were imported, how many events (new vs. already known
@@ -1436,14 +2565,32 @@ function renderImportResults(res) {
   return `
     <div class="panel" style="background:var(--bg-panel); margin-top:12px; margin-bottom:0">
       <h3>Import complete</h3>
-      ${uploadStep(`${res.imported.length} file(s) imported`, true)}
-      ${uploadStep(`${res.event_count} event(s) parsed (${res.new_event_count} new, ${res.duplicate_event_count} already known from another collection)`, true)}
+      ${uploadStep(`${(res.imported || []).length} file(s) imported`, true)}
+      ${uploadStep(`${fmtCount(res.event_count)} event(s) parsed (${fmtCount(res.new_event_count)} new, ${fmtCount(res.duplicate_event_count)} already known from another collection)`, true)}
       ${res.skipped && res.skipped.length ? `<div class="small muted">${res.skipped.length} file(s) skipped (already imported/unsupported/duplicate)</div>` : ""}
-      ${res.errors && res.errors.length ? `<div class="small" style="color:var(--high)">${res.errors.length} file(s) had parse errors</div>` : ""}
+      ${
+        res.parse_failures && res.parse_failures.length
+          ? `<div class="small" style="color:var(--high)">${res.parse_failures.length} supported file(s) failed to parse -- this is not the same as unsupported evidence</div>
+             ${renderParseFailures(res.parse_failures)}`
+          : ""
+      }
       <div style="margin-top:12px">
         <button id="import-continue-btn">Continue to case dashboard</button>
       </div>
     </div>`;
+}
+
+// sha256Cell renders a source file's hash cell: Tracefall's own SHA-256
+// once known (after import), else the hash the source container itself
+// reported (sf.embedded_hash, format "algo:hexdigest" -- currently only
+// ever populated for an AD1-sourced file, see
+// internal/model.SourceFile.EmbeddedHash's doc comment), clearly labeled
+// as such so it's never mistaken for one Tracefall verified itself, else
+// emptyLabel ("Unknown" or "-" depending on context -- never invented).
+function sha256Cell(sf, emptyLabel) {
+  if (sf.sha256) return esc(sf.sha256);
+  if (sf.embedded_hash) return esc(sf.embedded_hash) + ' <span class="muted small">(as reported by AD1, not yet independently verified)</span>';
+  return emptyLabel;
 }
 
 function fmtBytes(n) {
@@ -1528,19 +2675,27 @@ async function renderTimelineTab(content, caseId, collections) {
     return;
   }
 
+  // Every categorical filter's option list is derived from the data this
+  // tab already loaded -- no hardcoded hosts/users/processes/techniques,
+  // and no extra request to build them.
   const techniqueIds = Array.from(new Set(findings.flatMap((f) => f.attack_techniques || []))).sort();
   content.innerHTML = `
     <div class="row between">
       <h2 id="timeline-heading">Unified timeline (${events.length} events)</h2>
     </div>
     ${renderFilterBar("tl", {
+      scope: caseId,
+      search: "Search events...",
       severity: true,
-      category: true,
-      host: true,
-      user: true,
-      process: true,
-      technique: techniqueIds,
-      collection: collections,
+      category: filterOptions(events.map(eventCategory), (c) => EVENT_CATEGORY_LABELS[c] || c),
+      host: filterOptions(events.map((e) => e.host)),
+      user: filterOptions(events.map((e) => e.user)),
+      process: filterOptions(events.map((e) => e.process_name)),
+      technique: filterOptions(techniqueIds),
+      collection: filterOptions(
+        collections.map((c) => c.collection_id),
+        (id) => collectionLabel(id)
+      ),
       timeRange: true,
     })}
     <div id="timeline-body"></div>
@@ -1562,7 +2717,7 @@ function renderTimelineRows(caseId, events, eventFindingIdx, eventCorrIdx, filte
     return;
   }
   body.innerHTML = `
-    <div class="table-wrap"><table>
+    <div class="table-wrap"><table class="data-table wide">
       <thead><tr>
         <th>Time (UTC)</th><th>Category</th><th>Type</th><th>Host</th><th>User</th>
         <th>Process</th><th>Parent</th><th>PID</th><th>PPID</th><th>Detail</th>
@@ -1583,18 +2738,21 @@ function renderTimelineRows(caseId, events, eventFindingIdx, eventCorrIdx, filte
 // verdict belongs to the Finding it supports), everything else is a
 // direct field on the event.
 function eventMatchesFilters(e, f, eventFindingIdx) {
-  if (f.collection && e.collection_id !== f.collection) return false;
-  if (f.category && eventCategory(e) !== f.category) return false;
-  if (f.host && !(e.host || "").toLowerCase().includes(f.host)) return false;
-  if (f.user && !(e.user || "").toLowerCase().includes(f.user)) return false;
-  if (f.process && !(e.process_name || "").toLowerCase().includes(f.process)) return false;
+  if (!selMatches(f.collection, e.collection_id)) return false;
+  if (!selMatches(f.category, eventCategory(e))) return false;
+  if (!selMatches(f.host, e.host)) return false;
+  if (!selMatches(f.user, e.user)) return false;
+  if (!selMatches(f.process, e.process_name)) return false;
+  // Date bounds are INCLUSIVE at both ends: an event exactly on the
+  // boundary is inside the range. See docs/investigation-filtering.md.
   if (f.from && new Date(e.timestamp) < f.from) return false;
   if (f.to && new Date(e.timestamp) > f.to) return false;
+  if (f.q && !eventSearchHaystack(e, eventFindingIdx).includes(f.q)) return false;
 
-  if (f.severity || f.technique) {
+  if (hasSel(f.severity) || hasSel(f.technique)) {
     const relatedFindings = eventFindingIdx[e.id] || [];
-    if (f.severity && !relatedFindings.some((rf) => rf.severity === f.severity)) return false;
-    if (f.technique && !relatedFindings.some((rf) => (rf.attack_techniques || []).includes(f.technique))) return false;
+    if (hasSel(f.severity) && !relatedFindings.some((rf) => f.severity.has(rf.severity))) return false;
+    if (hasSel(f.technique) && !relatedFindings.some((rf) => selMatchesAny(f.technique, rf.attack_techniques))) return false;
   }
   return true;
 }
@@ -1610,20 +2768,20 @@ function rowForEvent(e, relatedFindings, relatedCorrs) {
   const techniques = techniquesForFindings(relatedFindings || []);
   const hasChain = (relatedCorrs || []).some((c) => c.correlation_type === "activity_chain");
   return `<tr class="timeline-row" data-event="${esc(e.id)}" tabindex="0">
-    <td class="mono small">${esc(fmtTime(e.timestamp))}</td>
-    <td class="small">${categoryBadge(eventCategory(e))}</td>
-    <td class="small">${esc(e.event_type)}${hasChain ? ' <span class="badge conf chain-badge" title="Part of a reconstructed activity chain">chain</span>' : ""}</td>
-    <td class="mono small">${esc(e.host)}</td>
-    <td class="mono small">${esc(e.user)}</td>
-    <td class="mono small">${esc(e.process_name)}</td>
-    <td class="mono small">${esc(e.parent_process)}</td>
-    <td class="mono small">${e.pid || ""}</td>
-    <td class="mono small">${e.ppid || ""}</td>
+    <td class="mono small nowrap">${esc(fmtTime(e.timestamp))}</td>
+    <td class="small nowrap">${categoryBadge(eventCategory(e))}</td>
+    <td class="small nowrap">${esc(e.event_type)}${hasChain ? ' <span class="badge conf chain-badge" title="Part of a reconstructed activity chain">chain</span>' : ""}</td>
+    <td class="mono small nowrap">${esc(e.host)}</td>
+    <td class="mono small nowrap">${esc(e.user)}</td>
+    <td class="mono small nowrap">${esc(e.process_name)}</td>
+    <td class="mono small nowrap">${esc(e.parent_process)}</td>
+    <td class="mono small num">${e.pid || ""}</td>
+    <td class="mono small num">${e.ppid || ""}</td>
     <td class="mono small detail-td">${detailCell(eventDetailValue(e))}</td>
-    <td class="small">${sev ? severityBadge(sev) : ""}</td>
+    <td class="small nowrap">${sev ? severityBadge(sev) : ""}</td>
     <td class="small">${techChips(techniques)}</td>
-    <td class="small">${esc(e.artifact_type)}</td>
-    <td class="small">${collectionBadge(e.collection_id)}</td>
+    <td class="small nowrap">${esc(artifactLabel(e.artifact_type))}</td>
+    <td class="small nowrap">${collectionBadge(e.collection_id)}</td>
   </tr>
   <tr class="raw-row" data-for="${esc(e.id)}" style="display:none"><td colspan="14"><div class="evidence-box"></div></td></tr>`;
 }
@@ -1710,19 +2868,31 @@ async function renderFindingsTab(content, caseId) {
   }
   const eventsById = Object.fromEntries(timeline.map((e) => [e.id, e]));
   const eventCorrIdx = buildEventCorrelationIndex(correlations);
-  const ruleOptions = Array.from(new Map(findings.map((f) => [f.detection_rule, f.title])).entries()).map(([id, title]) => ({ id, title }));
-  const techniqueIds = Array.from(new Set(findings.flatMap((f) => f.attack_techniques || []))).sort();
+  // Host/user/collection options come from the findings' own supporting
+  // events -- the same join findingMatchesFilters uses to match on them,
+  // so the offered options and the filter's behavior can't disagree.
+  const ruleTitles = new Map(findings.map((f) => [f.detection_rule, f.title]));
+  const supportingOf = (f) => (f.supporting_event_ids || []).map((id) => eventsById[id]).filter(Boolean);
+  const supportingEvents = findings.flatMap(supportingOf);
 
   content.innerHTML = `
     <div class="row between"><h2 id="findings-heading">Findings (${findings.length})</h2></div>
     ${renderFilterBar("fd", {
+      scope: caseId,
+      search: "Search findings...",
       severity: true,
       confidence: true,
-      host: true,
-      user: true,
-      technique: techniqueIds,
-      rule: ruleOptions,
-      collection: currentCollections,
+      host: filterOptions(supportingEvents.map((e) => e.host)),
+      user: filterOptions(supportingEvents.map((e) => e.user)),
+      technique: filterOptions(findings.flatMap((f) => f.attack_techniques || [])),
+      rule: filterOptions(
+        findings.map((f) => f.detection_rule),
+        (id) => ruleTitles.get(id) || id
+      ),
+      collection: filterOptions(
+        supportingEvents.map((e) => e.collection_id),
+        (id) => collectionLabel(id)
+      ),
       timeRange: true,
     })}
     <div id="finding-cards"></div>
@@ -1738,18 +2908,22 @@ async function renderFindingsTab(content, caseId) {
 // backed by), exactly the same join renderFindingCards uses to display
 // them on the card.
 function findingMatchesFilters(f, filters, eventsById) {
-  if (filters.severity && f.severity !== filters.severity) return false;
-  if (filters.confidence && f.confidence !== filters.confidence) return false;
-  if (filters.rule && f.detection_rule !== filters.rule) return false;
-  if (filters.technique && !(f.attack_techniques || []).includes(filters.technique)) return false;
+  if (!selMatches(filters.severity, f.severity)) return false;
+  if (!selMatches(filters.confidence, f.confidence)) return false;
+  if (!selMatches(filters.rule, f.detection_rule)) return false;
+  if (!selMatchesAny(filters.technique, f.attack_techniques)) return false;
+  // A finding spans a time range, so a date filter is an OVERLAP test:
+  // a finding is shown when any part of its first_seen..last_seen span
+  // falls inside the selected window. Both bounds are inclusive.
   if (filters.from && new Date(f.last_seen) < filters.from) return false;
   if (filters.to && new Date(f.first_seen) > filters.to) return false;
+  if (filters.q && !findingSearchHaystack(f).includes(filters.q)) return false;
 
-  if (filters.host || filters.user || filters.collection) {
+  if (hasSel(filters.host) || hasSel(filters.user) || hasSel(filters.collection)) {
     const supporting = (f.supporting_event_ids || []).map((id) => eventsById[id]).filter(Boolean);
-    if (filters.host && !supporting.some((e) => (e.host || "").toLowerCase().includes(filters.host))) return false;
-    if (filters.user && !supporting.some((e) => (e.user || "").toLowerCase().includes(filters.user))) return false;
-    if (filters.collection && !supporting.some((e) => e.collection_id === filters.collection)) return false;
+    if (hasSel(filters.host) && !supporting.some((e) => selMatches(filters.host, e.host))) return false;
+    if (hasSel(filters.user) && !supporting.some((e) => selMatches(filters.user, e.user))) return false;
+    if (hasSel(filters.collection) && !supporting.some((e) => selMatches(filters.collection, e.collection_id))) return false;
   }
   return true;
 }
@@ -1762,6 +2936,45 @@ function findingEntities(f, eventsById) {
   const hosts = Array.from(new Set(supporting.map((e) => e.host).filter(Boolean)));
   const users = Array.from(new Set(supporting.map((e) => e.user).filter(Boolean)));
   return { hosts, users };
+}
+
+// renderSeverityExplanation answers "why is this finding this severe?".
+//
+// Every statement it shows is generated by the server from either the
+// producing rule's declared reasoning or facts counted from this
+// finding's own supporting events (see internal/api/explain.go). The UI
+// adds no judgement of its own -- if a factor is not in the data, it is
+// not displayed.
+function renderSeverityExplanation(x) {
+  if (!x || !Array.isArray(x.factors) || x.factors.length === 0) return "";
+
+  const rows = x.factors
+    .map(
+      (f) => `<div class="why-factor why-${esc(f.kind)}">
+                <div class="why-label">${esc(f.label)}</div>
+                <div class="why-detail small">${esc(f.detail)}</div>
+              </div>`
+    )
+    .join("");
+
+  return `
+    <div class="why-panel">
+      <div class="why-head">
+        <span class="why-title">Why this severity?</span>
+        ${severityBadge(x.severity)}
+        ${confBadge(x.confidence)}
+        ${x.escalated ? `<span class="badge conf why-escalated">raised above rule baseline</span>` : ""}
+      </div>
+      <div class="why-factors">${rows}</div>
+      ${
+        x.rule
+          ? `<p class="muted small why-rule-note">Rule <span class="mono">${esc(x.rule.rule_id)}</span> assigns
+               ${esc(x.rule.base_severity)} severity at minimum${
+              x.rule.max_severity !== x.rule.base_severity ? `, up to ${esc(x.rule.max_severity)}` : ""
+            }. Severity is set by the detection rule from the evidence, not scored or configurable.</p>`
+          : ""
+      }
+    </div>`;
 }
 
 function renderFindingCards(caseId, findings, eventsById, eventCorrIdx, filters, statusIdx) {
@@ -1842,8 +3055,9 @@ async function toggleFindingDetail(card, caseId, findingId) {
   try {
     const fd = await api(`/cases/${caseId}/findings/${findingId}`);
     detail.innerHTML = `
+      ${renderSeverityExplanation(fd.severity_explanation)}
       <h3>Supporting evidence</h3>
-      <div class="table-wrap"><table>
+      <div class="table-wrap"><table class="data-table">
         <thead><tr><th>Time</th><th>Type</th><th>Process</th><th>Detail</th><th>Source</th><th>Collection</th><th></th></tr></thead>
         <tbody>
           ${fd.supporting_event_details
@@ -1853,7 +3067,7 @@ async function toggleFindingDetail(card, caseId, findingId) {
                 <td>${esc(e.event_type)}</td>
                 <td class="mono small">${esc(e.process_name)}</td>
                 <td class="mono small detail-td">${detailCell(eventDetailValue(e))}</td>
-                <td class="small">${esc(e.artifact_type)}</td>
+                <td class="small">${esc(artifactLabel(e.artifact_type))}</td>
                 <td class="small">${collectionBadge(e.collection_id)}</td>
                 <td><button class="secondary small view-raw-btn" data-event="${esc(e.id)}">raw</button></td>
               </tr>
@@ -1943,19 +3157,24 @@ function renderInvestigationList(caseId, investigations) {
 async function renderInvestigationsTab(content, caseId) {
   content.innerHTML = `<p class="empty">Loading investigations...</p>`;
   const investigations = await api(`/cases/${caseId}/investigations`);
-  const techniqueIds = Array.from(new Set(investigations.flatMap((i) => i.attack_techniques || []))).sort();
-
   content.innerHTML = `
     <div class="row between"><h2 id="investigations-heading">Investigations (${investigations.length})</h2></div>
-    ${renderFilterBar("iv", { severity: true, confidence: true, technique: techniqueIds })}
+    ${renderFilterBar("iv", {
+      scope: caseId,
+      search: "Search investigations...",
+      severity: true,
+      confidence: true,
+      technique: filterOptions(investigations.flatMap((i) => i.attack_techniques || [])),
+    })}
     <div id="investigations-body"></div>
   `;
   const rerender = () => {
     const filters = readFilterBar("iv");
     const filtered = investigations.filter((inv) => {
-      if (filters.severity && inv.severity !== filters.severity) return false;
-      if (filters.confidence && inv.confidence !== filters.confidence) return false;
-      if (filters.technique && !(inv.attack_techniques || []).includes(filters.technique)) return false;
+      if (!selMatches(filters.severity, inv.severity)) return false;
+      if (!selMatches(filters.confidence, inv.confidence)) return false;
+      if (!selMatchesAny(filters.technique, inv.attack_techniques)) return false;
+      if (filters.q && !investigationSearchHaystack(inv).includes(filters.q)) return false;
       return true;
     });
     document.getElementById("investigations-heading").textContent = `Investigations (${filtered.length} of ${investigations.length})`;
@@ -2415,7 +3634,7 @@ async function renderEvidenceTab(content, caseId, collections) {
         <button type="button" class="secondary small" id="evidence-clear-btn">Clear</button>
       </div>
     </div>
-    <div id="evidence-bulk-bar" class="hidden"></div>
+    <div id="evidence-bulk-bar" class="bulk-bar-host"></div>
     <div id="evidence-collections-detail"></div>
   `;
   const container = document.getElementById("evidence-collections-detail");
@@ -2447,6 +3666,7 @@ function renderEvidenceCollectionCard(index, col, files) {
     </div>
     <div class="muted small">${esc(SOURCE_TYPE_LABELS[col.source_type] || col.source_type)}${col.original_filename ? " &middot; " + esc(col.original_filename) : ""}</div>
     <div class="small" style="margin-top:4px">${col.file_count} file(s) discovered &middot; ${col.imported_file_count} file(s) imported</div>
+    ${col.ingestion_status === "failed" ? FAILED_COLLECTION_NOTE : ""}
     <div class="evidence-file-list" style="margin-top:10px">
       ${imported.length ? imported.map(rowForEvidenceFile).join("") : `<p class="empty">No evidence files imported yet from this collection.</p>`}
     </div>
@@ -2454,7 +3674,7 @@ function renderEvidenceCollectionCard(index, col, files) {
       other.length
         ? `<details style="margin-top:10px">
       <summary class="muted small" style="cursor:pointer">${other.length} file(s) not imported (discovered or unsupported)</summary>
-      <div class="table-wrap" style="margin-top:8px"><table>
+      <div class="table-wrap" style="margin-top:8px"><table class="data-table">
         <thead><tr><th>Filename</th><th>Path</th><th>Type</th><th>Status</th></tr></thead>
         <tbody>
           ${other
@@ -2462,7 +3682,7 @@ function renderEvidenceCollectionCard(index, col, files) {
               (f) => `<tr>
               <td class="mono small">${esc(f.original_filename)}</td>
               <td class="mono small">${esc(f.path)}</td>
-              <td class="small">${esc(f.artifact_type || "-")}</td>
+              <td class="small">${esc(artifactLabel(f.artifact_type))}</td>
               <td class="small">${esc(SOURCE_FILE_STATUS_LABELS[f.import_status] || f.import_status)}</td>
             </tr>`
             )
@@ -2481,14 +3701,16 @@ function renderEvidenceCollectionCard(index, col, files) {
 function rowForEvidenceFile(f) {
   return `
     <div class="evidence-file-row" data-file-id="${esc(f.id)}">
-      <label class="evidence-file-label">
+      <label class="evidence-file-label" title="${esc(f.original_filename)}">
         <input type="checkbox" class="evidence-file-checkbox" data-id="${esc(f.id)}" data-name="${esc(f.original_filename)}" />
-        <span>
-          <div>${esc(f.original_filename)}</div>
-          <div class="muted small">${esc(f.artifact_type || "-")} &middot; ${fmtBytes(f.size_bytes)} &middot; ${f.event_count} event(s)</div>
-        </span>
+        <span class="evidence-file-name">${esc(f.original_filename)}</span>
       </label>
-      <button type="button" class="secondary small danger evidence-file-delete-btn" data-id="${esc(f.id)}" data-name="${esc(f.original_filename)}">Delete</button>
+      <span class="evidence-file-meta" title="${esc(artifactLabel(f.artifact_type))}">${esc(artifactLabel(f.artifact_type))}</span>
+      <span class="evidence-file-meta num">${fmtBytes(f.size_bytes)}</span>
+      <span class="evidence-file-meta num">${f.event_count} event(s)</span>
+      <span class="evidence-file-actions">
+        <button type="button" class="small danger evidence-file-delete-btn" data-id="${esc(f.id)}" data-name="${esc(f.original_filename)}">Delete</button>
+      </span>
     </div>`;
 }
 
@@ -2502,12 +3724,13 @@ function wireEvidenceFileSelection(caseId, container) {
 
   function updateBulkBar() {
     const selected = checkboxes().filter((cb) => cb.checked);
+    // .bulk-bar-host reserves this row's height whether or not a bar is
+    // in it, so ticking a checkbox no longer pushes the whole evidence
+    // list down (and the row under the cursor no longer moves).
     if (selected.length === 0) {
-      bulkBar.classList.add("hidden");
       bulkBar.innerHTML = "";
       return;
     }
-    bulkBar.classList.remove("hidden");
     bulkBar.innerHTML = `
       <div class="bulk-action-bar">
         <span>${selected.length} evidence file(s) selected</span>

@@ -15,6 +15,31 @@
   --medium: #ffd24d;
   --low: #6fb3ff;
   --ok: #4ddb9b;
+
+  /* ---- Layout system (Phase 8) ----
+     One spacing scale, one radius scale, one control height. Every
+     margin/padding/gap below is expressed in these rather than ad-hoc
+     pixel values, which is what keeps cards, headings, controls and
+     tables sharing a single left/right edge and a predictable vertical
+     rhythm. Change a token here rather than nudging an individual
+     element. */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+
+  --radius-sm: 6px;
+  --radius-md: 8px;
+
+  --content-max: 1100px;   /* the single max content width */
+  --page-pad: var(--space-6); /* the single horizontal page padding */
+  --control-h: 34px;       /* buttons/inputs/selects share one height */
+  --control-h-sm: 28px;
+  /* Height reserved for a bulk-selection toolbar, whether or not one is
+     showing -- see .bulk-bar-host. */
+  --bulk-bar-h: 56px;
 }
 
 * { box-sizing: border-box; }
@@ -54,36 +79,55 @@ code, .mono { font-family: var(--mono); }
   text-align: center;
 }
 
-.app { max-width: 1100px; margin: 0 auto; padding: 24px; }
+.app { max-width: var(--content-max); margin: 0 auto; padding: var(--page-pad); }
+/* The topbar/LAN banner run full-bleed but their contents align to the
+   same column as .app, so there is one consistent left and right edge
+   down the whole page. */
+.topbar, .lan-warning { padding-left: var(--page-pad); padding-right: var(--page-pad); }
 
 .panel {
   background: var(--bg-panel);
   border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 20px;
-  margin-bottom: 20px;
+  border-radius: var(--radius-md);
+  padding: var(--space-5);
+  margin-bottom: var(--space-5);
+  /* Panels are grid/flex children in places; without this a wide table
+     inside can force the panel past its container instead of scrolling
+     within it. */
+  min-width: 0;
 }
 
-h1 { font-size: 22px; margin: 0 0 4px; }
-h2 { font-size: 16px; margin: 0 0 12px; color: var(--text); }
-h3 { font-size: 14px; margin: 0 0 8px; }
+/* Consistent heading rhythm: the space belongs to the heading, so
+   sections don't need one-off margins bolted on. */
+h1 { font-size: 22px; line-height: 1.3; margin: 0 0 var(--space-1); }
+h2 { font-size: 16px; line-height: 1.35; margin: 0 0 var(--space-3); color: var(--text); }
+h3 { font-size: 14px; line-height: 1.4; margin: 0 0 var(--space-2); }
 .muted { color: var(--text-dim); }
 .small { font-size: 12px; }
 
-.row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+.row { display: flex; gap: var(--space-3); align-items: center; flex-wrap: wrap; min-width: 0; }
 .row.between { justify-content: space-between; }
-.stack { display: flex; flex-direction: column; gap: 6px; }
+.stack { display: flex; flex-direction: column; gap: var(--space-1); min-width: 0; }
 
 button, .btn {
   background: var(--accent);
   color: #08101f;
   border: none;
-  border-radius: 6px;
-  padding: 8px 14px;
+  border-radius: var(--radius-sm);
+  padding: 0 var(--space-3);
+  min-height: var(--control-h);
   font-size: 13px;
   font-weight: 600;
   cursor: pointer;
+  /* Every button is the same height and centres its label, so buttons
+     sitting beside inputs/selects in a .row all line up on one baseline. */
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-1);
+  white-space: nowrap;
 }
+button.small, .btn.small { min-height: var(--control-h-sm); padding: 0 10px; font-size: 12px; }
 button:hover { filter: brightness(1.1); }
 button.secondary {
   background: transparent;
@@ -101,17 +145,31 @@ button.danger {
 button.danger:hover { background: rgba(255,92,122,0.22); filter: none; }
 button:disabled { opacity: 0.5; cursor: default; }
 
-input, textarea, select {
+/* :not([type=checkbox]):not([type=radio]) is load-bearing, not cosmetic.
+   A bare `input { width: 100% }` also matches checkboxes, so every
+   checkbox in a flex row claimed the row's full width -- and where the
+   checkbox additionally carried `flex-shrink: 0` (case cards) flex
+   couldn't correct it, leaving the card beside it squeezed to ~120px and
+   pushed off the right edge of its own container. Toggle controls are
+   sized by their own box, never stretched. */
+input:not([type="checkbox"]):not([type="radio"]), textarea, select {
   background: var(--bg-panel-2);
   border: 1px solid var(--border);
   color: var(--text);
-  border-radius: 6px;
-  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  padding: var(--space-2) 10px;
   font-size: 13px;
   font-family: var(--sans);
   width: 100%;
+  min-height: var(--control-h);
 }
 select { width: auto; }
+input[type="checkbox"], input[type="radio"] {
+  width: auto;
+  flex: 0 0 auto;
+  margin: 0;
+  cursor: pointer;
+}
 label { display: block; font-size: 12px; color: var(--text-dim); margin-bottom: 4px; }
 .field { margin-bottom: 12px; }
 .hidden { display: none !important; }
@@ -165,14 +223,54 @@ input.input-error { border-color: var(--critical); }
 }
 
 table { border-collapse: collapse; width: 100%; font-size: 13px; }
-th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); vertical-align: top; overflow-wrap: anywhere; }
-th { color: var(--text-dim); font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: 0.03em; }
+td {
+  text-align: left;
+  padding: var(--space-2) 10px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+  overflow-wrap: anywhere;
+}
+/* Headers must never be broken mid-word. `overflow-wrap: anywhere`
+   applied to th (as it once was, shared with td) shredded single-word
+   labels into "CATEGOR/Y", "PROCES/S", "COLLECTI/ON" -- three-line
+   headers on a forensic table. Headers stay on one line and the table
+   scrolls horizontally instead (see .table-wrap): for wide forensic
+   data, scrolling is the correct trade, not squeezing. */
+th {
+  text-align: left;
+  padding: var(--space-2) 10px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: bottom;
+  color: var(--text-dim);
+  font-weight: 600;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  white-space: nowrap;
+  overflow-wrap: normal;
+}
 tr:hover td { background: rgba(255,255,255,0.02); }
-.table-wrap { overflow-x: auto; }
+
+/* The only place horizontal overflow is intentional. A wide table keeps
+   its natural column widths and scrolls inside this box; the page itself
+   never scrolls sideways. */
+.table-wrap { overflow-x: auto; max-width: 100%; }
+/* Data tables declare a sensible minimum so columns keep readable widths
+   and the wrapper scrolls, rather than every column collapsing to fit
+   the viewport. Applied via a class so narrow summary tables (e.g. the
+   2-3 column integrity tables) are unaffected. */
+.table-wrap > table.data-table { min-width: 1000px; }
+.table-wrap > table.data-table.wide { min-width: 1240px; }
+
+/* Values that must stay legible rather than wrap character-by-character:
+   timestamps, hosts, users, process names, ATT&CK IDs, sizes, counts. */
+.nowrap { white-space: nowrap; }
+.num { white-space: nowrap; text-align: right; font-variant-numeric: tabular-nums; }
+
 /* Detail/command-line columns get proportionally more room but are still
    bounded -- a long value wraps and truncates inside the cell (see
    .detail-cell) instead of forcing the table, and the page, wider. */
-.detail-td { max-width: 320px; }
+.detail-td { max-width: 320px; min-width: 220px; }
 
 .badge {
   display: inline-block;
@@ -203,21 +301,46 @@ tr:hover td { background: rgba(255,255,255,0.02); }
   margin: 2px 4px 2px 0;
 }
 
+/* One-column list: cases stack vertically and each row spans the full
+   content width, at 1 case or 100. A grid (not a flex row) is what makes
+   that structural rather than dependent on the children's intrinsic
+   widths. */
+.case-list { display: grid; grid-template-columns: 1fr; gap: var(--space-2); }
+
 /* The checkbox sits outside the <a> (see app.js's case-card-row markup)
-   so clicking it never also triggers navigation into the case. */
-.case-card-row { display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px; }
-.case-card-row input[type="checkbox"] { margin-top: 16px; flex-shrink: 0; }
-.case-card-row .case-card { flex: 1; margin-bottom: 0; }
+   so clicking it never also triggers navigation into the case.
+   grid-template-columns pins the checkbox to its own fixed track and
+   gives the card everything else -- `1fr` plus `min-width: 0` on the
+   card means a long unbroken case name or ID wraps inside the card
+   instead of widening the row and overflowing the page. */
+.case-card-row {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  align-items: start;
+  gap: var(--space-3);
+  width: 100%;
+  min-width: 0;
+}
+.case-card-row > input[type="checkbox"] { margin-top: var(--space-4); }
+.case-card-row > .case-card { margin-bottom: 0; }
 
 .case-card {
   display: block;
-  padding: 14px 16px;
+  width: 100%;
+  min-width: 0;
+  padding: var(--space-3) var(--space-4);
   border: 1px solid var(--border);
-  border-radius: 8px;
-  margin-bottom: 10px;
+  border-radius: var(--radius-md);
   background: var(--bg-panel-2);
+  color: var(--text);
 }
 .case-card:hover { border-color: var(--accent); text-decoration: none; }
+/* Case name and its status badge on one line, badge never squeezed and
+   never wrapped onto its own line by a long name. */
+.case-card-head { display: flex; align-items: start; justify-content: space-between; gap: var(--space-3); min-width: 0; }
+.case-card-name { font-weight: 600; min-width: 0; overflow-wrap: anywhere; }
+.case-card-head > .badge { flex: 0 0 auto; }
+.case-card-meta { overflow-wrap: anywhere; }
 
 /* Bulk-selection action bar (cases, evidence files): only ever present
    in the DOM while something is selected -- see app.js's updateBulkBar
@@ -226,26 +349,116 @@ tr:hover td { background: rgba(255,255,255,0.02); }
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-bottom: 10px;
-  padding: 10px 14px;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+  padding: 10px var(--space-3);
   border: 1px solid var(--accent-dim);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   background: rgba(91,157,255,0.08);
 }
 
-.evidence-file-row {
+/* Sticky selection toolbar (Evidence). Ticking a checkbox used to insert
+   this bar into normal flow above the list, pushing every row down ~65px
+   -- so the row the investigator had just clicked slid out from under
+   the cursor, which made multi-select actively unpleasant.
+   The host reserves its height permanently (min-height) whether or not a
+   bar is showing, so appearing/disappearing costs zero layout shift; it
+   sticks to the top of the scroll container so it stays reachable while
+   scrolling a long collection, and sits ABOVE the list rather than over
+   the rows being interacted with. */
+.bulk-bar-host {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  /* Fixed, not min-height: the reservation must equal the bar's rendered
+     height exactly, or the list still shifts by the difference when the
+     bar appears. --bulk-bar-h is that height (bar content + its 10px
+     vertical padding + 1px borders); .bulk-action-bar is pinned to it
+     too so the two can't drift apart. */
+  height: var(--bulk-bar-h);
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  padding: 8px 10px;
+  margin-bottom: var(--space-2);
+  background: var(--bg-panel);
+}
+.bulk-bar-host > * { width: 100%; }
+.bulk-bar-host .bulk-action-bar { height: var(--bulk-bar-h); }
+
+/* Anchored dropdown (Export). Must overlay content, not participate in
+   flow -- opening it previously grew the page and shoved everything
+   below it down. */
+.dropdown { position: relative; display: inline-block; }
+.dropdown-menu {
+  position: absolute;
+  top: calc(100% + var(--space-1));
+  right: 0;
+  z-index: 50;
+  min-width: 200px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding: var(--space-2);
   border: 1px solid var(--border);
-  border-radius: 6px;
-  margin-bottom: 6px;
+  border-radius: var(--radius-md);
+  background: var(--bg-panel-2);
+  box-shadow: 0 8px 24px rgba(0,0,0,0.45);
+}
+.dropdown-menu a {
+  display: block;
+  padding: 6px var(--space-2);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font-size: 13px;
+  white-space: nowrap;
+}
+.dropdown-menu a:hover { background: rgba(255,255,255,0.06); text-decoration: none; }
+
+/* Evidence rows are a fixed column grid, not a flex row that lets each
+   file's own text decide the layout: checkbox | filename (flexible) |
+   type | size | events | actions. Every metadata column and the Delete
+   button therefore line up vertically down the whole list regardless of
+   filename length. */
+.evidence-file-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) 150px 90px 90px auto;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-2) 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  margin-bottom: var(--space-1);
   background: var(--bg-panel-2);
 }
-.evidence-file-label { display: flex; align-items: flex-start; gap: 8px; cursor: pointer; }
-.evidence-file-label input[type="checkbox"] { margin-top: 3px; flex-shrink: 0; }
+.evidence-file-label {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: var(--space-2);
+  cursor: pointer;
+  /* span the checkbox + filename tracks */
+  grid-column: 1 / span 2;
+  min-width: 0;
+}
+/* A long filename truncates with an ellipsis rather than wrapping the
+   row to two lines or widening the grid; the full value stays available
+   via the title attribute (see app.js's evidence row markup). */
+.evidence-file-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.evidence-file-meta { color: var(--text-dim); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.evidence-file-row > .evidence-file-actions { justify-self: end; }
+
+/* Below ~900px the metadata columns would each be too narrow to read;
+   collapse to checkbox+name / actions and let the meta line wrap under
+   the name instead. */
+@media (max-width: 900px) {
+  .evidence-file-row { grid-template-columns: minmax(0, 1fr) auto; }
+  .evidence-file-label { grid-column: 1 / span 1; }
+  .evidence-file-row > .evidence-file-meta { grid-column: 1 / span 1; white-space: normal; }
+}
 
 /* "Evidence changed" staleness notice -- deliberately the same visual
    language as .field-error-box but in the medium-severity color, since
@@ -271,14 +484,27 @@ tr:hover td { background: rgba(255,255,255,0.02); }
 .stat .n { font-size: 22px; font-weight: 700; }
 .stat .l { font-size: 11px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.03em; }
 
-.tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--border); margin-bottom: 16px; }
+/* Tabs align to the same left edge as the panels above them and scroll
+   horizontally rather than wrapping to a second row on narrow viewports
+   (a wrapped tab strip shifts all content below it as tabs change). */
+.tabs {
+  display: flex;
+  gap: var(--space-1);
+  border-bottom: 1px solid var(--border);
+  margin-bottom: var(--space-4);
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
 .tab {
-  padding: 8px 14px;
+  padding: var(--space-2) var(--space-3);
   cursor: pointer;
   color: var(--text-dim);
   font-size: 13px;
   border-bottom: 2px solid transparent;
+  white-space: nowrap;
+  flex: 0 0 auto;
 }
+.tab:hover { color: var(--text); text-decoration: none; }
 .tab.active { color: var(--text); border-bottom-color: var(--accent); }
 
 .finding-card {
@@ -388,20 +614,187 @@ tr:hover td { background: rgba(255,255,255,0.02); }
 .timeline-row:hover, .timeline-row:focus-visible { background: rgba(255,255,255,0.03); outline: none; }
 .timeline-row.selected { background: rgba(91,157,255,0.08); }
 
-/* Shared filter bar (Timeline + Findings) -- see app.js's
-   renderFilterBar. Compact, wraps on narrow viewports, never pushes the
-   table into horizontal scroll on its own. */
-.filter-bar { display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0; }
+/* Shared filter bar (Timeline / Findings / Investigations) -- see
+   app.js's renderFilterBar. Compact dropdown triggers rather than
+   full-width form fields: the whole bar is meant to cost one or two
+   rows, not a screenful, so the data below stays visible while
+   filtering. */
+.filter-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  margin: var(--space-2) 0 0;
+}
+
+/* .filter-input is retained for the non-filter selects that reuse it
+   (case status/priority, analyst status) -- see app.js. */
 .filter-input {
   background: var(--bg-panel-2);
   border: 1px solid var(--border);
   color: var(--text);
-  border-radius: 6px;
-  padding: 6px 8px;
+  border-radius: var(--radius-sm);
+  padding: 6px var(--space-2);
   font-size: 12px;
   font-family: var(--sans);
   width: auto;
   min-width: 110px;
+}
+
+/* Anchor for each dropdown's popover. position:relative here (and no
+   overflow clipping anywhere up the chain) is what keeps a popover from
+   being cut off by the panel. */
+.filter-dd { position: relative; display: inline-block; }
+
+.filter-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  max-width: 260px;
+  min-height: var(--control-h-sm);
+  padding: 0 10px;
+  background: var(--bg-panel-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+}
+.filter-trigger:hover { border-color: var(--accent-dim); filter: none; }
+/* A filter that's actually doing something reads differently from an
+   untouched one at a glance. */
+.filter-trigger.active { border-color: var(--accent); color: var(--accent); background: rgba(91,157,255,0.08); }
+/* A long selected value (a full command path, say) truncates in the
+   trigger; the full text stays available via the button's title. */
+.filter-trigger-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.filter-caret { flex: 0 0 auto; font-size: 10px; opacity: 0.7; }
+
+.filter-pop {
+  position: absolute;
+  top: calc(100% + var(--space-1));
+  left: 0;
+  z-index: 40;
+  min-width: 220px;
+  max-width: 320px;
+  padding: var(--space-2);
+  background: var(--bg-panel-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: 0 8px 24px rgba(0,0,0,0.45);
+}
+/* Flipped by positionFilterPop when left-aligning would run past the
+   viewport edge. */
+.filter-pop.align-right { left: auto; right: 0; }
+.filter-pop[hidden] { display: none; }
+
+/* Header line: which filter this is, and how much of it is selected --
+   the context the compact trigger can't carry. */
+.filter-pop-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-2);
+  margin-bottom: var(--space-2);
+}
+.filter-pop-title { font-size: 12px; font-weight: 600; color: var(--text); }
+.filter-pop-count { font-size: 11px; color: var(--text-dim); white-space: nowrap; }
+
+/* Type-ahead field for long option lists (see FILTER_SEARCH_THRESHOLD). */
+.filter-search {
+  width: 100%;
+  min-height: var(--control-h-sm);
+  margin-bottom: var(--space-2);
+  padding: 4px var(--space-2);
+  font-size: 12px;
+}
+.filter-pop-empty { padding: var(--space-2) 0; margin: 0; font-size: 12px; }
+
+/* Actions sit at the bottom of the popover, after the options they act
+   on. */
+.filter-pop-actions {
+  display: flex;
+  gap: var(--space-2);
+  justify-content: flex-end;
+  padding-top: var(--space-2);
+  margin-top: var(--space-2);
+  border-top: 1px solid var(--border);
+}
+
+/* Timezone disclosure in the date popover -- the one place the
+   local-entry / UTC-display distinction is spelled out. */
+.filter-tz-note {
+  margin: 0 0 var(--space-2);
+  padding: 6px var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-panel);
+  line-height: 1.45;
+}
+.filter-tz-note strong { color: var(--text); }
+
+/* Long option lists (hundreds of processes in a large case) scroll
+   inside the popover rather than growing it past the viewport. */
+.filter-pop-list { max-height: 260px; overflow-y: auto; display: flex; flex-direction: column; gap: 2px; }
+.filter-opt {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 4px 6px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font-size: 12px;
+  margin: 0;
+  color: var(--text);
+}
+.filter-opt:hover { background: rgba(255,255,255,0.05); }
+.filter-opt-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.filter-date-row { margin-bottom: var(--space-2); }
+.filter-date-row > label { margin-bottom: var(--space-1); }
+.filter-date-input, .filter-time-input {
+  width: auto;
+  min-width: 0;
+  flex: 1 1 auto;
+  font-size: 12px;
+  padding: 4px var(--space-2);
+  min-height: var(--control-h-sm);
+}
+
+/* Active-filter chips. The host reserves its row height whether or not
+   any chips are present (same strategy as .bulk-bar-host), so the first
+   selection doesn't shove the table down and move the row the
+   investigator is reading. */
+.filter-chips-host {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  min-height: 34px;
+  margin-bottom: var(--space-2);
+}
+.filter-chips-label { flex: 0 0 auto; }
+.filter-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 240px;
+  min-height: 24px;
+  padding: 0 var(--space-2);
+  background: rgba(91,157,255,0.12);
+  border: 1px solid var(--accent-dim);
+  border-radius: 12px;
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.filter-chip:hover { background: rgba(91,157,255,0.22); filter: none; }
+.filter-chip-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+@media (max-width: 560px) {
+  .filter-trigger { max-width: 100%; }
+  .filter-pop { min-width: 180px; max-width: min(320px, calc(100vw - 2 * var(--page-pad))); }
 }
 
 .investigation-summary { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--border); }
@@ -419,14 +812,38 @@ tr:hover td { background: rgba(255,255,255,0.02); }
   overflow-y: auto;
 }
 
+/* An .error-box is injected into an empty container that sits directly
+   beneath the control that failed (e.g. #ingest-error under the local
+   -path row). Without a top margin it rendered flush against the input,
+   reading as part of the field rather than as a response to it.
+
+   The gap is a full --space-4 (16px): the box is the same red as an
+   invalid input's border, so anything tighter reads as the input's own
+   validation state rather than as the result of pressing Discover. The
+   container is empty until something fails, so this margin costs no
+   space in the normal case and cannot shift the layout on success. */
 .error-box {
   background: rgba(255,92,122,0.1);
   border: 1px solid rgba(255,92,122,0.4);
   color: var(--critical);
-  border-radius: 6px;
-  padding: 10px 14px;
-  margin-bottom: 16px;
+  border-radius: var(--radius-sm);
+  padding: var(--space-3) var(--space-4);
+  margin-top: var(--space-4);
+  margin-bottom: var(--space-4);
   font-size: 13px;
+}
+.error-box strong { display: block; margin-bottom: var(--space-1); }
+
+/* A collection a failed discovery left behind in an older database --
+   never produced any more (see internal/model.CollectionStatusFailed).
+   Muted rather than alarming: it reports a dead end, not a live problem
+   with the evidence an investigator does have. */
+.collection-failed-note {
+  margin: var(--space-2) 0 0;
+  padding: var(--space-2) var(--space-3);
+  border-left: 2px solid var(--critical);
+  background: rgba(255,92,122,0.07);
+  color: var(--text-dim);
 }
 
 .empty { color: var(--text-dim); font-style: italic; padding: 20px 0; }
@@ -447,3 +864,161 @@ tr:hover td { background: rgba(255,255,255,0.02); }
 .collection-badge { text-transform: none; letter-spacing: normal; }
 .collection-sources { display: none; margin-top: 10px; }
 .collection-sources.open { display: block; }
+
+/* ---------------- Phase 9A: evidence triage & import progress ---------------- */
+
+/* The toolbar stacks the search box above the filter bar: search is the
+   fastest way to find a known file, filters the fastest way to narrow an
+   unknown catalog, and an investigator reaches for them in that order. */
+.evidence-toolbar {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin: var(--space-3) 0 var(--space-2);
+}
+.evidence-search {
+  width: 100%;
+  max-width: 420px;
+  height: var(--control-h-sm);
+  font-size: 13px;
+}
+.evidence-actions {
+  align-items: center;
+  gap: var(--space-2);
+  margin: var(--space-2) 0;
+  flex-wrap: wrap;
+}
+.evidence-counts { margin-left: auto; }
+/* The per-row unsupported reason: present but quiet, so a long list of
+   unsupported files reads as information rather than as a wall of red. */
+.evidence-reason {
+  font-size: 11px;
+  color: var(--text-dim);
+  margin-top: 2px;
+  max-width: 42ch;
+}
+
+/* Coverage summary. */
+.coverage { margin-top: var(--space-3); }
+.coverage-totals {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-5);
+  padding: var(--space-3) 0;
+}
+.coverage-stat .n { font-size: 22px; font-weight: 600; line-height: 1.1; }
+.coverage-stat .n.ok { color: var(--ok); }
+.coverage-stat .n.bad { color: var(--critical); }
+.coverage-stat .n.muted { color: var(--text-dim); }
+.coverage-stat .l { font-size: 11px; color: var(--text-dim); margin-top: 2px; }
+.coverage-detail { margin-top: var(--space-2); }
+
+/* Artifact triage priority. Deliberately NOT styled like severity
+   badges: priority describes an artifact class's forensic value, and
+   reading it as a finding's severity would be a category error. Muted
+   outline treatment rather than filled colour. */
+.badge.prio {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  font-weight: 600;
+}
+.badge.prio-critical { border-color: rgba(255,92,122,0.55); color: var(--critical); }
+.badge.prio-high     { border-color: rgba(255,154,77,0.55); color: var(--high); }
+.badge.prio-medium   { border-color: rgba(255,210,77,0.45); color: var(--medium); }
+.badge.prio-low      { border-color: rgba(111,179,255,0.4); color: var(--low); }
+.badge.status.ok-badge { background: rgba(77,219,155,0.15); color: var(--ok); }
+
+/* Import progress. The fill is driven only by a server-reported
+   percentage; the indeterminate variant is used when the total work is
+   genuinely unknown, so the bar never invents a number. */
+.import-progress .progress-track {
+  position: relative;
+  height: 10px;
+  margin-top: var(--space-2);
+  border-radius: 999px;
+  background: rgba(255,255,255,0.08);
+  overflow: hidden;
+}
+.import-progress .progress-fill {
+  height: 100%;
+  background: var(--accent, #6fb3ff);
+  border-radius: 999px;
+  transition: width 200ms linear;
+}
+/* Indeterminate: a sliding band that communicates "working" without
+   implying a position. */
+.import-progress .progress-track.indeterminate .progress-fill {
+  width: 35%;
+  animation: progress-slide 1.1s ease-in-out infinite;
+}
+@keyframes progress-slide {
+  0%   { transform: translateX(-100%); }
+  100% { transform: translateX(285%); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .import-progress .progress-track.indeterminate .progress-fill { animation: none; width: 100%; opacity: 0.4; }
+  .import-progress .progress-fill { transition: none; }
+}
+.import-current {
+  margin-top: var(--space-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@media (max-width: 720px) {
+  .evidence-counts { margin-left: 0; width: 100%; }
+  .coverage-totals { gap: var(--space-4); }
+}
+
+/* Phase 9B: free-text search above an investigation filter bar. Same
+   control height and idiom as the evidence search added in 9A, so the
+   two screens do not diverge. */
+.filter-search-row { margin-bottom: var(--space-2); }
+.filter-q {
+  width: 100%;
+  max-width: 420px;
+  height: var(--control-h-sm);
+  font-size: 13px;
+}
+@media (max-width: 720px) {
+  .filter-q { max-width: none; }
+}
+
+/* Phase 9B: the "why this severity?" panel on an expanded finding.
+   Presented as reasoning an investigator can check, not as a verdict --
+   quiet surface, factors as labelled statements rather than a score. */
+.why-panel {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-panel-2);
+  padding: var(--space-4);
+  margin-bottom: var(--space-4);
+}
+.why-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-bottom: var(--space-3);
+}
+.why-title { font-weight: 600; font-size: 14px; margin-right: var(--space-1); }
+.why-escalated { border: 1px dashed var(--high); color: var(--high); background: transparent; }
+.why-factors {
+  display: grid;
+  grid-template-columns: minmax(140px, 220px) 1fr;
+  gap: var(--space-2) var(--space-4);
+  align-items: baseline;
+}
+.why-factor { display: contents; }
+.why-label { font-size: 12px; font-weight: 600; color: var(--text); }
+.why-detail { color: var(--text-dim); }
+/* Corroboration is the factor an investigator most wants to spot, so it
+   is the only one given colour. */
+.why-corroboration .why-label { color: var(--ok); }
+.why-rule-note { margin: var(--space-3) 0 0; }
+@media (max-width: 720px) {
+  .why-factors { grid-template-columns: 1fr; gap: var(--space-1); }
+  .why-label { margin-top: var(--space-2); }
+}

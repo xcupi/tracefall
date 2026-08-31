@@ -97,6 +97,32 @@ const caseCols = `id, name, description, status, created_at, updated_at, case_st
 // (never analyzed), which leaves Case.AnalyzedAt nil so its `omitempty`
 // JSON tag hides it entirely rather than serializing a misleading
 // zero-ish timestamp.
+//
+// It also enforces one invariant every reader depends on: a case
+// reporting Status == analyzed always carries the AnalyzedAt timestamp
+// of the run that produced that status. ReplaceAnalysis -- the only
+// writer of CaseStatusAnalyzed -- sets both in one statement, so a row
+// written by the current code can never violate this. A row migrated in
+// from before analyzed_at existed can: migrate.go deliberately does not
+// invent a timestamp for those (see its comment), leaving status =
+// 'analyzed' beside an empty analyzed_at. Reported verbatim, that made
+// the dashboard state self-contradictory -- an ANALYZED badge directly
+// above "Last analyzed: Never analyzed".
+//
+// Reconciled here, at the single point every Case is materialized, so
+// GetCase/ListCases/FindCaseByName/exports all agree: without a recorded
+// run time there is nothing to attest that the stored results reflect
+// the current evidence, which is exactly what CaseStatusIngested already
+// means ("evidence present, analysis not up to date -- re-run it"). The
+// findings themselves are untouched and still readable; re-running
+// analysis restores the analyzed status along with a real timestamp.
+//
+// Deliberately a read-time projection, not an UPDATE: the stored row is
+// left exactly as acquired, so nothing is rewritten under the
+// investigator, and a future migration could still backfill these rows
+// from an authoritative source if one ever exists. Only Status (the
+// engine lifecycle) is affected -- CaseStatus, the analyst's own
+// workflow state, is never touched by this or anything else here.
 func scanCase(row interface{ Scan(...any) error }) (model.Case, error) {
 	var c model.Case
 	var created, updated, analyzedAt string
@@ -108,6 +134,9 @@ func scanCase(row interface{ Scan(...any) error }) (model.Case, error) {
 	if analyzedAt != "" {
 		t := parseTime(analyzedAt)
 		c.AnalyzedAt = &t
+	}
+	if c.Status == model.CaseStatusAnalyzed && c.AnalyzedAt == nil {
+		c.Status = model.CaseStatusIngested
 	}
 	return c, nil
 }
@@ -240,13 +269,58 @@ func scanCollection(row interface{ Scan(...any) error }) (model.Collection, erro
 // ErrDuplicateCollection (see idx_collections_case_archive_hash in
 // schema.go) instead of creating a second row.
 func (s *Store) SaveCollection(c model.Collection) error {
-	_, err := s.db.Exec(`INSERT INTO collections (`+collectionCols+`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+	return insertCollection(s.db, c)
+}
+
+// execer is the subset of *sql.DB and *sql.Tx that the insert helpers
+// below need, so one statement definition serves both a standalone
+// write and a write enrolled in a larger transaction.
+type execer interface {
+	Exec(query string, args ...any) (sql.Result, error)
+}
+
+func insertCollection(db execer, c model.Collection) error {
+	_, err := db.Exec(`INSERT INTO collections (`+collectionCols+`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		c.ID, c.CaseID, fmtTime(c.CreatedAt), c.SourceType, c.OriginalFilename, c.ArchiveHash,
 		c.EvidenceDirectory, c.IngestionStatus, c.FileCount, c.SupportedFileCount, c.UnsupportedFileCount, c.ImportedFileCount, c.ParsedEventCount)
 	if isUniqueConstraintViolation(err) {
 		return ErrDuplicateCollection
 	}
 	return err
+}
+
+// CreateCollectionWithSourceFiles inserts a collection and its complete
+// discovery catalog in ONE transaction: either the collection and every
+// one of its source_file rows exist, or nothing does.
+//
+// Discovery used to insert the collection first and catalog afterwards,
+// which meant any failure while cataloging (an unreadable directory, a
+// corrupt AD1, a database error) left behind a permanent collection with
+// status "failed" and zero files -- a row that is not evidence, cannot
+// become evidence, and has to be explained to an investigator who never
+// successfully added anything. Committing both together removes that
+// state from the data model rather than teaching the UI to render it.
+//
+// A duplicate (case_id, archive_hash) still surfaces as
+// ErrDuplicateCollection, from the same unique index as before, so the
+// race two concurrent identical uploads can lose is unchanged -- except
+// that the loser now leaves no rows at all.
+func (s *Store) CreateCollectionWithSourceFiles(c model.Collection, files []model.SourceFile) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	if err := insertCollection(tx, c); err != nil {
+		return err
+	}
+	for _, f := range files {
+		if err := insertSourceFile(tx, f); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 // UpdateCollection overwrites a collection's mutable fields (status and
@@ -275,7 +349,11 @@ func (s *Store) ListCollections(caseID string) ([]model.Collection, error) {
 	}
 	defer rows.Close()
 
-	var out []model.Collection
+	// make(...,0), not `var`: these rows are served straight out to the
+	// JSON API, where a nil slice becomes `null` and the dashboard's
+	// .map/.filter/.join on it throws. An empty result must serialize
+	// as [].
+	out := make([]model.Collection, 0)
 	for rows.Next() {
 		c, err := scanCollection(rows)
 		if err != nil {
@@ -328,25 +406,24 @@ func (s *Store) SaveSourceFiles(files []model.SourceFile) error {
 	}
 	defer tx.Rollback()
 
-	stmt, err := tx.Prepare(`INSERT INTO source_files
-		(id, case_id, collection_id, original_filename, path, artifact_type, parser, supported, size_bytes, sha256, import_status, event_count, discovered_at, imported_at, deleted_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-	if err != nil {
-		return err
-	}
-	defer stmt.Close()
-
 	for _, f := range files {
-		if _, err := stmt.Exec(f.ID, f.CaseID, f.CollectionID, f.OriginalFilename, f.Path, f.ArtifactType, f.Parser,
-			boolToInt(f.Supported), f.SizeBytes, f.SHA256, f.ImportStatus, f.EventCount, fmtTime(f.DiscoveredAt),
-			fmtOptionalTime(f.ImportedAt), fmtOptionalTime(f.DeletedAt)); err != nil {
+		if err := insertSourceFile(tx, f); err != nil {
 			return err
 		}
 	}
 	return tx.Commit()
 }
 
-const sourceFileCols = `id, case_id, collection_id, original_filename, path, artifact_type, parser, supported, size_bytes, sha256, import_status, event_count, discovered_at, imported_at, deleted_at`
+func insertSourceFile(db execer, f model.SourceFile) error {
+	_, err := db.Exec(`INSERT INTO source_files (`+sourceFileCols+`)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		f.ID, f.CaseID, f.CollectionID, f.OriginalFilename, f.Path, f.ArtifactType, f.Parser,
+		boolToInt(f.Supported), f.SizeBytes, f.SHA256, f.EmbeddedHash, f.ImportStatus, f.EventCount, fmtTime(f.DiscoveredAt),
+		fmtOptionalTime(f.ImportedAt), fmtOptionalTime(f.DeletedAt))
+	return err
+}
+
+const sourceFileCols = `id, case_id, collection_id, original_filename, path, artifact_type, parser, supported, size_bytes, sha256, embedded_hash, import_status, event_count, discovered_at, imported_at, deleted_at`
 
 func boolToInt(b bool) int {
 	if b {
@@ -371,7 +448,7 @@ func scanSourceFile(row interface{ Scan(...any) error }) (model.SourceFile, erro
 	var supported int
 	var discovered, imported, deleted string
 	err := row.Scan(&f.ID, &f.CaseID, &f.CollectionID, &f.OriginalFilename, &f.Path, &f.ArtifactType, &f.Parser,
-		&supported, &f.SizeBytes, &f.SHA256, &f.ImportStatus, &f.EventCount, &discovered, &imported, &deleted)
+		&supported, &f.SizeBytes, &f.SHA256, &f.EmbeddedHash, &f.ImportStatus, &f.EventCount, &discovered, &imported, &deleted)
 	if err != nil {
 		return model.SourceFile{}, err
 	}
@@ -397,7 +474,11 @@ func (s *Store) ListSourceFiles(caseID string) ([]model.SourceFile, error) {
 	}
 	defer rows.Close()
 
-	var out []model.SourceFile
+	// make(...,0), not `var`: these rows are served straight out to the
+	// JSON API, where a nil slice becomes `null` and the dashboard's
+	// .map/.filter/.join on it throws. An empty result must serialize
+	// as [].
+	out := make([]model.SourceFile, 0)
 	for rows.Next() {
 		f, err := scanSourceFile(rows)
 		if err != nil {
@@ -417,7 +498,11 @@ func (s *Store) ListSourceFilesByCollection(collectionID string) ([]model.Source
 	}
 	defer rows.Close()
 
-	var out []model.SourceFile
+	// make(...,0), not `var`: these rows are served straight out to the
+	// JSON API, where a nil slice becomes `null` and the dashboard's
+	// .map/.filter/.join on it throws. An empty result must serialize
+	// as [].
+	out := make([]model.SourceFile, 0)
 	for rows.Next() {
 		f, err := scanSourceFile(rows)
 		if err != nil {
@@ -466,6 +551,19 @@ func (s *Store) GetSourceFiles(ids []string) ([]model.SourceFile, error) {
 // different, concurrently-imported files racing to claim the same
 // content hash within this collection) is translated to
 // ErrDuplicateSourceFile.
+// SetSourceFileSHA256 records Tracefall's own, independently-computed
+// SHA-256 for a source file. Used by the AD1 import adapter (see
+// internal/api's ImportEvidence), which -- unlike a ZIP/local-path
+// collection, where every file's SHA-256 is already known at discovery
+// time from a cheap disk read -- can't afford to decompress every AD1
+// entry just to hash it during discovery (see internal/ad1's package doc
+// comment and docs/ad1-ingestion.md), so the hash becomes available only
+// once a selected file is actually extracted and imported.
+func (s *Store) SetSourceFileSHA256(id, sha256 string) error {
+	_, err := s.db.Exec(`UPDATE source_files SET sha256 = ? WHERE id = ?`, sha256, id)
+	return err
+}
+
 func (s *Store) MarkSourceFileImported(id string, eventCount int, importedAt time.Time) (applied bool, err error) {
 	res, err := s.db.Exec(`UPDATE source_files SET import_status = ?, event_count = ?, imported_at = ?
 		WHERE id = ? AND import_status = ?`,

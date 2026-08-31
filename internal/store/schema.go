@@ -63,7 +63,7 @@ CREATE INDEX IF NOT EXISTS idx_collections_case ON collections(case_id);
 -- archive/source hash" at the database level -- the authoritative
 -- defense against two concurrent requests both passing a SELECT-based
 -- duplicate check before either has inserted (see
--- internal/api.Service.createCollectionOrDuplicateError). Partial (WHERE
+-- internal/api.Service.commitDiscovery). Partial (WHERE
 -- archive_hash != '') so: (a) legacy collections predating hash
 -- computation, which all share archive_hash = '', never collide with
 -- each other; (b) archive hashes are never required to be globally
@@ -90,6 +90,11 @@ CREATE TABLE IF NOT EXISTS source_files (
 	supported         INTEGER NOT NULL DEFAULT 0,
 	size_bytes        INTEGER NOT NULL DEFAULT 0,
 	sha256            TEXT NOT NULL DEFAULT '',
+	-- Phase 7 addition: a hash the source CONTAINER itself reported (AD1
+	-- acquisition-time MD5/SHA1), format "algo:hexdigest" -- see
+	-- internal/model.SourceFile.EmbeddedHash's doc comment. On a database
+	-- predating this column, migrate.go's addColumnIfMissing adds it.
+	embedded_hash     TEXT NOT NULL DEFAULT '',
 	import_status     TEXT NOT NULL DEFAULT 'discovered',
 	event_count       INTEGER NOT NULL DEFAULT 0,
 	discovered_at     TEXT NOT NULL,

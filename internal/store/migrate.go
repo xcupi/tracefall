@@ -87,7 +87,141 @@ func migrate(db *sql.DB) error {
 	if err := addColumnIfMissing(db, "cases", "analyzed_at", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return fmt.Errorf("migrating cases (analyzed_at): %w", err)
 	}
+	// Phase 7: AD1 ingestion. Existing source_files rows (none of them
+	// AD1-sourced, since this column didn't exist before Phase 7) default
+	// to '' -- "no embedded hash reported," which is accurate: nothing
+	// pre-Phase-7 ever had one.
+	if err := addColumnIfMissing(db, "source_files", "embedded_hash", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return fmt.Errorf("migrating source_files (embedded_hash): %w", err)
+	}
+	// Must come last: it rebuilds source_files, so everything above that
+	// reads or writes the retired columns has to have run already.
+	if err := retireLegacySourceFileColumns(db); err != nil {
+		return fmt.Errorf("retiring legacy source_files columns: %w", err)
+	}
 	return nil
+}
+
+// retireLegacySourceFileColumns rebuilds source_files without row_count
+// and ingested_at, the two Phase 1 columns the evidence file model
+// replaced (with event_count and discovered_at/imported_at).
+//
+// Every other migration in this file ADDS a column, which SQLite does
+// with a cheap ALTER TABLE. These two need REMOVING, and that is the
+// difference that made this necessary: both were declared NOT NULL with
+// no DEFAULT, and the current INSERT (see store.go's sourceFileCols)
+// does not list them, because on a database created by the current
+// schema they do not exist. On an upgraded database they very much do,
+// so every INSERT failed:
+//
+//	NOT NULL constraint failed: source_files.row_count
+//
+// which surfaced as a 500 on "Add Evidence" -- discovery could catalog
+// the evidence but never commit it, so an upgraded install could not add
+// evidence at all. backfillSourceFileEvidenceMetadata had already copied
+// the DATA out of these columns years-equivalent earlier; what it could
+// not do is retire the columns themselves, because SQLite has no DROP
+// COLUMN in the version this project targets. Rebuilding the table is
+// the supported way to do it.
+//
+// Idempotent, like the rest of this file: on a database that never had
+// the legacy columns (anything created by the current schema) this is a
+// no-op. Foreign keys are still off here -- Open turns them on only
+// after migrate returns -- which is exactly the condition SQLite's
+// table-rebuild procedure requires.
+func retireLegacySourceFileColumns(db *sql.DB) error {
+	legacy, err := hasAnyColumn(db, "source_files", "row_count", "ingested_at")
+	if err != nil {
+		return err
+	}
+	if !legacy {
+		return nil // already canonical
+	}
+
+	// The rebuilt table's definition is deliberately identical to
+	// schema.go's source_files, minus nothing and plus nothing --
+	// TestMigrate_RebuiltSourceFilesMatchesFreshSchema compares the two
+	// so this can never silently drift out of step with it.
+	const canonical = `CREATE TABLE source_files_rebuilt (
+	id                TEXT PRIMARY KEY,
+	case_id           TEXT NOT NULL REFERENCES cases(id),
+	collection_id     TEXT NOT NULL REFERENCES collections(id),
+	original_filename TEXT NOT NULL DEFAULT '',
+	path              TEXT NOT NULL,
+	artifact_type     TEXT NOT NULL DEFAULT '',
+	parser            TEXT NOT NULL DEFAULT '',
+	supported         INTEGER NOT NULL DEFAULT 0,
+	size_bytes        INTEGER NOT NULL DEFAULT 0,
+	sha256            TEXT NOT NULL DEFAULT '',
+	embedded_hash     TEXT NOT NULL DEFAULT '',
+	import_status     TEXT NOT NULL DEFAULT 'discovered',
+	event_count       INTEGER NOT NULL DEFAULT 0,
+	discovered_at     TEXT NOT NULL,
+	imported_at       TEXT NOT NULL DEFAULT '',
+	deleted_at        TEXT NOT NULL DEFAULT ''
+)`
+
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.Exec(canonical); err != nil {
+		return fmt.Errorf("creating rebuilt table: %w", err)
+	}
+	// Column-for-column copy, no transformation: the data was already
+	// migrated into these columns by backfillSourceFileEvidenceMetadata.
+	// discovered_at is NOT NULL with no default, so a row that somehow
+	// never got one becomes '' rather than failing the whole upgrade --
+	// the same "empty means unset" convention the rest of the schema
+	// uses, and the alternative would be refusing to start.
+	if _, err := tx.Exec(`INSERT INTO source_files_rebuilt (` + sourceFileCols + `)
+		SELECT id, case_id, collection_id, original_filename, path, artifact_type, parser,
+		       supported, size_bytes, sha256, embedded_hash, import_status, event_count,
+		       IFNULL(discovered_at, ''), IFNULL(imported_at, ''), IFNULL(deleted_at, '')
+		FROM source_files`); err != nil {
+		return fmt.Errorf("copying source files: %w", err)
+	}
+	if _, err := tx.Exec(`DROP TABLE source_files`); err != nil {
+		return fmt.Errorf("dropping legacy table: %w", err)
+	}
+	if _, err := tx.Exec(`ALTER TABLE source_files_rebuilt RENAME TO source_files`); err != nil {
+		return fmt.Errorf("renaming rebuilt table: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+
+	// DROP TABLE took every index on the old table with it, so all three
+	// are recreated here -- including the per-collection uniqueness index
+	// whose conflict pre-check (enforceSourceFileUniquenessPerCollection)
+	// has already run and passed against this same data.
+	for _, stmt := range []string{
+		`CREATE INDEX IF NOT EXISTS idx_source_files_case ON source_files(case_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_source_files_collection ON source_files(collection_id)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_source_files_collection_sha256_active
+			ON source_files(collection_id, sha256) WHERE import_status = 'imported' AND deleted_at = ''`,
+	} {
+		if _, err := db.Exec(stmt); err != nil {
+			return fmt.Errorf("recreating source_files index: %w", err)
+		}
+	}
+	return nil
+}
+
+// hasAnyColumn reports whether table has at least one of the named columns.
+func hasAnyColumn(db *sql.DB, table string, columns ...string) (bool, error) {
+	for _, c := range columns {
+		exists, err := columnExists(db, table, c)
+		if err != nil {
+			return false, err
+		}
+		if exists {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // migrateSourceFilesToEvidenceModel adds the columns the evidence file

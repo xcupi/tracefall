@@ -34,15 +34,18 @@ import (
 
 	"github.com/google/uuid"
 
+	"tracefall/internal/ad1"
 	"tracefall/internal/archive"
 	"tracefall/internal/attck"
 	"tracefall/internal/casefiles"
 	"tracefall/internal/correlate"
 	"tracefall/internal/detect"
+	"tracefall/internal/evtx"
 	"tracefall/internal/ingest"
 	"tracefall/internal/investigate"
 	"tracefall/internal/model"
 	"tracefall/internal/parsers"
+	"tracefall/internal/regf"
 	"tracefall/internal/store"
 )
 
@@ -70,6 +73,37 @@ var (
 	// errors.As to get the structured detail. See docs/data-model.md's
 	// "Deduplication" section for how this differs from event-level dedup.
 	ErrDuplicateEvidence = errors.New("evidence already exists in this case")
+	// ErrUnsupportedEvidence means the uploaded/local-path input was
+	// recognized as a format Tracefall knows about (currently: AD1) but
+	// can't actually be processed -- encrypted, an unsupported version,
+	// corrupt/structurally invalid, or (upload only) segmented with only
+	// one segment provided. Always wraps a more specific underlying
+	// error (see internal/ad1's sentinels) via %w; never used for "this
+	// isn't a recognized format at all" (that case falls through to the
+	// existing ZIP path's own ErrInvalidArchive instead -- see
+	// DiscoverEvidenceFromUpload).
+	ErrUnsupportedEvidence = errors.New("evidence package format is not supported")
+	// ErrEvidencePathNotFound means the local filesystem path an
+	// investigator typed into Add Evidence doesn't exist, or the server
+	// can't read it. Distinct from ErrUnsupportedEvidence (the path
+	// exists but Tracefall can't process what's in it) because the
+	// remedy is different: check the path, not the evidence.
+	ErrEvidencePathNotFound = errors.New("evidence path does not exist or is not readable")
+	// ErrNoEvidenceFound means the evidence source was read successfully
+	// but contained no files at all -- an empty directory, an empty
+	// archive, an AD1 with no entries. There is nothing to catalog, so
+	// no collection is created; a collection with zero files is not a
+	// useful thing for an investigator to be left holding.
+	ErrNoEvidenceFound = errors.New("no evidence files were found in this location")
+	// ErrInvalidAD1 means the input WAS recognized as an AD1 forensic
+	// image (by magic bytes, see ad1.Sniff) but cannot be read --
+	// corrupt, truncated, structurally invalid, encrypted, or an
+	// unsupported version. Separate from ErrUnsupportedEvidence, which
+	// means "this isn't a format Tracefall reads at all": an analyst
+	// handed a broken AD1 needs to know their IMAGE is the problem, not
+	// that they picked the wrong kind of file. Always wraps internal/ad1's
+	// own sentinel, which names the specific defect.
+	ErrInvalidAD1 = errors.New("the AD1 forensic image is invalid or cannot be read")
 )
 
 // DuplicateEvidenceError reports that a collection with the same
@@ -109,10 +143,18 @@ type Service struct {
 	// size, compression ratio) -- see internal/archive. Defaults to
 	// archive.DefaultLimits; overridable for tests.
 	extractLimits archive.Limits
+	// ad1Limits bounds AD1 cataloging/extraction (entries visited, name/
+	// metadata/path lengths, per-file decompressed size) -- see
+	// internal/ad1. Defaults to ad1.DefaultLimits; overridable for tests.
+	ad1Limits ad1.Limits
+	// jobs tracks running background imports. In-memory only and never
+	// consulted by the synchronous import path -- see importjob.go for
+	// why job state must not live in the database.
+	jobs *importJobs
 }
 
 func NewService(s *store.Store, files *casefiles.Store) *Service {
-	return &Service{store: s, files: files, extractLimits: archive.DefaultLimits}
+	return &Service{store: s, files: files, extractLimits: archive.DefaultLimits, ad1Limits: ad1.DefaultLimits, jobs: newImportJobs()}
 }
 
 // ---------- Cases ----------
@@ -125,7 +167,7 @@ func NewService(s *store.Store, files *casefiles.Store) *Service {
 // compares names at the database level.
 //
 // Duplicate detection is two-layered, the same pattern as
-// checkDuplicateEvidence/createCollectionOrDuplicateError below: a
+// checkDuplicateEvidence/commitDiscovery below: a
 // SELECT-based pre-check here avoids the common case ever reaching the
 // database with a doomed INSERT, and the (case_id-less, case-wide)
 // idx_cases_name_unique index is the race-safe backstop for two
@@ -324,11 +366,12 @@ type ParserCoverage struct {
 // "Unknown" for these rather than Tracefall guessing.
 type CollectionDetail struct {
 	model.Collection
-	SourceFiles    []model.SourceFile `json:"source_files"`
-	HostsObserved  []string           `json:"hosts_observed"`
-	EarliestEvent  *time.Time         `json:"earliest_event,omitempty"`
-	LatestEvent    *time.Time         `json:"latest_event,omitempty"`
-	ParserCoverage []ParserCoverage   `json:"parser_coverage"`
+	SourceFiles    []TriagedSourceFile `json:"source_files"`
+	Coverage       Coverage            `json:"coverage"`
+	HostsObserved  []string            `json:"hosts_observed"`
+	EarliestEvent  *time.Time          `json:"earliest_event,omitempty"`
+	LatestEvent    *time.Time          `json:"latest_event,omitempty"`
+	ParserCoverage []ParserCoverage    `json:"parser_coverage"`
 }
 
 func (s *Service) CollectionDetail(caseID, collectionID string) (CollectionDetail, error) {
@@ -389,9 +432,11 @@ func (s *Service) CollectionDetail(caseID, collectionID string) (CollectionDetai
 		parserCoverage = append(parserCoverage, *coverage[k])
 	}
 
+	triaged := triageAll(sources)
 	return CollectionDetail{
 		Collection:     c,
-		SourceFiles:    sources,
+		SourceFiles:    triaged,
+		Coverage:       computeCoverage(triaged),
 		HostsObserved:  hosts,
 		EarliestEvent:  earliest,
 		LatestEvent:    latest,
@@ -416,12 +461,21 @@ func (s *Service) CollectionDetail(caseID, collectionID string) (CollectionDetai
 // the collection now exists and every file in it has been cataloged, but
 // none of it has been parsed yet. See ImportEvidence.
 type DiscoverResult struct {
-	Collection       model.Collection   `json:"collection"`
-	SourceFiles      []model.SourceFile `json:"source_files"` // every file discovered, whatever its status
-	DiscoveredCount  int                `json:"discovered_count"`
-	SupportedCount   int                `json:"supported_count"`
-	UnsupportedCount int                `json:"unsupported_count"`
-	DuplicateCount   int                `json:"duplicate_count"` // supported, but identical (by SHA-256) to another file discovered in this same batch
+	Collection model.Collection `json:"collection"`
+	// SourceFiles is every file discovered, whatever its status, each
+	// carrying its triage classification (artifact class, forensic
+	// priority, and -- when unsupported -- why). The classification is
+	// computed at read time from the capability registry, never stored;
+	// see triage.go.
+	SourceFiles      []TriagedSourceFile `json:"source_files"`
+	DiscoveredCount  int                 `json:"discovered_count"`
+	SupportedCount   int                 `json:"supported_count"`
+	UnsupportedCount int                 `json:"unsupported_count"`
+	DuplicateCount   int                 `json:"duplicate_count"` // supported, but identical (by SHA-256) to another file discovered in this same batch
+	// Coverage summarizes the whole catalog -- what it holds, what
+	// Tracefall can parse, and what it will ignore. This is what makes a
+	// 7,000-file image comprehensible at a glance.
+	Coverage Coverage `json:"coverage"`
 	// Upload-only archive-level facts the UI shows as upload/extraction
 	// progress; zero for a local-path discovery.
 	UploadSizeBytes int64 `json:"upload_size_bytes,omitempty"`
@@ -443,26 +497,52 @@ func (s *Service) DiscoverEvidenceFromPath(caseID, path string) (DiscoverResult,
 		return DiscoverResult{}, err
 	}
 
+	// path may point at a single AD1 file instead of a KAPE-style
+	// directory -- sniffed (magic bytes, not the .ad1 extension alone;
+	// see ad1.Sniff) only when it's a regular file, so this never changes
+	// behavior for the existing directory-ingest case below.
+	if info, statErr := os.Stat(path); statErr == nil && !info.IsDir() {
+		if isAD1, isEncrypted, sniffErr := sniffStagedFile(path); sniffErr == nil && isAD1 {
+			if isEncrypted {
+				return DiscoverResult{}, fmt.Errorf("%w: %v", ErrInvalidAD1, ad1.ErrEncrypted)
+			}
+			return s.discoverAD1FromPath(caseID, path)
+		}
+	}
+
+	// Check the path before fingerprinting it, so the common mistake --
+	// a typo, or a path relative to the investigator's shell rather than
+	// the server's working directory -- produces "evidence path does not
+	// exist" rather than a walk error dressed up as an internal failure.
+	if info, statErr := os.Stat(path); statErr != nil {
+		return DiscoverResult{}, fmt.Errorf("%w: %s", ErrEvidencePathNotFound, path)
+	} else if !info.IsDir() {
+		// A regular file that reached here already failed the AD1 sniff
+		// above, so it is a format Tracefall has no reader for.
+		return DiscoverResult{}, fmt.Errorf("%w: %s is a file, not an evidence directory", ErrUnsupportedEvidence, path)
+	}
+
 	hash, err := hashDirectory(path)
 	if err != nil {
+		if classified := classifyPathError(err, path); classified != nil {
+			return DiscoverResult{}, classified
+		}
 		return DiscoverResult{}, fmt.Errorf("fingerprinting evidence directory: %w", err)
 	}
 	if err := s.checkDuplicateEvidence(caseID, hash); err != nil {
 		return DiscoverResult{}, err
 	}
 
+	// The collection is described here but not created here:
+	// catalogEvidenceDirectory commits it together with its catalog, or
+	// not at all (see commitDiscovery).
 	collection := model.Collection{
 		ID: uuid.NewString(), CaseID: caseID, CreatedAt: time.Now().UTC(),
 		SourceType: model.SourceTypeLocalPath, OriginalFilename: path, EvidenceDirectory: path,
 		ArchiveHash: hash, IngestionStatus: model.CollectionStatusPending,
 	}
-	if err := s.createCollectionOrDuplicateError(collection); err != nil {
-		return DiscoverResult{}, err
-	}
-
-	res, err := s.catalogEvidenceDirectory(caseID, collection.ID, path)
+	res, err := s.catalogEvidenceDirectory(caseID, collection, path)
 	if err != nil {
-		_ = s.store.UpdateCollection(model.Collection{ID: collection.ID, IngestionStatus: model.CollectionStatusFailed})
 		return DiscoverResult{}, err
 	}
 	s.audit(caseID, model.AuditEvidenceDiscovered, model.TargetCollection, collection.ID,
@@ -471,24 +551,30 @@ func (s *Service) DiscoverEvidenceFromPath(caseID, path string) (DiscoverResult,
 }
 
 // DiscoverEvidenceFromUpload accepts an uploaded KAPE package as a ZIP
-// archive read from zipData, and catalogs it into caseID as a new
+// archive (or, detected by content -- see ad1.Sniff -- an AD1 forensic
+// image) read from zipData, and catalogs it into caseID as a new
 // evidence collection:
 //
 //	stage + hash the upload (before anything else exists)
 //	-> reject as a duplicate if this case already has a collection with the same hash
 //	-> save the original archive (preserved, untouched, for provenance)
-//	-> validate + safely extract it (internal/archive)
+//	-> validate + safely extract it (internal/archive) [ZIP] / catalog it without extracting (internal/ad1) [AD1]
 //	-> discover and classify every extracted file (internal/ingest.Discover) -- not parsed yet
 //	-> store the catalog
 //
-// The archive is treated as untrusted input throughout: see
-// internal/archive's doc comment for the specific protections applied
-// during extraction. Any failure at any step removes everything written
-// to disk for this collection specifically (never touching any other
-// collection already in the case) and marks it failed, so the case
+// filename is the investigator's own name for the uploaded file (e.g.
+// "DiskDrigger.ad1") -- display-only, used for an AD1 collection's
+// OriginalFilename (see discoverAD1Upload); the ZIP path doesn't
+// currently surface it anywhere, matching its pre-existing behavior.
+//
+// The upload is treated as untrusted input throughout: see
+// internal/archive's and internal/ad1's doc comments for the specific
+// protections applied. Any failure at any step removes everything
+// written to disk for this collection specifically (never touching any
+// other collection already in the case) and marks it failed, so the case
 // itself is never left corrupted and the caller can simply try adding
 // evidence again. Nothing is parsed here -- see ImportEvidence.
-func (s *Service) DiscoverEvidenceFromUpload(caseID string, zipData io.Reader) (DiscoverResult, error) {
+func (s *Service) DiscoverEvidenceFromUpload(caseID string, zipData io.Reader, filename string) (DiscoverResult, error) {
 	if _, err := s.GetCase(caseID); err != nil {
 		return DiscoverResult{}, err
 	}
@@ -511,6 +597,20 @@ func (s *Service) DiscoverEvidenceFromUpload(caseID string, zipData io.Reader) (
 		return DiscoverResult{}, err
 	}
 
+	// Format detection happens on the already-staged file (magic bytes
+	// only -- see ad1.Sniff), not the original io.Reader, so it costs
+	// nothing extra and never consumes zipData twice. An AD1 upload is
+	// handed off entirely to discoverAD1Upload, which owns staging's
+	// cleanup from here (see its own stagingClaimed handling) -- see
+	// docs/ad1-ingestion.md for why AD1 needs a different commit step
+	// (no upfront extraction) than the ZIP path below.
+	if isAD1, isEncrypted, sniffErr := sniffStagedFile(stagingPath); sniffErr == nil && isAD1 {
+		if isEncrypted {
+			return DiscoverResult{}, fmt.Errorf("%w: %v", ErrInvalidAD1, ad1.ErrEncrypted)
+		}
+		return s.discoverAD1Upload(caseID, stagingPath, &stagingClaimed, uploadSize, archiveHash, filename)
+	}
+
 	collectionID := uuid.NewString()
 	evidenceDir := s.files.EvidenceDir(caseID, collectionID)
 	collection := model.Collection{
@@ -518,12 +618,14 @@ func (s *Service) DiscoverEvidenceFromUpload(caseID string, zipData io.Reader) (
 		SourceType: model.SourceTypeUpload, ArchiveHash: archiveHash, EvidenceDirectory: evidenceDir,
 		IngestionStatus: model.CollectionStatusPending,
 	}
-	if err := s.createCollectionOrDuplicateError(collection); err != nil {
-		return DiscoverResult{}, err
-	}
 
+	// The collection's directory has to exist before the archive can be
+	// extracted into it, but the collection ROW does not: it is committed
+	// only once the catalog is complete (see catalogEvidenceDirectory).
+	// A failure anywhere below therefore removes the directory and leaves
+	// the database exactly as it was -- no failed collection, no orphan
+	// source files.
 	if err := s.files.EnsureCollectionDir(caseID, collectionID); err != nil {
-		_ = s.store.UpdateCollection(model.Collection{ID: collectionID, IngestionStatus: model.CollectionStatusFailed})
 		return DiscoverResult{}, fmt.Errorf("preparing collection storage: %w", err)
 	}
 
@@ -531,7 +633,6 @@ func (s *Service) DiscoverEvidenceFromUpload(caseID string, zipData io.Reader) (
 	defer func() {
 		if !succeeded {
 			_ = s.files.RemoveCollectionDir(caseID, collectionID)
-			_ = s.store.UpdateCollection(model.Collection{ID: collectionID, IngestionStatus: model.CollectionStatusFailed})
 		}
 	}()
 
@@ -546,7 +647,7 @@ func (s *Service) DiscoverEvidenceFromUpload(caseID string, zipData io.Reader) (
 		return DiscoverResult{}, err
 	}
 
-	res, err := s.catalogEvidenceDirectory(caseID, collectionID, evidenceDir)
+	res, err := s.catalogEvidenceDirectory(caseID, collection, evidenceDir)
 	if err != nil {
 		return DiscoverResult{}, err
 	}
@@ -570,10 +671,25 @@ func (s *Service) DiscoverEvidenceFromUpload(caseID string, zipData io.Reader) (
 // has produced no events, so there is nothing yet that would make prior
 // analysis stale. Shared by DiscoverEvidenceFromPath and
 // DiscoverEvidenceFromUpload.
-func (s *Service) catalogEvidenceDirectory(caseID, collectionID, dir string) (DiscoverResult, error) {
+func (s *Service) catalogEvidenceDirectory(caseID string, collection model.Collection, dir string) (DiscoverResult, error) {
+	collectionID := collection.ID
 	discovered, err := ingest.Discover(dir, ingest.Registry())
 	if err != nil {
+		// A path that vanished (or was never readable) between the
+		// duplicate check and here is the investigator's problem to fix,
+		// not an internal failure -- classify it so the handler can say
+		// so with a 4xx instead of "internal error".
+		// Only the base name is echoed: for an upload, dir is a
+		// server-internal extraction directory, and this message reaches
+		// the browser. The wrapped error still carries the full path to
+		// the server log.
+		if classified := classifyPathError(err, filepath.Base(dir)); classified != nil {
+			return DiscoverResult{}, classified
+		}
 		return DiscoverResult{}, fmt.Errorf("discovering evidence: %w", err)
+	}
+	if len(discovered) == 0 {
+		return DiscoverResult{}, ErrNoEvidenceFound
 	}
 
 	now := time.Now().UTC()
@@ -609,26 +725,48 @@ func (s *Service) catalogEvidenceDirectory(caseID, collectionID, dir string) (Di
 		sourceFiles = append(sourceFiles, sf)
 	}
 
-	if err := s.store.SaveSourceFiles(sourceFiles); err != nil {
-		return DiscoverResult{}, fmt.Errorf("saving discovered files: %w", err)
-	}
-
-	collection := model.Collection{
-		ID: collectionID, IngestionStatus: model.CollectionStatusPending,
-		FileCount: len(sourceFiles), SupportedFileCount: supported, UnsupportedFileCount: unsupported,
-	}
-	if err := s.store.UpdateCollection(collection); err != nil {
-		return DiscoverResult{}, fmt.Errorf("updating collection: %w", err)
-	}
-	full, err := s.store.GetCollection(collectionID)
+	// Nothing has been written yet: every failure above returned before
+	// touching the database, so an unreadable/empty/unusable evidence
+	// source leaves no collection and no orphan source_file rows behind.
+	// Only now, with a complete catalog in hand, is any of it committed.
+	collection.IngestionStatus = model.CollectionStatusPending
+	collection.FileCount = len(sourceFiles)
+	collection.SupportedFileCount = supported
+	collection.UnsupportedFileCount = unsupported
+	full, err := s.commitDiscovery(collection, sourceFiles)
 	if err != nil {
-		return DiscoverResult{}, fmt.Errorf("reloading collection: %w", err)
+		return DiscoverResult{}, err
 	}
 
+	triaged := triageAll(sourceFiles)
 	return DiscoverResult{
-		Collection: full, SourceFiles: sourceFiles,
+		Collection: full, SourceFiles: triaged, Coverage: computeCoverage(triaged),
 		DiscoveredCount: len(sourceFiles), SupportedCount: supported, UnsupportedCount: unsupported, DuplicateCount: duplicate,
 	}, nil
+}
+
+// commitDiscovery atomically creates a fully-cataloged collection and
+// reloads it as the database now holds it. A (case_id, archive_hash)
+// collision here -- two identical uploads racing past checkDuplicateEvidence
+// -- becomes a *DuplicateEvidenceError naming the collection that won,
+// exactly as it did when the collection was inserted up front, except
+// that the loser no longer leaves a half-built collection behind.
+func (s *Service) commitDiscovery(collection model.Collection, sourceFiles []model.SourceFile) (model.Collection, error) {
+	err := s.store.CreateCollectionWithSourceFiles(collection, sourceFiles)
+	if errors.Is(err, store.ErrDuplicateCollection) {
+		if existing, found, ferr := s.store.FindCollectionByHash(collection.CaseID, collection.ArchiveHash); ferr == nil && found {
+			return model.Collection{}, s.duplicateEvidenceError(collection.CaseID, existing)
+		}
+		return model.Collection{}, ErrDuplicateEvidence
+	}
+	if err != nil {
+		return model.Collection{}, fmt.Errorf("saving discovered evidence: %w", err)
+	}
+	full, err := s.store.GetCollection(collection.ID)
+	if err != nil {
+		return model.Collection{}, fmt.Errorf("reloading collection: %w", err)
+	}
+	return full, nil
 }
 
 // ---------- Importing selected evidence ----------
@@ -651,7 +789,57 @@ type ImportResult struct {
 	NewEventCount       int          `json:"new_event_count"`
 	DuplicateEventCount int          `json:"duplicate_event_count"`
 	Skipped             []ImportSkip `json:"skipped,omitempty"`
-	Errors              []string     `json:"errors,omitempty"`
+	// Errors is the pre-existing one-line-per-failure list, retained so
+	// existing consumers keep working. ParseFailures carries the same
+	// failures structured, which is what the dashboard renders.
+	Errors []string `json:"errors,omitempty"`
+	// ParseFailures describes each file that was SELECTED and SUPPORTED
+	// but could not be parsed. This is deliberately distinct from
+	// Skipped (files that were never eligible: unsupported, duplicate,
+	// already imported) -- conflating "Tracefall has no parser for this"
+	// with "this file is broken" would misrepresent the evidence.
+	ParseFailures []ParseFailure `json:"parse_failures,omitempty"`
+}
+
+// Parse failure categories. Coarse on purpose: an investigator needs to
+// know whether to re-collect the evidence, ignore it, or report a bug --
+// not which function returned the error.
+const (
+	ParseFailureCorrupt     = "corrupt_or_truncated" // the evidence itself is damaged
+	ParseFailureUnreadable  = "unreadable"           // could not be read from storage
+	ParseFailureLimit       = "limit_exceeded"       // hit a safety ceiling
+	ParseFailureUnsupported = "unsupported_format"   // recognized container, unusable contents
+	ParseFailureInternal    = "internal_error"       // anything else
+)
+
+// Parse stages, matching where in the import a failure actually happened.
+const (
+	ParseStageExtract = "extract" // materializing an AD1 entry before parsing
+	ParseStageParse   = "parse"   // the artifact parser itself
+)
+
+// ParseFailure describes one file that could not be parsed, in terms
+// safe to show a user: no stack traces, no absolute server paths, no
+// internal identifiers beyond the ones the client already holds.
+type ParseFailure struct {
+	SourceFileID string `json:"source_file_id"`
+	// Path is relative to the evidence root, exactly as the catalog
+	// shows it -- never an absolute path on the server.
+	Path         string `json:"path"`
+	Filename     string `json:"filename"`
+	ArtifactType string `json:"artifact_type,omitempty"`
+	Parser       string `json:"parser,omitempty"`
+	Stage        string `json:"stage"`
+	Category     string `json:"category"`
+	// Message is a sanitized, human-readable explanation.
+	Message string `json:"message"`
+	// PartialEvents records whether any events from this file were
+	// persisted before it failed. Parsing completes fully or not at all
+	// before anything is written (see the three-phase import), so this is
+	// always false today -- it is reported explicitly rather than left to
+	// be assumed, because "did this file half-land in my evidence?" is a
+	// question an investigator must never have to guess at.
+	PartialEvents bool `json:"partial_events"`
 }
 
 // ImportEvidence parses exactly the requested source files (each must
@@ -666,6 +854,14 @@ type ImportResult struct {
 // failing the whole request -- a partial selection succeeding partially
 // is more useful than an all-or-nothing rejection.
 func (s *Service) ImportEvidence(caseID, collectionID string, sourceFileIDs []string) (ImportResult, error) {
+	// nil sink: identical behavior to before progress reporting existed.
+	// There is one implementation of importing, called two ways -- see
+	// importjob.go for the background variant.
+	return s.importEvidence(caseID, collectionID, sourceFileIDs, nil)
+}
+
+func (s *Service) importEvidence(caseID, collectionID string, sourceFileIDs []string, prog *progressSink) (ImportResult, error) {
+	prog.phase(PhasePreparing)
 	if _, err := s.GetCase(caseID); err != nil {
 		return ImportResult{}, err
 	}
@@ -675,46 +871,108 @@ func (s *Service) ImportEvidence(caseID, collectionID string, sourceFileIDs []st
 	}
 
 	registry := ingest.Registry()
-	var imported []model.SourceFile
+	// make(...,0,...), never `var imported []model.SourceFile`: no
+	// `omitempty` on ImportResult.Imported, and internal/web/static/app.js's
+	// renderImportResults reads res.imported.length unconditionally -- if
+	// every requested file were skipped or failed (0 actually imported),
+	// a nil slice here would serialize as JSON `null` and crash that
+	// render, the same bug class as the two fixed just above in
+	// Investigation(). skipped/errs don't need this: their JSON fields
+	// do have `omitempty`, and the frontend already checks them for
+	// truthiness before reading .length.
+	imported := make([]model.SourceFile, 0, len(sourceFileIDs))
 	var skipped []ImportSkip
 	var errs []string
+	var failures []ParseFailure
 	var totalNew, totalDup int
 
+	// Phase 1: parse every selected file, persisting nothing yet. Host
+	// resolution (phase 2) needs the whole batch in hand before any event
+	// is written -- see enrichBatchHosts -- because Host feeds
+	// ComputeDedupHash, so an event saved with an unresolved host would
+	// be saved under the wrong dedup identity. Per-file skips and parse
+	// failures are recorded exactly as before and don't abort the batch.
+	pending := make([]pendingImport, 0, len(sourceFileIDs))
+	prog.phase(PhaseParsing)
+	prog.setTotal(len(sourceFileIDs))
 	for _, id := range sourceFileIDs {
 		sf, err := s.store.GetSourceFile(id)
 		if err != nil || sf.CaseID != caseID || sf.CollectionID != collectionID {
 			skipped = append(skipped, ImportSkip{SourceFileID: id, Reason: "not found in this collection"})
+			prog.fileParsed(0, true)
 			continue
 		}
 		if sf.DeletedAt != nil {
 			skipped = append(skipped, ImportSkip{SourceFileID: id, Reason: "deleted"})
+			prog.fileParsed(0, true)
 			continue
 		}
 		if sf.ImportStatus != model.SourceFileDiscovered {
 			skipped = append(skipped, ImportSkip{SourceFileID: id, Reason: "already " + sf.ImportStatus})
+			prog.fileParsed(0, true)
 			continue
 		}
+
+		prog.startFile(sf.Path)
 
 		p := findParserFor(registry, sf.Parser)
 		if p == nil {
 			_ = s.store.MarkSourceFileFailed(id)
 			skipped = append(skipped, ImportSkip{SourceFileID: id, Reason: "no parser available"})
+			prog.fileParsed(0, true)
 			continue
+		}
+
+		if collection.SourceType == model.SourceTypeAD1 {
+			// AD1 entries aren't extracted during discovery (see
+			// catalogAD1) -- materialize exactly this one selected
+			// entry's bytes under EvidenceDirectory now, immediately
+			// before ParseFile reads them below exactly as it does for
+			// every other collection type. This also computes and
+			// records Tracefall's own SHA-256 for the file, which isn't
+			// known until this point (see extractAD1Entry's doc comment).
+			if err := s.extractAD1Entry(caseID, collectionID, sf); err != nil {
+				_ = s.store.MarkSourceFileFailed(id)
+				errs = append(errs, fmt.Sprintf("%s: %v", sf.Path, err))
+				failures = append(failures, parseFailure(sf, ParseStageExtract, err))
+				prog.fileParsed(0, true)
+				continue
+			}
 		}
 
 		parsed, err := ingest.ParseFile(caseID, collectionID, id, collection.EvidenceDirectory, sf.Path, p)
 		if err != nil {
 			_ = s.store.MarkSourceFileFailed(id)
 			errs = append(errs, fmt.Sprintf("%s: %v", sf.Path, err))
+			failures = append(failures, parseFailure(sf, ParseStageParse, err))
+			prog.fileParsed(0, true)
 			continue
 		}
-		if err := s.enrichMissingHosts(caseID, parsed.Events); err != nil {
-			return ImportResult{}, fmt.Errorf("enriching event hosts: %w", err)
-		}
-		if err := s.store.SaveRawEvidence(parsed.Raw); err != nil {
+		pending = append(pending, pendingImport{sourceFile: sf, events: parsed.Events, raw: parsed.Raw})
+		prog.fileParsed(len(parsed.Events), false)
+	}
+
+	// Phase 2: resolve every blank host against the complete batch plus
+	// the case's existing evidence, once, before anything is written.
+	prog.phase(PhaseEnriching)
+	if err := s.enrichBatchHosts(caseID, collectionID, pending); err != nil {
+		return ImportResult{}, fmt.Errorf("enriching event hosts: %w", err)
+	}
+
+	// Phase 3: persist. Still strictly one file at a time, in the order
+	// requested, so deduplicate() keeps seeing each file's events against
+	// everything already saved -- including earlier files from this same
+	// batch -- exactly as it always has.
+	prog.phase(PhasePersisting)
+	for _, pf := range pending {
+		sf := pf.sourceFile
+		id := sf.ID
+		prog.startFile(sf.Path)
+
+		if err := s.store.SaveRawEvidence(pf.raw); err != nil {
 			return ImportResult{}, fmt.Errorf("saving raw evidence: %w", err)
 		}
-		newEvents, observations, err := s.deduplicate(caseID, collectionID, parsed.Events, parsed.Raw)
+		newEvents, observations, err := s.deduplicate(caseID, collectionID, pf.events, pf.raw)
 		if err != nil {
 			return ImportResult{}, fmt.Errorf("deduplicating events: %w", err)
 		}
@@ -725,7 +983,27 @@ func (s *Service) ImportEvidence(caseID, collectionID string, sourceFileIDs []st
 			return ImportResult{}, fmt.Errorf("saving event observations: %w", err)
 		}
 
-		applied, err := s.store.MarkSourceFileImported(id, len(parsed.Events), time.Now().UTC())
+		applied, err := s.store.MarkSourceFileImported(id, len(pf.events), time.Now().UTC())
+		if errors.Is(err, store.ErrDuplicateSourceFile) {
+			// This file's content is byte-identical to another file
+			// already imported into this same collection -- the events
+			// saved above are harmlessly redundant (deduplicate already
+			// collapsed them against whatever the earlier file
+			// contributed), so this is a normal per-file outcome, not a
+			// failure: skip just this one and continue with the rest of
+			// the batch. ZIP/local-path collections normally never reach
+			// here at all (their discovery-time SHA-256 already flags
+			// same-content files as SourceFileDuplicate before either is
+			// selectable -- see catalogEvidenceDirectory); an AD1
+			// collection can, since its own discovery-time dedup only
+			// catches this when AD1 itself recorded a hash (see
+			// catalogAD1's doc comment) -- so this path exists
+			// specifically to keep that weaker guarantee from turning
+			// into a request-aborting error instead of a per-file skip.
+			skipped = append(skipped, ImportSkip{SourceFileID: id, Reason: "duplicate content already imported in this collection"})
+			prog.filePersisted(0, len(pf.events))
+			continue
+		}
 		if err != nil {
 			return ImportResult{}, fmt.Errorf("marking file imported: %w", err)
 		}
@@ -735,6 +1013,7 @@ func (s *Service) ImportEvidence(caseID, collectionID string, sourceFileIDs []st
 			// (deduplicate already collapses them against whatever the
 			// winner just saved) and this file is already evidence.
 			skipped = append(skipped, ImportSkip{SourceFileID: id, Reason: "already imported"})
+			prog.filePersisted(0, len(pf.events))
 			continue
 		}
 
@@ -744,9 +1023,11 @@ func (s *Service) ImportEvidence(caseID, collectionID string, sourceFileIDs []st
 		}
 		imported = append(imported, refreshed)
 		totalNew += len(newEvents)
-		totalDup += len(parsed.Events) - len(newEvents)
+		totalDup += len(pf.events) - len(newEvents)
+		prog.filePersisted(len(newEvents), len(pf.events)-len(newEvents))
 	}
 
+	prog.phase(PhaseFinalizing)
 	if len(imported) > 0 {
 		if err := s.recomputeCollectionCounts(collectionID); err != nil {
 			return ImportResult{}, fmt.Errorf("recomputing collection counts: %w", err)
@@ -772,7 +1053,7 @@ func (s *Service) ImportEvidence(caseID, collectionID string, sourceFileIDs []st
 	return ImportResult{
 		Collection: full, Imported: imported,
 		EventCount: totalNew + totalDup, NewEventCount: totalNew, DuplicateEventCount: totalDup,
-		Skipped: skipped, Errors: errs,
+		Skipped: skipped, Errors: errs, ParseFailures: failures,
 	}, nil
 }
 
@@ -881,61 +1162,9 @@ func (s *Service) deduplicate(caseID, collectionID string, events []model.Event,
 	return newEvents, observations, nil
 }
 
-// enrichMissingHosts fills in Host, in place, for any event in events
-// that's still blank after internal/ingest.Walk's own per-collection
-// backfill. That per-collection backfill (see ingest.backfillHost) only
-// has that one collection's own events to learn a dominant host from --
-// which fails completely for a collection whose artifact types never
-// carry a hostname natively at all (e.g. a follow-up collection
-// containing only a registry export and Task Scheduler XML, neither of
-// which records a computer name). Left blank, those events would match
-// each other by their shared emptiness in host-scoped correlation
-// (internal/correlate) instead of by real evidence, and would fail to
-// match events from an *earlier* collection that does carry a real host
-// -- exactly the case this phase adds: a case's evidence increasingly
-// arrives across more than one collection over time. This borrows the
-// dominant host already established elsewhere in the case as a
-// second-pass fallback; if the case has no host information at all yet
-// either, it's a no-op, same as ingest.backfillHost's own behavior.
-func (s *Service) enrichMissingHosts(caseID string, events []model.Event) error {
-	hasBlank := false
-	for _, e := range events {
-		if e.Host == "" {
-			hasBlank = true
-			break
-		}
-	}
-	if !hasBlank {
-		return nil
-	}
-
-	existing, err := s.store.ListEvents(caseID)
-	if err != nil {
-		return err
-	}
-	counts := map[string]int{}
-	for _, e := range existing {
-		if e.Host != "" {
-			counts[e.Host]++
-		}
-	}
-	if len(counts) == 0 {
-		return nil
-	}
-	var dominant string
-	best := -1
-	for host, n := range counts {
-		if n > best || (n == best && host < dominant) {
-			dominant, best = host, n
-		}
-	}
-	for i := range events {
-		if events[i].Host == "" {
-			events[i].Host = dominant
-		}
-	}
-	return nil
-}
+// Host enrichment lives in hostenrich.go (Service.enrichBatchHosts),
+// called once per import batch from ImportEvidence's phase 2 -- see that
+// file for why it can't be done per file.
 
 // ---------- Duplicate evidence detection ----------
 //
@@ -953,7 +1182,30 @@ func (s *Service) enrichMissingHosts(caseID string, events []model.Event) error 
 // any local-path directory is walked by internal/ingest, so a duplicate
 // is rejected without doing any of that work. It is not by itself
 // sufficient against a concurrent duplicate request -- see
-// createCollectionOrDuplicateError for the race-safe backstop.
+// commitDiscovery for the race-safe backstop.
+// classifyPathError turns a filesystem failure into ErrEvidencePathNotFound
+// when the cause is a missing or unreadable path, or returns nil when the
+// error is something else and the caller should treat it as internal.
+//
+// It deliberately uses errors.Is against the fs sentinels rather than
+// type-asserting *fs.PathError: the error arrives wrapped -- os.Open's
+// *fs.PathError, wrapped again by filepath.WalkDir, wrapped again by
+// ingest.Discover -- and errors.Is unwraps all of it to reach the
+// underlying syscall errno. Matching on the concrete type, or on a
+// string, would miss exactly the cases this exists to catch.
+//
+// "does not exist" and "is not readable" share one message on purpose:
+// an investigator can act on both the same way (check the path, check
+// permissions), and distinguishing them would leak whether a path the
+// server can see exists -- see Phase 4's note on not exposing server
+// filesystem details.
+func classifyPathError(err error, subject string) error {
+	if errors.Is(err, fs.ErrNotExist) || errors.Is(err, fs.ErrPermission) {
+		return fmt.Errorf("%w: %s", ErrEvidencePathNotFound, subject)
+	}
+	return nil
+}
+
 func (s *Service) checkDuplicateEvidence(caseID, hash string) error {
 	if hash == "" {
 		return nil
@@ -966,30 +1218,6 @@ func (s *Service) checkDuplicateEvidence(caseID, hash string) error {
 		return nil
 	}
 	return s.duplicateEvidenceError(caseID, existing)
-}
-
-// createCollectionOrDuplicateError inserts collection, translating a
-// database-level (case_id, archive_hash) uniqueness violation --
-// store.ErrDuplicateCollection, from schema.go's
-// idx_collections_case_archive_hash -- into a *DuplicateEvidenceError
-// identifying whichever collection won the race. This is what makes
-// duplicate detection safe against two concurrent requests both passing
-// checkDuplicateEvidence's SELECT before either has inserted: only one
-// INSERT can succeed, and the loser gets a clean duplicate error here
-// instead of a raw constraint-violation error or, worse, a second
-// collection.
-func (s *Service) createCollectionOrDuplicateError(collection model.Collection) error {
-	err := s.store.SaveCollection(collection)
-	if err == nil {
-		return nil
-	}
-	if errors.Is(err, store.ErrDuplicateCollection) {
-		if existing, found, ferr := s.store.FindCollectionByHash(collection.CaseID, collection.ArchiveHash); ferr == nil && found {
-			return s.duplicateEvidenceError(collection.CaseID, existing)
-		}
-		return ErrDuplicateEvidence
-	}
-	return fmt.Errorf("creating collection: %w", err)
 }
 
 // duplicateEvidenceError builds a *DuplicateEvidenceError labeling
@@ -1165,11 +1393,18 @@ func (s *Service) DeleteSourceFiles(caseID string, sourceFileIDs []string) (Dele
 		res.DeletedSourceFiles = append(res.DeletedSourceFiles, id)
 		touchedCollections[sf.CollectionID] = true
 
-		if collection, cerr := s.store.GetCollection(sf.CollectionID); cerr == nil && collection.SourceType == model.SourceTypeUpload {
+		if collection, cerr := s.store.GetCollection(sf.CollectionID); cerr == nil &&
+			(collection.SourceType == model.SourceTypeUpload || collection.SourceType == model.SourceTypeAD1) {
 			// Only for evidence Tracefall itself extracted and owns. A
-			// local-path collection's EvidenceDirectory is wherever the
-			// investigator's own evidence already lives on disk --
-			// Tracefall must never delete files out from under them.
+			// local-path (non-AD1) collection's EvidenceDirectory is
+			// wherever the investigator's own evidence already lives on
+			// disk -- Tracefall must never delete files out from under
+			// them. An AD1 collection's EvidenceDirectory, regardless of
+			// whether the AD1 itself arrived by upload or local path, is
+			// always Tracefall's own lazily-populated extraction
+			// destination (see catalogAD1/extractAD1Entry) -- the
+			// original AD1 container is never touched by this, only the
+			// one extracted copy of this specific deleted file.
 			_ = s.files.RemoveEvidenceFile(caseID, sf.CollectionID, sf.Path)
 		}
 	}
@@ -1392,6 +1627,11 @@ type FindingDetail struct {
 	model.Finding
 	SupportingEventDetails []model.Event     `json:"supporting_event_details"`
 	TechniqueDetails       []attck.Technique `json:"technique_details"`
+	// Explanation says WHY this finding carries the severity and
+	// confidence it does, from the producing rule's declared reasoning
+	// plus facts counted from the supporting events above. It never
+	// changes those levels -- see explain.go.
+	Explanation SeverityExplanation `json:"severity_explanation"`
 }
 
 func (s *Service) Finding(caseID, findingID string) (FindingDetail, error) {
@@ -1407,6 +1647,7 @@ func (s *Service) Finding(caseID, findingID string) (FindingDetail, error) {
 		Finding:                f,
 		SupportingEventDetails: events,
 		TechniqueDetails:       attck.Resolve(f.Techniques),
+		Explanation:            explainFinding(f, events),
 	}, nil
 }
 
@@ -1455,8 +1696,12 @@ func (s *Service) AttackSummary(caseID string) ([]AttackTechnique, error) {
 // path now lists collections instead, since "evidence" primarily means
 // "evidence collections" from the UI's perspective now; see
 // docs/data-model.md for the full endpoint rename).
-func (s *Service) Sources(caseID string) ([]model.SourceFile, error) {
-	return s.store.ListSourceFiles(caseID)
+func (s *Service) Sources(caseID string) ([]TriagedSourceFile, error) {
+	files, err := s.store.ListSourceFiles(caseID)
+	if err != nil {
+		return nil, err
+	}
+	return triageAll(files), nil
 }
 
 // EventProvenance is the full chain for one event: the normalized event,
@@ -1597,7 +1842,12 @@ func (s *Service) Investigation(caseID, investigationID string) (InvestigationDe
 	if err != nil {
 		return InvestigationDetail{}, err
 	}
-	var findings []model.Finding
+	// make(...,0,...), never `var findings []model.Finding`: the JSON
+	// response's finding_details field has no `omitempty` (see
+	// InvestigationDetail), so a nil slice here would serialize as `null`
+	// instead of `[]` -- see correlations' identical fix below for why
+	// that's not just a style nit, it crashes internal/web/static/app.js.
+	findings := make([]model.Finding, 0, len(inv.FindingIDs))
 	for _, id := range inv.FindingIDs {
 		f, err := s.store.GetFinding(id)
 		if err != nil {
@@ -1618,7 +1868,21 @@ func (s *Service) Investigation(caseID, investigationID string) (InvestigationDe
 	for _, id := range inv.CorrelationIDs {
 		wantCorr[id] = true
 	}
-	var correlations []model.Correlation
+	// make(...,0,...), never `var correlations []model.Correlation`: an
+	// investigation built from a single standalone finding with no chain/
+	// entity/temporal correlation at all (a real, valid case -- e.g. one
+	// isolated persistence artifact with nothing else to correlate it
+	// against) has CorrelationIDs == nil, and a `var` slice here would
+	// stay nil too, serializing as JSON `null` for correlation_details
+	// (no `omitempty` on that field -- see InvestigationDetail). The
+	// frontend calls .filter() on it unconditionally
+	// (internal/web/static/app.js's renderInvestigationDetail), so a null
+	// there crashed the whole investigation detail page -- found via
+	// Phase 7 AD1 browser verification (a standalone registry-run-key
+	// finding with nothing to correlate against was the first real
+	// scenario to hit this). Same bug class, same fix, as
+	// internal/investigate/score.go's sortedUniqueStrings from Phase 6.
+	correlations := make([]model.Correlation, 0, len(inv.CorrelationIDs))
 	for _, c := range allCorrelations {
 		if wantCorr[c.ID] {
 			correlations = append(correlations, c)
@@ -1709,4 +1973,47 @@ func splitTacticString(tacticStr string) []string {
 		}
 	}
 	return out
+}
+
+// parseFailure turns a parser error into a structured, user-safe report.
+//
+// The raw error is deliberately NOT passed through: a parser error can
+// embed the absolute path it was reading, which is server filesystem
+// information the browser has no business seeing. The category is
+// derived from the sentinel errors the readers already define, so the
+// classification tracks what the code actually returns rather than
+// matching on message text.
+func parseFailure(sf model.SourceFile, stage string, err error) ParseFailure {
+	category, message := classifyParseError(err)
+	return ParseFailure{
+		SourceFileID: sf.ID,
+		Path:         sf.Path,
+		Filename:     sf.OriginalFilename,
+		ArtifactType: sf.ArtifactType,
+		Parser:       sf.Parser,
+		Stage:        stage,
+		Category:     category,
+		Message:      message,
+		// Import parses every file completely before persisting anything
+		// (see the three-phase structure above), so a file that failed to
+		// parse contributed no events at all.
+		PartialEvents: false,
+	}
+}
+
+func classifyParseError(err error) (category, message string) {
+	switch {
+	case errors.Is(err, evtx.ErrCorrupt), errors.Is(err, regf.ErrCorrupt), errors.Is(err, ad1.ErrCorrupt):
+		return ParseFailureCorrupt, "The file is corrupt, truncated, or structurally invalid, so it could not be parsed."
+	case errors.Is(err, evtx.ErrNotEVTX):
+		return ParseFailureUnsupported, "This file is not a Windows Event Log despite being cataloged as one."
+	case errors.Is(err, regf.ErrNotHive):
+		return ParseFailureUnsupported, "This file is not a registry hive despite being cataloged as one."
+	case errors.Is(err, evtx.ErrLimitExceeded), errors.Is(err, regf.ErrLimitExceeded), errors.Is(err, ad1.ErrLimitExceeded):
+		return ParseFailureLimit, "The file exceeds a safety limit (size, record count, or nesting depth) and was not parsed."
+	case errors.Is(err, fs.ErrNotExist), errors.Is(err, fs.ErrPermission):
+		return ParseFailureUnreadable, "The file could not be read from evidence storage."
+	default:
+		return ParseFailureInternal, "The file could not be parsed."
+	}
 }

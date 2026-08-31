@@ -39,3 +39,32 @@ type ArtifactParser interface {
 	// other parsers running on other files.
 	Parse(absPath string) (ParseResult, error)
 }
+
+// SniffLength is how many leading bytes of a file discovery reads and
+// offers to a ContentDetector. It only ever needs to cover a format's
+// magic number, so it is deliberately tiny -- discovery must stay cheap
+// enough to run over an entire triage collection.
+const SniffLength = 512
+
+// ContentDetector is an OPTIONAL extra a parser may implement when its
+// artifact is identified by what the file contains rather than by what
+// it is called.
+//
+// The EZ Tools CSV parsers are correctly filename-driven: KAPE names its
+// output predictably, and a "*_EvtxECmd_Output.csv" is one by
+// construction. Native Windows artifacts are the opposite case. A
+// registry hive is routinely named SYSTEM, ntuser.dat, UsrClass.dat, or
+// nothing recognizable at all after being copied out of a triage image,
+// while a file called Security.evtx may turn out to be a renamed ZIP.
+// Trusting the name there would both miss real evidence and misclassify
+// files an attacker gets to name.
+//
+// Discovery consults Detect first and DetectContent second, so a parser
+// can support both, and content detection never overrides a filename
+// match that already succeeded.
+type ContentDetector interface {
+	// DetectContent reports whether header -- the first SniffLength
+	// bytes of the file, or the whole file if it is shorter -- is this
+	// parser's artifact. It must not assume a minimum length.
+	DetectContent(header []byte) bool
+}

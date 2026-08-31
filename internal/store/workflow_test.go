@@ -99,6 +99,69 @@ func TestReplaceAnalysis_SetsAnalyzedAt(t *testing.T) {
 	}
 }
 
+// TestGetCase_AnalyzedStatusAlwaysCarriesATimestamp pins the invariant
+// scanCase enforces (Phase 8): a case reported as Status == analyzed
+// always has AnalyzedAt set, and a case with no AnalyzedAt is never
+// reported as analyzed.
+//
+// The violating state is reachable in practice, not hypothetically: a
+// database predating the analyzed_at column migrates in with status
+// 'analyzed' and an empty analyzed_at (migrate.go declines to
+// invent a run time for it), which the dashboard rendered as an
+// ANALYZED badge sitting directly above "Last analyzed: Never analyzed".
+// Written here with raw SQL because the current Go API cannot produce
+// the inconsistency -- ReplaceAnalysis always writes both fields
+// together -- so only a legacy row can express it.
+func TestGetCase_AnalyzedStatusAlwaysCarriesATimestamp(t *testing.T) {
+	s := openTest(t)
+	seedCaseAndSourceFile(t, s)
+
+	// Force the legacy shape directly, bypassing ReplaceAnalysis.
+	if _, err := s.db.Exec(`UPDATE cases SET status = ?, analyzed_at = '' WHERE id = ?`,
+		model.CaseStatusAnalyzed, "case-1"); err != nil {
+		t.Fatalf("seeding legacy analyzed-without-timestamp row: %v", err)
+	}
+
+	got, err := s.GetCase("case-1")
+	if err != nil {
+		t.Fatalf("GetCase: %v", err)
+	}
+	if got.Status == model.CaseStatusAnalyzed && got.AnalyzedAt == nil {
+		t.Error("case reports Status=analyzed with no AnalyzedAt -- the UI renders this as ANALYZED above \"Never analyzed\"")
+	}
+	if got.Status != model.CaseStatusIngested {
+		t.Errorf("status = %q, want %q (analysis can't be attested without a recorded run time)", got.Status, model.CaseStatusIngested)
+	}
+	// The analyst's own workflow state must be untouched by that
+	// reconciliation -- it's a separate concept from engine lifecycle.
+	if got.CaseStatus != model.CaseWorkflowOpen {
+		t.Errorf("case_status = %q, want it left at %q", got.CaseStatus, model.CaseWorkflowOpen)
+	}
+
+	// ListCases materializes through the same scanCase, so it must agree.
+	all, err := s.ListCases()
+	if err != nil {
+		t.Fatalf("ListCases: %v", err)
+	}
+	for _, c := range all {
+		if c.ID == "case-1" && c.Status == model.CaseStatusAnalyzed && c.AnalyzedAt == nil {
+			t.Error("ListCases still reports the contradictory analyzed-without-timestamp state")
+		}
+	}
+
+	// Re-analysing restores a genuine analyzed status, with a timestamp.
+	if err := s.ReplaceAnalysis("case-1", nil, nil); err != nil {
+		t.Fatalf("ReplaceAnalysis: %v", err)
+	}
+	after, err := s.GetCase("case-1")
+	if err != nil {
+		t.Fatalf("GetCase: %v", err)
+	}
+	if after.Status != model.CaseStatusAnalyzed || after.AnalyzedAt == nil {
+		t.Errorf("after re-analysis: status=%q analyzedAt=%v, want analyzed with a timestamp", after.Status, after.AnalyzedAt)
+	}
+}
+
 // ---------------- Notes ----------------
 
 func TestNotes_CreateListUpdateDelete(t *testing.T) {

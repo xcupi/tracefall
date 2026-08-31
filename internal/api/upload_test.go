@@ -358,23 +358,24 @@ func TestUploadFlow_FailedSecondUploadDoesNotCorruptFirst(t *testing.T) {
 		t.Errorf("findings count = %d, want %d (unchanged)", caseDetail.Summary.Findings, findingsBefore)
 	}
 
-	// The first collection's own data must be completely intact.
-	var collections []model.Collection
-	doJSON(t, mux, "GET", "/api/cases/"+c.ID+"/evidence", nil, &collections)
-	var firstStillIngested, sawFailed bool
-	for _, col := range collections {
-		if col.ID == res1.Collection.ID && col.IngestionStatus == model.CollectionStatusIngested {
-			firstStillIngested = true
-		}
-		if col.IngestionStatus == model.CollectionStatusFailed {
-			sawFailed = true
-		}
+	// The first collection's own data must be completely intact, and the
+	// failed second upload must have left NOTHING behind: discovery is
+	// atomic, so a rejected upload creates no collection at all. (This
+	// previously asserted the opposite -- that a "failed" collection was
+	// recorded "for collection history visibility". That row was not
+	// evidence and could never become evidence; it only gave the
+	// investigator a permanent FAILED entry to explain, and, having no
+	// source files, it served `"source_files": null` to the evidence
+	// integrity view, which crashed on it.)
+	collections := listCollections(t, mux, c.ID)
+	if len(collections) != 1 {
+		t.Fatalf("collections after failed 2nd upload = %d, want 1 (the failed upload must create none)", len(collections))
 	}
-	if !firstStillIngested {
-		t.Error("first collection is no longer recorded as ingested")
+	if collections[0].ID != res1.Collection.ID {
+		t.Errorf("surviving collection = %q, want the first one %q", collections[0].ID, res1.Collection.ID)
 	}
-	if !sawFailed {
-		t.Error("expected the failed second collection to be recorded with status 'failed', for collection history visibility")
+	if collections[0].IngestionStatus != model.CollectionStatusIngested {
+		t.Errorf("first collection status = %q, want %q", collections[0].IngestionStatus, model.CollectionStatusIngested)
 	}
 
 	var timeline []model.Event

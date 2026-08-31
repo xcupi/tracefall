@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 
+	"tracefall/internal/ad1"
 	"tracefall/internal/archive"
 	"tracefall/internal/model"
 )
@@ -58,8 +59,19 @@ func NewRouter(svc *Service, logger *slog.Logger, maxUploadBytes int64, lanExpos
 	mux.HandleFunc("POST /api/cases/{id}/ingest", h.discoverEvidencePath)
 	mux.HandleFunc("POST /api/cases/{id}/evidence", h.discoverEvidenceUpload)
 	mux.HandleFunc("GET /api/cases/{id}/evidence", h.listCollections)
+	// What this build can and cannot parse. Case-independent, so the
+	// dashboard fetches it once and renders the registry rather than
+	// keeping its own copy of what is supported.
+	mux.HandleFunc("GET /api/capabilities", h.capabilities)
+	// The finding-severity model, published read-only for inspection.
+	mux.HandleFunc("GET /api/severity-model", h.severityModel)
 	mux.HandleFunc("DELETE /api/cases/{id}/evidence", h.deleteSourceFiles)
 	mux.HandleFunc("POST /api/cases/{id}/evidence/{collectionID}/import", h.importEvidence)
+	// Background import + polling. The synchronous route above is kept
+	// unchanged (scripted use, and every existing test), so this adds
+	// progress reporting without altering what already worked.
+	mux.HandleFunc("POST /api/cases/{id}/evidence/{collectionID}/import/start", h.startImport)
+	mux.HandleFunc("GET /api/cases/{id}/import-jobs/{jobID}", h.importJobStatus)
 	mux.HandleFunc("GET /api/cases/{id}/evidence/{collectionID}", h.collectionDetail)
 	mux.HandleFunc("DELETE /api/cases/{id}/evidence/{sourceFileID}", h.deleteSourceFile)
 	mux.HandleFunc("GET /api/cases/{id}/sources", h.sources)
@@ -233,14 +245,14 @@ func (h *handlers) discoverEvidenceUpload(w http.ResponseWriter, r *http.Request
 	}
 	defer r.MultipartForm.RemoveAll()
 
-	file, _, err := r.FormFile("file")
+	file, header, err := r.FormFile("file")
 	if err != nil {
 		writeError(w, http.StatusBadRequest, `missing uploaded file (expected multipart form field "file")`)
 		return
 	}
 	defer file.Close()
 
-	res, err := h.svc.DiscoverEvidenceFromUpload(id, file)
+	res, err := h.svc.DiscoverEvidenceFromUpload(id, file, header.Filename)
 	if h.fail(w, err) {
 		return
 	}
@@ -311,6 +323,59 @@ func (h *handlers) listCollections(w http.ResponseWriter, r *http.Request) {
 		collections = []model.Collection{}
 	}
 	writeJSON(w, http.StatusOK, collections)
+}
+
+func (h *handlers) severityModel(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, h.svc.SeverityModelReport())
+}
+
+func (h *handlers) capabilities(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, h.svc.Capabilities())
+}
+
+// startImport begins an import in the background and returns its job ID
+// for polling. Returns 409 if this collection already has one running --
+// the server-side half of the "don't submit the same selection twice"
+// guarantee.
+func (h *handlers) startImport(w http.ResponseWriter, r *http.Request) {
+	id, collectionID := r.PathValue("id"), r.PathValue("collectionID")
+	var req struct {
+		SourceFileIDs []string `json:"source_file_ids"`
+	}
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if len(req.SourceFileIDs) == 0 {
+		writeError(w, http.StatusBadRequest, "source_file_ids is required (the discovered files to import)")
+		return
+	}
+	jobID, err := h.svc.StartImport(id, collectionID, req.SourceFileIDs)
+	if err != nil {
+		if errors.Is(err, ErrImportInProgress) {
+			writeError(w, http.StatusConflict, err.Error())
+			return
+		}
+		h.fail(w, err)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]string{"job_id": jobID})
+}
+
+// importJobStatus reports a running or finished import's progress. It
+// reads in-memory job state only and never touches the database, so it
+// stays responsive while the import holds the single write connection.
+func (h *handlers) importJobStatus(w http.ResponseWriter, r *http.Request) {
+	id, jobID := r.PathValue("id"), r.PathValue("jobID")
+	progress, err := h.svc.ImportJob(id, jobID)
+	if err != nil {
+		if errors.Is(err, ErrJobNotFound) {
+			writeError(w, http.StatusNotFound, "import job not found")
+			return
+		}
+		h.fail(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, progress)
 }
 
 func (h *handlers) collectionDetail(w http.ResponseWriter, r *http.Request) {
@@ -386,7 +451,7 @@ func (h *handlers) sources(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if sources == nil {
-		sources = []model.SourceFile{}
+		sources = []TriagedSourceFile{}
 	}
 	writeJSON(w, http.StatusOK, sources)
 }
@@ -471,9 +536,20 @@ func (h *handlers) fail(w http.ResponseWriter, err error) bool {
 		writeError(w, http.StatusRequestEntityTooLarge, err.Error())
 	case errors.Is(err, archive.ErrInvalidArchive), errors.Is(err, archive.ErrUnsafeEntry):
 		writeError(w, http.StatusBadRequest, err.Error())
+	case errors.Is(err, ErrUnsupportedEvidence), errors.Is(err, ErrInvalidAD1), errors.Is(err, ad1.ErrLimitExceeded):
+		writeError(w, http.StatusBadRequest, err.Error())
+	case errors.Is(err, ErrEvidencePathNotFound), errors.Is(err, ErrNoEvidenceFound):
+		// Investigator-actionable: the path is wrong, or the source is
+		// empty. Both used to fall through to the default branch below
+		// and surface as an opaque 500 "internal error", which told an
+		// investigator nothing about what to fix.
+		writeError(w, http.StatusBadRequest, err.Error())
 	default:
+		// Genuinely unexpected. The detail goes to the server log, where
+		// it can name paths, SQL and internals freely; the client gets a
+		// deliberately generic message so none of that leaks.
 		h.log.Error("request failed", "error", err)
-		writeError(w, http.StatusInternalServerError, "internal error")
+		writeError(w, http.StatusInternalServerError, "internal server error")
 	}
 	return true
 }

@@ -53,6 +53,17 @@ func (s *Store) UploadPath(caseID, collectionID string) string {
 	return filepath.Join(s.CollectionDir(caseID, collectionID), "upload.zip")
 }
 
+// AD1Path returns where a browser-uploaded AD1 image's first (and, for an
+// uploaded single-segment image, only) segment is staged -- the AD1
+// analog of UploadPath, kept as its own named method rather than reusing
+// UploadPath so a reader never mistakes an AD1 for a zip from the
+// filename alone. A local-path AD1 collection has no use for this: its
+// original segment file(s) already live wherever the investigator
+// pointed Tracefall, and are never copied (see docs/ad1-ingestion.md).
+func (s *Store) AD1Path(caseID, collectionID string) string {
+	return filepath.Join(s.CollectionDir(caseID, collectionID), "upload.ad1")
+}
+
 // EvidenceDir returns where a collection's extracted evidence lives --
 // the directory internal/ingest.Discover/ParseFile are pointed at after
 // a successful upload.

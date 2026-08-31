@@ -126,13 +126,32 @@ const (
 	SourceTypeUpload    = "kape_upload" // browser-uploaded ZIP
 	SourceTypeLocalPath = "local_path"  // ingested from a directory already on disk
 	SourceTypeLegacy    = "legacy"      // synthesized for evidence ingested before collections existed (see internal/store/migrate.go)
+	// SourceTypeAD1 is an AccessData Logical Image (AD1) forensic
+	// container -- see internal/ad1 and docs/ad1-ingestion.md. Unlike
+	// the other source types above, this describes the CONTAINER FORMAT,
+	// not how it arrived (an AD1 can reach Tracefall via browser upload
+	// or local-path ingest identically -- see docs/ad1-ingestion.md's
+	// "Why SourceType is format, not delivery mechanism" section for why
+	// that distinction stops being meaningful for AD1 and isn't tracked
+	// separately).
+	SourceTypeAD1 = "ad1_image"
 )
 
 // Collection ingestion status values.
 const (
 	CollectionStatusPending  = "pending"
 	CollectionStatusIngested = "ingested"
-	CollectionStatusFailed   = "failed"
+	// CollectionStatusFailed is LEGACY and is never written any more.
+	// Discovery used to create a collection before cataloging it and
+	// mark it "failed" if cataloging then failed, leaving a permanent
+	// zero-file collection that was not evidence and could never become
+	// evidence. Discovery is now atomic (see
+	// internal/store.Store.CreateCollectionWithSourceFiles): a failed
+	// discovery creates nothing. The constant remains because databases
+	// written by earlier versions still contain such rows -- they are
+	// read, rendered as a clearly-labelled dead end, and deliberately
+	// never advanced to "ingested" (see Service.recomputeCollectionCounts).
+	CollectionStatusFailed = "failed"
 )
 
 // SourceFile is one individual evidence file discovered inside a
@@ -150,21 +169,30 @@ const (
 // files and imports them does a file gain events and move to
 // SourceFileImported (or SourceFileFailed if parsing itself failed).
 type SourceFile struct {
-	ID               string     `json:"id"`
-	CaseID           string     `json:"case_id"`
-	CollectionID     string     `json:"collection_id"`
-	OriginalFilename string     `json:"original_filename"` // basename as it appeared in the package
-	Path             string     `json:"path"`              // path relative to the collection's evidence root
-	ArtifactType     string     `json:"artifact_type,omitempty"`
-	Parser           string     `json:"parser,omitempty"` // parser name@version that would/did handle this file
-	Supported        bool       `json:"supported"`        // a parser was detected for this file, whether or not it has been imported
-	SizeBytes        int64      `json:"size_bytes"`
-	SHA256           string     `json:"sha256"`
-	ImportStatus     string     `json:"import_status"`
-	EventCount       int        `json:"event_count"` // 0 until imported
-	DiscoveredAt     time.Time  `json:"discovered_at"`
-	ImportedAt       *time.Time `json:"imported_at,omitempty"`
-	DeletedAt        *time.Time `json:"deleted_at,omitempty"` // soft-delete marker; nil while the file is active evidence
+	ID               string `json:"id"`
+	CaseID           string `json:"case_id"`
+	CollectionID     string `json:"collection_id"`
+	OriginalFilename string `json:"original_filename"` // basename as it appeared in the package
+	Path             string `json:"path"`              // path relative to the collection's evidence root
+	ArtifactType     string `json:"artifact_type,omitempty"`
+	Parser           string `json:"parser,omitempty"` // parser name@version that would/did handle this file
+	Supported        bool   `json:"supported"`        // a parser was detected for this file, whether or not it has been imported
+	SizeBytes        int64  `json:"size_bytes"`
+	SHA256           string `json:"sha256"` // Tracefall's own SHA-256, computed once the file is actually imported (see EmbeddedHash for what's known before that)
+	// EmbeddedHash is a hash the SOURCE CONTAINER reported for this file
+	// -- currently only populated for SourceTypeAD1 (from FTK Imager's
+	// own MD5/SHA1 acquisition-time hashing, when it was enabled),
+	// format "algo:hexdigest" (e.g. "sha1:abcd..."), empty if unknown.
+	// This is a hash Tracefall *observed being claimed*, not one it
+	// independently verified -- kept in its own field, never merged into
+	// SHA256, so the UI can show both side by side and an investigator
+	// can tell which is which. See docs/ad1-ingestion.md.
+	EmbeddedHash string     `json:"embedded_hash,omitempty"`
+	ImportStatus string     `json:"import_status"`
+	EventCount   int        `json:"event_count"` // 0 until imported
+	DiscoveredAt time.Time  `json:"discovered_at"`
+	ImportedAt   *time.Time `json:"imported_at,omitempty"`
+	DeletedAt    *time.Time `json:"deleted_at,omitempty"` // soft-delete marker; nil while the file is active evidence
 }
 
 // SourceFile import status values -- see SourceFile's doc comment for
@@ -183,7 +211,14 @@ const (
 	ArtifactWindowsEventLog = "windows_event_log" // EvtxECmd CSV output
 	ArtifactPrefetch        = "prefetch"          // PECmd CSV output
 	ArtifactRegistryRunKey  = "registry_run_key"  // RECmd batch CSV output
-	ArtifactScheduledTask   = "scheduled_task"    // raw Task Scheduler XML
+	// ArtifactRegistryHive is a raw REGF hive read natively
+	// (internal/parsers/registry). Deliberately distinct from
+	// ArtifactRegistryRunKey: artifact type is part of an event's
+	// identity (see Event.ComputeDedupHash), so a hive snapshot and a
+	// RECmd CSV export of that same hive stay separately attributable
+	// rather than silently collapsing into one another.
+	ArtifactRegistryHive  = "registry_hive"
+	ArtifactScheduledTask = "scheduled_task" // raw Task Scheduler XML
 )
 
 // Event types recognized in Phase 1. EventType is the normalized,
@@ -238,6 +273,13 @@ const (
 	// registry event. Run/RunOnce keys keep using EventRegistryRunKey
 	// (unchanged from Phase 1) so existing behavior/tests are undisturbed.
 	EventRegistryPersistence = "registry_persistence"
+	// EventRegistryKeyLastWrite records that a registry key carried a
+	// particular last-write timestamp -- an observation, not an action.
+	// The hive records only that the key was written at that moment; it
+	// does not say by whom, or that it was created then, so the event
+	// type is named for exactly what the evidence supports. No detection
+	// rule consumes it: it exists for timeline visibility and provenance.
+	EventRegistryKeyLastWrite = "registry_key_last_write"
 	// EventDNSQuery is Sysmon Event ID 22 (DNSEvent) -- a process resolved
 	// a domain name.
 	EventDNSQuery = "dns_query"

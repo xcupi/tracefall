@@ -206,7 +206,7 @@ func TestDuplicateEvidence_LocalPathRejected(t *testing.T) {
 // SELECT-based pre-check alone (internal/api.Service.checkDuplicateEvidence)
 // cannot guarantee this on its own -- see the (case_id, archive_hash)
 // partial unique index in internal/store/schema.go, enforced via
-// internal/api.Service.createCollectionOrDuplicateError -- so this test
+// internal/api.Service.commitDiscovery -- so this test
 // specifically exercises that race window by firing requests in
 // parallel rather than sequentially. Run with -race to also catch any
 // data races in the Go-level request handling itself.

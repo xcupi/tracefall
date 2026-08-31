@@ -25,9 +25,11 @@ import (
 
 	"tracefall/internal/model"
 	"tracefall/internal/parsers"
+	evtxnative "tracefall/internal/parsers/evtx"
 	"tracefall/internal/parsers/evtxcsv"
 	"tracefall/internal/parsers/pecmd"
 	"tracefall/internal/parsers/recmd"
+	"tracefall/internal/parsers/registry"
 	"tracefall/internal/parsers/scheduledtasks"
 )
 
@@ -41,6 +43,14 @@ func Registry() []parsers.ArtifactParser {
 		pecmd.New(),
 		recmd.New(),
 		scheduledtasks.New(),
+		// Phase 9: native Windows artifacts. Ordered after the EZ Tools
+		// CSV parsers so a KAPE collection containing both an EvtxECmd
+		// export and the .evtx it came from classifies each by its own
+		// most specific match. Both of these also implement
+		// parsers.ContentDetector, so they still find a hive or an event
+		// log that arrives under an unrecognized name.
+		evtxnative.New(),
+		registry.New(),
 	}
 }
 
@@ -84,6 +94,21 @@ func Discover(root string, registry []parsers.ArtifactParser) ([]DiscoveredFile,
 				break
 			}
 		}
+		// Nothing recognized the name. Native Windows artifacts are
+		// identified by content instead -- a hive copied out of a triage
+		// image may be called anything, and a .evtx extension proves
+		// nothing about what is inside. See parsers.ContentDetector.
+		if matched == nil {
+			header := readHeader(path, parsers.SniffLength)
+			if len(header) > 0 {
+				for _, p := range registry {
+					if cd, ok := p.(parsers.ContentDetector); ok && cd.DetectContent(header) {
+						matched = p
+						break
+					}
+				}
+			}
+		}
 
 		info, err := d.Info()
 		if err != nil {
@@ -120,11 +145,16 @@ type ParsedFile struct {
 
 // ParseFile parses one file at root/relPath with p, stamping every
 // resulting Event/RawEvidence with caseID/collectionID/sourceFileID.
-// Events are backfilled with a host the same way Walk's batch parse is
-// (see backfillHost) -- since this parses one file at a time now, that
-// backfill only has this one file's own events to learn a dominant host
-// from; internal/api.Service.enrichMissingHosts covers the case-wide
-// fallback exactly as it already does for Walk's output.
+//
+// It deliberately does NOT fill in a missing Host. Some artifact formats
+// (Prefetch, registry hives) never record a hostname at all, so their
+// events arrive here blank -- but this function only ever sees ONE file,
+// which is not enough context to resolve that correctly: the host is
+// usually only knowable from a sibling file in the same collection (an
+// EvtxECmd CSV, say). Deciding it here would make the result depend on
+// which file happened to be parsed first. Host resolution is therefore
+// the ingestion/service layer's job, done once per import batch over the
+// complete picture -- see internal/api.Service.enrichBatchHosts.
 func ParseFile(caseID, collectionID, sourceFileID, root, relPath string, p parsers.ArtifactParser) (ParsedFile, error) {
 	abs := filepath.Join(root, filepath.FromSlash(relPath))
 	parsed, err := p.Parse(abs)
@@ -151,40 +181,7 @@ func ParseFile(caseID, collectionID, sourceFileID, root, relPath string, p parse
 		}
 		events[i] = ev
 	}
-	backfillHost(events)
 	return ParsedFile{Events: events, Raw: raw}, nil
-}
-
-// backfillHost fills in Host on events that don't carry one natively.
-// Some artifact formats (Prefetch, registry hives) don't record a
-// hostname at all -- Tracefall assumes one evidence file corresponds to
-// one host, so any event missing a host inherits the dominant host seen
-// among events that do carry one (Windows Event Log records always do).
-// Leaving Host blank instead would silently make host-scoped correlation
-// (internal/correlate) match those events against each other by their
-// shared emptiness rather than by any real evidence.
-func backfillHost(events []model.Event) {
-	counts := map[string]int{}
-	for _, e := range events {
-		if e.Host != "" {
-			counts[e.Host]++
-		}
-	}
-	if len(counts) == 0 {
-		return
-	}
-	var dominant string
-	best := -1
-	for host, n := range counts {
-		if n > best || (n == best && host < dominant) {
-			dominant, best = host, n
-		}
-	}
-	for i := range events {
-		if events[i].Host == "" {
-			events[i].Host = dominant
-		}
-	}
 }
 
 func sha256File(path string) string {
@@ -198,4 +195,23 @@ func sha256File(path string) string {
 		return ""
 	}
 	return hex.EncodeToString(h.Sum(nil))
+}
+
+// readHeader reads up to n leading bytes of a file for content sniffing.
+// A file that cannot be opened simply yields no header and stays
+// unclassified, which is the same outcome as not matching -- discovery
+// must not fail a whole collection over one unreadable file.
+func readHeader(path string, n int) []byte {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+
+	buf := make([]byte, n)
+	read, err := io.ReadFull(f, buf)
+	if read == 0 && err != nil {
+		return nil
+	}
+	return buf[:read]
 }
