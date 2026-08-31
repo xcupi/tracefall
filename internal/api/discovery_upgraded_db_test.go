@@ -47,7 +47,7 @@ const legacySourceFilesDDL = `CREATE TABLE source_files (
 // newUpgradedTestRouter returns a router backed by a database that was
 // created under the old schema and then migrated by store.Open -- the
 // shape a real install that has been running since Phase 1 has on disk.
-func newUpgradedTestRouter(t *testing.T) *http.ServeMux {
+func newUpgradedTestRouter(t *testing.T) http.Handler {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "upgraded.db")
 

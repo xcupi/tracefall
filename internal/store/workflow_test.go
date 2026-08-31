@@ -182,7 +182,7 @@ func TestNotes_CreateListUpdateDelete(t *testing.T) {
 		t.Fatalf("got %+v, want 1 note with the expected text", notes)
 	}
 
-	if err := s.UpdateNote("note-1", "actually confirmed malicious"); err != nil {
+	if err := s.UpdateNote("case-1", "note-1", "actually confirmed malicious"); err != nil {
 		t.Fatalf("UpdateNote: %v", err)
 	}
 	notes, _ = s.ListNotes("case-1", "", "")
@@ -190,7 +190,7 @@ func TestNotes_CreateListUpdateDelete(t *testing.T) {
 		t.Fatalf("got %+v, want updated text", notes)
 	}
 
-	if err := s.DeleteNote("note-1"); err != nil {
+	if err := s.DeleteNote("case-1", "note-1"); err != nil {
 		t.Fatalf("DeleteNote: %v", err)
 	}
 	notes, _ = s.ListNotes("case-1", "", "")

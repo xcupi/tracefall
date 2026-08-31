@@ -450,6 +450,17 @@ type Finding struct {
 	FirstSeen        time.Time `json:"first_seen"`
 	LastSeen         time.Time `json:"last_seen"`
 	CreatedAt        time.Time `json:"created_at"`
+
+	// AnalysisRunID attributes this finding to the AnalysisRun that
+	// produced it (Phase 11).
+	//
+	// EMPTY means the finding predates run tracking. It is reported as
+	// legacy, never backfilled: an analysis run that was never recorded
+	// cannot be reconstructed, and stamping a historical finding with a
+	// plausible-looking run id would fabricate provenance. Detection
+	// itself is unaffected -- this field is set at persist time and is
+	// not an input to any rule.
+	AnalysisRunID string `json:"analysis_run_id,omitempty"`
 }
 
 // Correlation types.

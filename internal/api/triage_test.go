@@ -180,7 +180,7 @@ func TestSources_CarryTriageForTheWholeCase(t *testing.T) {
 // pollJob drives a background import to completion and returns the
 // distinct progress states it passed through, so a test can assert that
 // progress genuinely ADVANCED rather than jumping from 0 to done.
-func pollJob(t *testing.T, mux *http.ServeMux, caseID, jobID string) (states []ImportProgress, final ImportProgress) {
+func pollJob(t *testing.T, mux http.Handler, caseID, jobID string) (states []ImportProgress, final ImportProgress) {
 	t.Helper()
 	deadline := time.Now().Add(60 * time.Second)
 	for time.Now().Before(deadline) {
@@ -201,7 +201,7 @@ func pollJob(t *testing.T, mux *http.ServeMux, caseID, jobID string) (states []I
 	return nil, ImportProgress{}
 }
 
-func startImport(t *testing.T, mux *http.ServeMux, caseID, collectionID string, ids []string) (string, int) {
+func startImport(t *testing.T, mux http.Handler, caseID, collectionID string, ids []string) (string, int) {
 	t.Helper()
 	var started struct {
 		JobID string `json:"job_id"`

@@ -162,6 +162,11 @@ const (
 	AuditTagAdded                   = "tag_added"
 	AuditTagRemoved                 = "tag_removed"
 	AuditExport                     = "export"
+	// AuditIntegrityVerified (Phase 11) records that an evidence
+	// integrity check was run, and what it found. The check itself
+	// changes no evidence; this entry is the record of the ANALYST's
+	// action, which is chain-of-custody information in its own right.
+	AuditIntegrityVerified = "integrity_verified"
 )
 
 // ActorLocalUser is the only Actor value Tracefall currently produces --

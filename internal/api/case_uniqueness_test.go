@@ -12,7 +12,7 @@ import (
 // createCase POSTs a case and returns the response recorder, without the
 // createTestCase helper's baked-in assumption that creation succeeds --
 // duplicate-name tests need to inspect a rejected response.
-func createCase(t *testing.T, mux *http.ServeMux, name string) *httptest.ResponseRecorder {
+func createCase(t *testing.T, mux http.Handler, name string) *httptest.ResponseRecorder {
 	t.Helper()
 	return doJSON(t, mux, "POST", "/api/cases", map[string]string{"name": name}, nil)
 }

@@ -96,7 +96,7 @@ func systemHiveWithHostname(name string) []byte {
 
 // discoverBinaryDir writes binary fixtures to a directory and discovers
 // it via the local-path route.
-func discoverBinaryDir(t *testing.T, mux *http.ServeMux, caseID string, files map[string][]byte) DiscoverResult {
+func discoverBinaryDir(t *testing.T, mux http.Handler, caseID string, files map[string][]byte) DiscoverResult {
 	t.Helper()
 	dir := t.TempDir()
 	for name, content := range files {
@@ -117,7 +117,7 @@ func discoverBinaryDir(t *testing.T, mux *http.ServeMux, caseID string, files ma
 	return disc
 }
 
-func discoverBinaryZip(t *testing.T, mux *http.ServeMux, caseID string, files map[string][]byte) DiscoverResult {
+func discoverBinaryZip(t *testing.T, mux http.Handler, caseID string, files map[string][]byte) DiscoverResult {
 	t.Helper()
 	as := map[string]string{}
 	for k, v := range files {
@@ -132,7 +132,7 @@ func discoverBinaryZip(t *testing.T, mux *http.ServeMux, caseID string, files ma
 	return disc
 }
 
-func discoverBinaryAD1(t *testing.T, mux *http.ServeMux, caseID string, files map[string][]byte) DiscoverResult {
+func discoverBinaryAD1(t *testing.T, mux http.Handler, caseID string, files map[string][]byte) DiscoverResult {
 	t.Helper()
 	names := make([]string, 0, len(files))
 	for n := range files {
@@ -152,7 +152,7 @@ func discoverBinaryAD1(t *testing.T, mux *http.ServeMux, caseID string, files ma
 	return disc
 }
 
-func summaryOf(t *testing.T, mux *http.ServeMux, caseID string) Summary {
+func summaryOf(t *testing.T, mux http.Handler, caseID string) Summary {
 	t.Helper()
 	var detail struct {
 		Case    model.Case `json:"case"`
@@ -173,7 +173,7 @@ func TestNative_DiscoveryThroughEveryContainer(t *testing.T) {
 		"Users/jdoe/NTUSER.DAT":                      persistenceHive(),
 	}
 
-	routes := map[string]func(*testing.T, *http.ServeMux, string, map[string][]byte) DiscoverResult{
+	routes := map[string]func(*testing.T, http.Handler, string, map[string][]byte) DiscoverResult{
 		"local path": discoverBinaryDir,
 		"ZIP upload": discoverBinaryZip,
 		"AD1 upload": discoverBinaryAD1,
@@ -507,7 +507,7 @@ func TestNative_CorruptArtifactDoesNotBreakTheImport(t *testing.T) {
 
 // importAllFrom imports every supported, non-duplicate file in a
 // catalog.
-func importAllFrom(t *testing.T, mux *http.ServeMux, caseID string, disc DiscoverResult) ImportResult {
+func importAllFrom(t *testing.T, mux http.Handler, caseID string, disc DiscoverResult) ImportResult {
 	t.Helper()
 	var ids []string
 	for _, sf := range disc.SourceFiles {

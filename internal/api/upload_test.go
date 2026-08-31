@@ -99,7 +99,7 @@ func buildZipSlipBytes(t *testing.T) []byte {
 
 // uploadZip POSTs data as a multipart/form-data upload to
 // /api/cases/{id}/upload and returns the response recorder.
-func uploadZip(t *testing.T, mux *http.ServeMux, caseID string, data []byte) *httptest.ResponseRecorder {
+func uploadZip(t *testing.T, mux http.Handler, caseID string, data []byte) *httptest.ResponseRecorder {
 	t.Helper()
 	var body bytes.Buffer
 	w := multipart.NewWriter(&body)
@@ -127,7 +127,7 @@ func uploadZip(t *testing.T, mux *http.ServeMux, caseID string, data []byte) *ht
 // selectable, it does nothing and returns a zero recorder/result --
 // callers that need to assert on "nothing was imported" should check
 // disc.SourceFiles/SupportedCount directly instead.
-func importAll(t *testing.T, mux *http.ServeMux, caseID string, disc DiscoverResult) (*httptest.ResponseRecorder, ImportResult) {
+func importAll(t *testing.T, mux http.Handler, caseID string, disc DiscoverResult) (*httptest.ResponseRecorder, ImportResult) {
 	t.Helper()
 	var ids []string
 	for _, sf := range disc.SourceFiles {
@@ -152,7 +152,7 @@ func importAll(t *testing.T, mux *http.ServeMux, caseID string, disc DiscoverRes
 // of file selection itself (see TestEvidenceSelection_* for tests of the
 // selection step directly). t.Fatal on a non-200 discover response,
 // since callers using this helper expect the upload itself to succeed.
-func uploadAndImportAll(t *testing.T, mux *http.ServeMux, caseID string, data []byte) (DiscoverResult, ImportResult) {
+func uploadAndImportAll(t *testing.T, mux http.Handler, caseID string, data []byte) (DiscoverResult, ImportResult) {
 	t.Helper()
 	discRec := uploadZip(t, mux, caseID, data)
 	if discRec.Code != http.StatusOK {
@@ -164,7 +164,7 @@ func uploadAndImportAll(t *testing.T, mux *http.ServeMux, caseID string, data []
 	return disc, imp
 }
 
-func createTestCase(t *testing.T, mux *http.ServeMux, name string) model.Case {
+func createTestCase(t *testing.T, mux http.Handler, name string) model.Case {
 	t.Helper()
 	var c model.Case
 	rec := doJSON(t, mux, "POST", "/api/cases", map[string]string{"name": name}, &c)

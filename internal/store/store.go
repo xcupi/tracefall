@@ -945,8 +945,8 @@ func (s *Store) ReplaceAnalysis(caseID string, findings []model.Finding, correla
 	}
 
 	findingStmt, err := tx.Prepare(`INSERT INTO findings
-		(id, case_id, rule_id, title, severity, confidence, description, supporting_events_json, techniques_json, first_seen, last_seen, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+		(id, case_id, rule_id, title, severity, confidence, description, supporting_events_json, techniques_json, first_seen, last_seen, created_at, analysis_run_id)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
 	if err != nil {
 		return err
 	}
@@ -955,7 +955,8 @@ func (s *Store) ReplaceAnalysis(caseID string, findings []model.Finding, correla
 		supJSON, _ := json.Marshal(f.SupportingEvents)
 		techJSON, _ := json.Marshal(f.Techniques)
 		if _, err := findingStmt.Exec(f.ID, f.CaseID, f.RuleID, f.Title, f.Severity, f.Confidence, f.Description,
-			string(supJSON), string(techJSON), fmtTime(f.FirstSeen), fmtTime(f.LastSeen), fmtTime(f.CreatedAt)); err != nil {
+			string(supJSON), string(techJSON), fmtTime(f.FirstSeen), fmtTime(f.LastSeen), fmtTime(f.CreatedAt),
+			f.AnalysisRunID); err != nil {
 			return fmt.Errorf("saving finding: %w", err)
 		}
 	}
@@ -1013,7 +1014,7 @@ func scanFinding(row interface{ Scan(...any) error }) (model.Finding, error) {
 	var f model.Finding
 	var supJSON, techJSON, first, last, created string
 	err := row.Scan(&f.ID, &f.CaseID, &f.RuleID, &f.Title, &f.Severity, &f.Confidence, &f.Description,
-		&supJSON, &techJSON, &first, &last, &created)
+		&supJSON, &techJSON, &first, &last, &created, &f.AnalysisRunID)
 	if err != nil {
 		return model.Finding{}, err
 	}
@@ -1023,7 +1024,7 @@ func scanFinding(row interface{ Scan(...any) error }) (model.Finding, error) {
 	return f, nil
 }
 
-const findingCols = `id, case_id, rule_id, title, severity, confidence, description, supporting_events_json, techniques_json, first_seen, last_seen, created_at`
+const findingCols = `id, case_id, rule_id, title, severity, confidence, description, supporting_events_json, techniques_json, first_seen, last_seen, created_at, analysis_run_id`
 
 func (s *Store) ListFindings(caseID string) ([]model.Finding, error) {
 	rows, err := s.db.Query(`SELECT `+findingCols+` FROM findings WHERE case_id = ? ORDER BY first_seen ASC`, caseID)
@@ -1100,8 +1101,9 @@ func (s *Store) ListCorrelations(caseID string) ([]model.Correlation, error) {
 
 // DeleteCase permanently removes a case and every row anywhere in the
 // database that belongs to it -- collections, source files, raw
-// evidence, events, event observations, findings, correlations, and
-// finally the case row itself -- in dependency order, inside one
+// evidence, events, event observations, findings, correlations,
+// analyst workflow state, analysis runs, and finally the case row
+// itself -- in dependency order, inside one
 // transaction, so a failure partway through leaves the database exactly
 // as it was rather than an orphaned partial deletion. Foreign keys are
 // enforced (PRAGMA foreign_keys = ON, set in Open()) with no ON DELETE
@@ -1137,6 +1139,12 @@ func (s *Store) DeleteCase(caseID string) error {
 		`DELETE FROM tags WHERE case_id = ?`,
 		`DELETE FROM analyst_status WHERE case_id = ?`,
 		`DELETE FROM audit_log WHERE case_id = ?`,
+		// Phase 11. Analysis runs describe work done ON this case and
+		// have no meaning without it, so they go with it -- the same
+		// whole-case rule the audit log above follows. Deleting evidence
+		// from a LIVE case does not touch runs; only deleting the case
+		// itself does.
+		`DELETE FROM analysis_runs WHERE case_id = ?`,
 		`DELETE FROM cases WHERE id = ?`,
 	}
 	for _, stmt := range stmts {
@@ -1145,4 +1153,131 @@ func (s *Store) DeleteCase(caseID string) error {
 		}
 	}
 	return tx.Commit()
+}
+
+// ---------------- Analysis runs (Phase 11) ----------------
+//
+// A run row is written when analysis starts and updated exactly once
+// when it finishes. That is the only mutation: a completed or failed
+// run is never rewritten afterwards, so the record of what happened
+// stays fixed even though the findings it produced can be replaced by a
+// later run.
+
+const analysisRunCols = `id, case_id, started_at, completed_at, status, tool_version, event_count, finding_count, correlation_count, error`
+
+func scanAnalysisRun(row interface{ Scan(...any) error }) (model.AnalysisRun, error) {
+	var r model.AnalysisRun
+	var started, completed string
+	err := row.Scan(&r.ID, &r.CaseID, &started, &completed, &r.Status, &r.ToolVersion,
+		&r.EventCount, &r.FindingCount, &r.CorrelationCount, &r.Error)
+	if err != nil {
+		return model.AnalysisRun{}, err
+	}
+	r.StartedAt = parseTime(started)
+	// Empty string means "not finished", which must stay nil rather than
+	// becoming a zero time -- a zero CompletedAt would render as a real
+	// date and claim the run ended in year 1.
+	if completed != "" {
+		t := parseTime(completed)
+		r.CompletedAt = &t
+	}
+	return r, nil
+}
+
+// CreateAnalysisRun records a run that has just started.
+func (s *Store) CreateAnalysisRun(r model.AnalysisRun) error {
+	_, err := s.db.Exec(`INSERT INTO analysis_runs (`+analysisRunCols+`)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		r.ID, r.CaseID, fmtTime(r.StartedAt), fmtOptionalTime(r.CompletedAt), r.Status, r.ToolVersion,
+		r.EventCount, r.FindingCount, r.CorrelationCount, r.Error)
+	return err
+}
+
+// FinishAnalysisRun records a run's outcome.
+//
+// It updates ONLY the completion fields, and only for a run still
+// marked running -- so a finished run cannot be reopened or rewritten
+// by a later call, whatever the caller intends.
+func (s *Store) FinishAnalysisRun(id, status string, completedAt time.Time, eventCount, findingCount, correlationCount int, errMsg string) error {
+	_, err := s.db.Exec(`UPDATE analysis_runs
+		SET completed_at = ?, status = ?, event_count = ?, finding_count = ?, correlation_count = ?, error = ?
+		WHERE id = ? AND status = ?`,
+		fmtTime(completedAt), status, eventCount, findingCount, correlationCount, errMsg,
+		id, model.AnalysisRunRunning)
+	return err
+}
+
+// GetAnalysisRun returns one run by ID.
+func (s *Store) GetAnalysisRun(id string) (model.AnalysisRun, error) {
+	return scanAnalysisRun(s.db.QueryRow(`SELECT `+analysisRunCols+` FROM analysis_runs WHERE id = ?`, id))
+}
+
+// ListAnalysisRuns returns a case's runs, most recent first.
+func (s *Store) ListAnalysisRuns(caseID string) ([]model.AnalysisRun, error) {
+	rows, err := s.db.Query(`SELECT `+analysisRunCols+` FROM analysis_runs WHERE case_id = ? ORDER BY started_at DESC`, caseID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := make([]model.AnalysisRun, 0)
+	for rows.Next() {
+		r, err := scanAnalysisRun(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// ListSourceFilesIncludingDeleted returns every source file for a case,
+// including soft-deleted ones.
+//
+// The ordinary ListSourceFiles filters deleted rows out, which is right
+// for the working views: deleted evidence should not appear in a catalog
+// an analyst selects from. Provenance is the exception. A finding can
+// still reference an event whose source file was later deleted, and a
+// provenance view that silently dropped that link would imply the
+// evidence never existed rather than that it was removed.
+func (s *Store) ListSourceFilesIncludingDeleted(caseID string) ([]model.SourceFile, error) {
+	rows, err := s.db.Query(`SELECT `+sourceFileCols+` FROM source_files WHERE case_id = ? ORDER BY path`, caseID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := make([]model.SourceFile, 0)
+	for rows.Next() {
+		f, err := scanSourceFile(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, f)
+	}
+	return out, rows.Err()
+}
+
+// ClearIntegrityForTest blanks a collection's recorded SHA-512 so tests
+// can exercise the pre-Phase-10A "no digest recorded" path against a
+// real database row.
+//
+// It exists only for that: production code must never clear a recorded
+// digest, because the digest is the historical fact integrity
+// verification checks against. Named ForTest so no call site can adopt
+// it by accident.
+func (s *Store) ClearIntegrityForTest(collectionID string) error {
+	_, err := s.db.Exec(`UPDATE collections SET integrity_sha512 = '' WHERE id = ?`, collectionID)
+	return err
+}
+
+// ClearFindingRunIDsForTest blanks a case's finding run attributions so
+// tests can exercise the legacy "provenance unavailable" path against
+// real rows written before analysis runs were recorded.
+//
+// Test-only, for the same reason as ClearIntegrityForTest: production
+// code must never erase a finding's provenance.
+func (s *Store) ClearFindingRunIDsForTest(caseID string) error {
+	_, err := s.db.Exec(`UPDATE findings SET analysis_run_id = '' WHERE case_id = ?`, caseID)
+	return err
 }

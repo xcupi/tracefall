@@ -11,7 +11,7 @@ import (
 // ingestLocalPath drives the local-path discover step (mirroring
 // duplicate_evidence_test.go's evidenceRoot pattern) and returns the
 // decoded DiscoverResult, failing the test on a non-200 response.
-func ingestLocalPath(t *testing.T, mux *http.ServeMux, caseID, path string) DiscoverResult {
+func ingestLocalPath(t *testing.T, mux http.Handler, caseID, path string) DiscoverResult {
 	t.Helper()
 	var disc DiscoverResult
 	rec := doJSON(t, mux, "POST", "/api/cases/"+caseID+"/ingest", map[string]string{"path": path}, &disc)
@@ -21,7 +21,7 @@ func ingestLocalPath(t *testing.T, mux *http.ServeMux, caseID, path string) Disc
 	return disc
 }
 
-func analyze(t *testing.T, mux *http.ServeMux, caseID string) {
+func analyze(t *testing.T, mux http.Handler, caseID string) {
 	t.Helper()
 	rec := doJSON(t, mux, "POST", "/api/cases/"+caseID+"/analyze", nil, nil)
 	if rec.Code != http.StatusOK {
@@ -29,7 +29,7 @@ func analyze(t *testing.T, mux *http.ServeMux, caseID string) {
 	}
 }
 
-func getFindings(t *testing.T, mux *http.ServeMux, caseID string) []model.Finding {
+func getFindings(t *testing.T, mux http.Handler, caseID string) []model.Finding {
 	t.Helper()
 	var findings []model.Finding
 	rec := doJSON(t, mux, "GET", "/api/cases/"+caseID+"/findings", nil, &findings)
@@ -39,7 +39,7 @@ func getFindings(t *testing.T, mux *http.ServeMux, caseID string) []model.Findin
 	return findings
 }
 
-func getCorrelations(t *testing.T, mux *http.ServeMux, caseID string) []model.Correlation {
+func getCorrelations(t *testing.T, mux http.Handler, caseID string) []model.Correlation {
 	t.Helper()
 	var corr []model.Correlation
 	rec := doJSON(t, mux, "GET", "/api/cases/"+caseID+"/correlations", nil, &corr)

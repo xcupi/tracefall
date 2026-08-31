@@ -27,12 +27,12 @@ func newTestService(t *testing.T) *Service {
 	return NewService(db, files)
 }
 
-func routerFor(svc *Service) *http.ServeMux {
+func routerFor(svc *Service) http.Handler {
 	logger := slog.New(slog.NewTextHandler(bytes.NewBuffer(nil), nil))
 	return NewRouter(svc, logger, testMaxUploadBytes, false)
 }
 
-func newTestRouter(t *testing.T) *http.ServeMux {
+func newTestRouter(t *testing.T) http.Handler {
 	t.Helper()
 	return routerFor(newTestService(t))
 }
@@ -49,7 +49,7 @@ func TestHealthz_ReportsLANExposure(t *testing.T) {
 	}
 }
 
-func doJSON(t *testing.T, mux *http.ServeMux, method, path string, body any, out any) *httptest.ResponseRecorder {
+func doJSON(t *testing.T, mux http.Handler, method, path string, body any, out any) *httptest.ResponseRecorder {
 	t.Helper()
 	var reader *bytes.Reader
 	if body != nil {
@@ -76,7 +76,7 @@ func doJSON(t *testing.T, mux *http.ServeMux, method, path string, body any, out
 // discoverPath POSTs a local-path discovery request to
 // /api/cases/{id}/ingest and returns the response recorder, mirroring
 // uploadZip for the upload path.
-func discoverPath(t *testing.T, mux *http.ServeMux, caseID, path string) *httptest.ResponseRecorder {
+func discoverPath(t *testing.T, mux http.Handler, caseID, path string) *httptest.ResponseRecorder {
 	t.Helper()
 	return doJSON(t, mux, "POST", "/api/cases/"+caseID+"/ingest", map[string]string{"path": path}, nil)
 }
@@ -85,7 +85,7 @@ func discoverPath(t *testing.T, mux *http.ServeMux, caseID, path string) *httpte
 // flow for a local path (discover, then import every supported file
 // discovered) as one call -- the local-path-ingest counterpart of
 // uploadAndImportAll in upload_test.go.
-func discoverPathAndImportAll(t *testing.T, mux *http.ServeMux, caseID, path string) (DiscoverResult, ImportResult) {
+func discoverPathAndImportAll(t *testing.T, mux http.Handler, caseID, path string) (DiscoverResult, ImportResult) {
 	t.Helper()
 	rec := doJSON(t, mux, "POST", "/api/cases/"+caseID+"/ingest", map[string]string{"path": path}, nil)
 	if rec.Code != http.StatusOK {

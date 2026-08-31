@@ -12,11 +12,16 @@ KAPE ZIP upload (or local path) -> validate/extract -> ingestion
   -> timeline -> findings
 ```
 
-Explicitly out of scope through Phase 1.5 (and not attempted): memory
-forensics, full disk imaging or raw disk analysis, malware sandboxing,
-automatic malware verdicts, LLM/AI integration of any kind, threat
-intelligence integrations, distributed architecture, Kubernetes, or
-authentication/authorization of any kind. The detection and correlation
+Explicitly out of scope (and not attempted): memory forensics, full disk
+imaging or raw disk analysis, malware sandboxing, automatic malware
+verdicts, LLM/AI integration of any kind, threat intelligence
+integrations, distributed architecture, or Kubernetes.
+
+Authentication and authorization arrived in Phase 12: local accounts,
+server-side sessions, and two roles (analyst / admin) separating
+analysis from deletion and user administration. A non-loopback bind
+without authentication is refused at startup. TLS is still not
+terminated by Tracefall. See docs/security.md. The detection and correlation
 engine is 100% deterministic and works with no network access and no AI
 model. An LLM investigation copilot is an explicit future phase, not
 something this codebase depends on today. Phase 1.5 makes Tracefall
@@ -520,11 +525,12 @@ fabricated certainty.
   never-executable extracted files) and never executes anything from it
   — see docs/deployment.md for the complete list of protections and
   their rationale.
-- **LAN reachability is not authentication.** Phase 1.5 makes the host
-  and port configurable so Tracefall can be reached from other machines,
-  but adds no login, no access control, and no TLS. This is a
-  deliberate, explicitly-scoped-out omission for this phase, not an
-  oversight — see docs/deployment.md and the Phase 2 list below.
+- **LAN reachability now requires authentication** (Phase 12). Binding
+  to a non-loopback address without it is refused at startup rather than
+  warned about. Authorization is enforced by one middleware every API
+  request passes through, so a route added later is protected by
+  default. TLS is still **not** terminated by Tracefall — see
+  docs/security.md for what that does and does not protect.
 - **KAPE's `!EZParser` module was run during collection**, so EvtxECmd /
   PECmd / RECmd CSV output is present alongside the raw files, per the
   "why CSV, not raw binary formats" section above.
@@ -541,11 +547,9 @@ fabricated certainty.
 
 Roughly in priority order:
 
-1. **Basic authentication/authorization and TLS**, now that Tracefall is
-   easy to make LAN-reachable (Phase 1.5) — this is the most
-   security-relevant gap remaining, and should land before recommending
-   anyone leave a Tracefall instance running for long stretches on a
-   shared network.
+1. ~~**Basic authentication/authorization and TLS**~~ — authentication
+   and authorization landed in Phase 12 (see docs/security.md). TLS
+   termination is still delegated to a reverse proxy.
 2. **Raw binary format parsers** behind the same `ArtifactParser`
    interface (raw `.evtx`, raw Prefetch, raw registry hives), so
    Tracefall doesn't require `!EZParser` to have been run.

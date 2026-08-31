@@ -43,7 +43,7 @@ func largeCatalog(n int) map[string][]byte {
 	return files
 }
 
-func getEvidencePage(t *testing.T, mux *http.ServeMux, caseID, collectionID string, q url.Values) EvidenceFilePage {
+func getEvidencePage(t *testing.T, mux http.Handler, caseID, collectionID string, q url.Values) EvidenceFilePage {
 	t.Helper()
 	path := "/api/cases/" + caseID + "/evidence/" + collectionID + "/files"
 	if len(q) > 0 {
@@ -61,7 +61,7 @@ func getEvidencePage(t *testing.T, mux *http.ServeMux, caseID, collectionID stri
 	return page
 }
 
-func getEvidenceIDs(t *testing.T, mux *http.ServeMux, caseID, collectionID string, q url.Values) []string {
+func getEvidenceIDs(t *testing.T, mux http.Handler, caseID, collectionID string, q url.Values) []string {
 	t.Helper()
 	path := "/api/cases/" + caseID + "/evidence/" + collectionID + "/files/ids"
 	if len(q) > 0 {
@@ -85,7 +85,7 @@ func getEvidenceIDs(t *testing.T, mux *http.ServeMux, caseID, collectionID strin
 	return out.IDs
 }
 
-func bigCase(t *testing.T, n int) (*http.ServeMux, string, string) {
+func bigCase(t *testing.T, n int) (http.Handler, string, string) {
 	t.Helper()
 	mux := newTestRouter(t)
 	c := mustCreateCase(t, mux, "Large catalog")

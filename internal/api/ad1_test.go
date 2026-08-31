@@ -56,7 +56,7 @@ func buildAD1(t *testing.T, rootName string, files []ad1gen.File) []byte {
 // uploadAD1 POSTs data as a multipart/form-data upload to
 // /api/cases/{id}/evidence -- the SAME endpoint uploadZip uses, since AD1
 // vs ZIP is detected by content, not by a separate route.
-func uploadAD1(t *testing.T, mux *http.ServeMux, caseID string, data []byte, filename string) *httptest.ResponseRecorder {
+func uploadAD1(t *testing.T, mux http.Handler, caseID string, data []byte, filename string) *httptest.ResponseRecorder {
 	t.Helper()
 	var body bytes.Buffer
 	w := multipart.NewWriter(&body)
@@ -77,7 +77,7 @@ func uploadAD1(t *testing.T, mux *http.ServeMux, caseID string, data []byte, fil
 	return rec
 }
 
-func mustCreateCase(t *testing.T, mux *http.ServeMux, name string) model.Case {
+func mustCreateCase(t *testing.T, mux http.Handler, name string) model.Case {
 	t.Helper()
 	var c model.Case
 	rec := doJSON(t, mux, "POST", "/api/cases", map[string]string{"name": name}, &c)
@@ -298,7 +298,7 @@ func TestAD1_PartialSelectionImportsOnlySelected(t *testing.T) {
 	}
 }
 
-func listSourceFiles(t *testing.T, mux *http.ServeMux, caseID string) []TriagedSourceFile {
+func listSourceFiles(t *testing.T, mux http.Handler, caseID string) []TriagedSourceFile {
 	t.Helper()
 	var sfs []TriagedSourceFile
 	rec := doJSON(t, mux, "GET", "/api/cases/"+caseID+"/sources", nil, &sfs)

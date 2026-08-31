@@ -1,11 +1,26 @@
-# Deployment: LAN access, uploads, and their security model
+# Deployment: access control, LAN access, uploads
 
-Phase 1.5 adds two things beyond running Tracefall on `localhost` for
-yourself: making the server reachable from other machines on your LAN,
-and accepting a KAPE evidence package as a browser upload instead of a
-local filesystem path. Both are still explicitly **local/LAN tools with
-no authentication** -- this document is about what protections exist and
-where the boundary of that protection stops.
+Tracefall runs in one of exactly two supported modes. Which one you get
+is determined by the address you bind to, and the unsafe combination is
+**refused at startup** rather than warned about.
+
+| Mode | Bind | Authentication | Who can reach it |
+|---|---|---|---|
+| **Single operator** | loopback (`127.0.0.1`, `localhost`, `::1`) | optional, off by default | only processes on that machine |
+| **Shared / LAN** | any non-loopback address | **required** | anyone who can route to the port |
+
+Binding to a non-loopback address **without** authentication does not
+start:
+
+```
+tracefall: refusing to start: Tracefall is configured to listen on a
+non-loopback address with authentication disabled.
+```
+
+Before Phase 12 that configuration started and logged a warning, which
+meant one mis-set environment variable published every case, all
+evidence, the full audit log and every destructive endpoint to the
+network. A warning in a log nobody reads is not a control.
 
 ## Configuration
 
@@ -20,28 +35,93 @@ built-in default. See `internal/config` for the implementation.
 | `-db` | `TRACEFALL_DB` | `tracefall.db` | SQLite database file path |
 | `-data-dir` | `TRACEFALL_DATA_DIR` | `./data` | root directory for uploaded/extracted case evidence |
 | `-max-upload-mb` | `TRACEFALL_MAX_UPLOAD_MB` | `2048` (2 GiB) | maximum accepted upload size |
+| `-auth` | `TRACEFALL_AUTH` | `false` | require username/password. **Mandatory for any non-loopback bind.** |
+| `-session-ttl-minutes` | `TRACEFALL_SESSION_TTL_MINUTES` | `720` (12 h) | how long one login stays valid |
+| `-secure-cookies` | `TRACEFALL_SECURE_COOKIES` | `false` | mark session cookies `Secure`. Only behind HTTPS -- **breaks login over plain HTTP** |
+| (env only) | `TRACEFALL_ADMIN_PASSWORD` | *(generated)* | password for the bootstrap `admin` account, first start only |
+
+`TRACEFALL_AUTH` accepts `1/true/yes/on/enabled` and their negatives.
+`TRACEFALL_ADMIN_PASSWORD` is environment-only, deliberately: a flag
+would put the password in the process table.
 
 The default (`127.0.0.1`) is deliberately loopback-only, matching "safe
 by default." This is a change from Tracefall's very first version, where
 the default `:8080` address bound to all interfaces without anyone
 intending that.
 
-## Enabling LAN access
+## Single-operator mode (default)
 
 ```bash
-TRACEFALL_HOST=0.0.0.0 TRACEFALL_PORT=8080 go run ./cmd/tracefall
+go run ./cmd/tracefall
 ```
 
-or, built as a binary:
+Binds `127.0.0.1:8080`, no authentication, nothing to configure. The
+dashboard shows *"Local operator · no authentication"* so the mode is
+never ambiguous. This is unchanged from earlier phases.
+
+## Shared / LAN mode
 
 ```bash
-go build -o tracefall ./cmd/tracefall
-./tracefall -host 0.0.0.0 -port 8080
+TRACEFALL_AUTH=on TRACEFALL_HOST=0.0.0.0 ./tracefall
 ```
 
-Tracefall logs a startup warning whenever it binds to a non-loopback
-host, and the startup banner still prints a `localhost` URL for
-convenience even though the process is listening on every interface.
+On the **first** start with authentication enabled and no accounts,
+Tracefall creates a `tracefall` administrator and prints its password
+once:
+
+```
+==================================================
+ Tracefall First-Run Setup
+==================================================
+
+Administrator account created.
+
+Username: tracefall
+Password: eQ1RGGmtEERC18PGhtftrbS9EOs7S__s
+
+IMPORTANT:
+This password is displayed only once.
+Sign in and change the password immediately.
+
+==================================================
+```
+
+That account is **gated behind a mandatory password change**: it can
+sign in and change its password, and nothing else, until it does. The
+password was displayed in plaintext on a terminal, where it can survive
+in scrollback, a screenshot or a CI log, so it is treated as a
+short-lived enrolment credential rather than a working one. The gate is
+enforced by the server, not the UI, so it cannot be skipped by calling
+the API directly.
+
+Whether the credential is printed is decided by **persisted state** —
+"the users table is empty" — so restarting never regenerates, reprints
+or overwrites anything.
+
+The password is generated from `crypto/rand`, printed to stdout only,
+and never written to the structured log or the audit trail. It is
+generated rather than defaulted because a well-known default credential
+on a forensic tool is worse than no authentication: it looks secure.
+
+Set `TRACEFALL_ADMIN_PASSWORD` instead for unattended provisioning.
+
+Then sign in and create per-analyst accounts under **admin → users**
+(`POST /api/admin/users`). Do not share the `admin` account: the audit
+trail records the username that acted, and a shared account makes every
+entry say the same thing.
+
+### Transport is still plain HTTP
+
+Authentication controls *who* may act. It does nothing about *who can
+read the traffic*. Tracefall speaks plain HTTP and does not terminate
+TLS. On a shared network, put it behind a reverse proxy that does
+(nginx, Caddy, a corporate ingress) and set `TRACEFALL_SECURE_COOKIES=1`
+so session cookies are marked `Secure`.
+
+Setting `TRACEFALL_SECURE_COOKIES=1` **without** TLS makes login fail
+silently -- the browser accepts the cookie and refuses to send it back.
+That is why it is opt-in rather than inferred.
+
 From another machine on the same LAN, open
 `http://<the-host-machine's-LAN-IP>:8080`.
 

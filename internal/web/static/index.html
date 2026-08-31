@@ -9,10 +9,13 @@
 <body>
   <header class="topbar">
     <a href="#/" class="brand">Tracefall <span class="brand-sub">forensic triage</span></a>
-    <span id="conn-status" class="conn-status"></span>
+    <div class="topbar-right">
+      <span id="user-bar" class="user-bar"></span>
+      <span id="conn-status" class="conn-status"></span>
+    </div>
   </header>
   <div id="lan-warning" class="lan-warning hidden">
-    Reachable from other machines on this network, with no authentication. Do not expose this beyond a trusted LAN, and never port-forward it to the public internet.
+    Reachable from other machines on this network. Authentication is required for a non-loopback bind, but traffic is plain HTTP unless you terminate TLS in front of Tracefall &mdash; keep this on a trusted network and never port-forward it to the public internet.
   </div>
   <main id="app" class="app"></main>
   <script src="/static/app.js"></script>

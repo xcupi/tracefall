@@ -59,7 +59,7 @@ func hostFixtureFiles() map[string]string {
 
 // discoverZip uploads files as a ZIP and returns the discovery catalog
 // without importing anything, so a test can choose its own import order.
-func discoverZip(t *testing.T, mux *http.ServeMux, caseID string, files map[string]string) DiscoverResult {
+func discoverZip(t *testing.T, mux http.Handler, caseID string, files map[string]string) DiscoverResult {
 	t.Helper()
 	rec := uploadZip(t, mux, caseID, buildZipBytes(t, files))
 	if rec.Code != http.StatusOK {
@@ -72,7 +72,7 @@ func discoverZip(t *testing.T, mux *http.ServeMux, caseID string, files map[stri
 
 // discoverLocalDir writes files into a temp directory and discovers it,
 // exercising the local-path ingestion route rather than an upload.
-func discoverLocalDir(t *testing.T, mux *http.ServeMux, caseID string, files map[string]string) DiscoverResult {
+func discoverLocalDir(t *testing.T, mux http.Handler, caseID string, files map[string]string) DiscoverResult {
 	t.Helper()
 	dir := t.TempDir()
 	for name, content := range files {
@@ -94,7 +94,7 @@ func discoverLocalDir(t *testing.T, mux *http.ServeMux, caseID string, files map
 }
 
 // discoverAD1Fixture builds an AD1 image from files and discovers it.
-func discoverAD1Fixture(t *testing.T, mux *http.ServeMux, caseID string, files map[string]string) DiscoverResult {
+func discoverAD1Fixture(t *testing.T, mux http.Handler, caseID string, files map[string]string) DiscoverResult {
 	t.Helper()
 	paths := make([]string, 0, len(files))
 	for name := range files {
@@ -117,7 +117,7 @@ func discoverAD1Fixture(t *testing.T, mux *http.ServeMux, caseID string, files m
 // importInPathOrder imports exactly the named paths, in exactly the order
 // given -- which is the order ImportEvidence's loop processes them in,
 // and therefore the variable these tests exist to hold constant.
-func importInPathOrder(t *testing.T, mux *http.ServeMux, caseID string, disc DiscoverResult, paths ...string) ImportResult {
+func importInPathOrder(t *testing.T, mux http.Handler, caseID string, disc DiscoverResult, paths ...string) ImportResult {
 	t.Helper()
 	ids := make([]string, 0, len(paths))
 	for _, want := range paths {
@@ -140,7 +140,7 @@ func importInPathOrder(t *testing.T, mux *http.ServeMux, caseID string, disc Dis
 	return imp
 }
 
-func timelineOf(t *testing.T, mux *http.ServeMux, caseID string) []map[string]any {
+func timelineOf(t *testing.T, mux http.Handler, caseID string) []map[string]any {
 	t.Helper()
 	var timeline []map[string]any
 	doJSON(t, mux, "GET", "/api/cases/"+caseID+"/timeline", nil, &timeline)
@@ -370,7 +370,7 @@ func TestHostEnrichment_CaseF_LocalDirectory(t *testing.T) {
 // directory must normalize to byte-identical events. Without this, each
 // route could drift independently and still pass its own test.
 func TestHostEnrichment_AllSourceTypesAgree(t *testing.T) {
-	discoverers := map[string]func(*testing.T, *http.ServeMux, string, map[string]string) DiscoverResult{
+	discoverers := map[string]func(*testing.T, http.Handler, string, map[string]string) DiscoverResult{
 		"zip":       discoverZip,
 		"ad1":       discoverAD1Fixture,
 		"localpath": discoverLocalDir,
@@ -406,7 +406,7 @@ func TestHostEnrichment_AllSourceTypesAgree(t *testing.T) {
 // are content-derived from those event IDs (see model.StableID), so they
 // legitimately differ between runs while the analysis itself is
 // identical. What must not differ is everything here.
-func analysisFingerprint(t *testing.T, mux *http.ServeMux, caseID string) map[string][]string {
+func analysisFingerprint(t *testing.T, mux http.Handler, caseID string) map[string][]string {
 	t.Helper()
 	fp := map[string][]string{}
 

@@ -11,7 +11,7 @@ import (
 
 // listCollections fetches a case's collections via the API, the same
 // path the dashboard uses to render "Collection #N" cards and counts.
-func listCollections(t *testing.T, mux *http.ServeMux, caseID string) []model.Collection {
+func listCollections(t *testing.T, mux http.Handler, caseID string) []model.Collection {
 	t.Helper()
 	var collections []model.Collection
 	rec := doJSON(t, mux, "GET", "/api/cases/"+caseID+"/evidence", nil, &collections)

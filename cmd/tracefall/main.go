@@ -38,18 +38,46 @@ func main() {
 	files := casefiles.NewStore(cfg.DataDir)
 	svc := api.NewService(db, files)
 
+	// Bootstrap the first administrator when authentication is on and no
+	// account exists yet. Without this an authenticated deployment would
+	// have no way in at all.
+	//
+	// The generated password is printed ONCE, to stdout, and never
+	// stored in plaintext or written to the log. It is generated rather
+	// than defaulted because a well-known default password on a forensic
+	// tool is worse than no authentication -- it looks secure.
+	if cfg.AuthEnabled {
+		if err := bootstrapAdmin(svc, os.Getenv("TRACEFALL_ADMIN_PASSWORD"), os.Stdout); err != nil {
+			logger.Error("failed to create the initial administrator", "error", err)
+			os.Exit(1)
+		}
+	}
+
+	authCfg := api.AuthConfig{
+		Enabled:       cfg.AuthEnabled,
+		SessionTTL:    cfg.SessionTTL(),
+		SecureCookies: cfg.SecureCookies,
+	}
+
 	mux := http.NewServeMux()
-	apiMux := api.NewRouter(svc, logger, cfg.MaxUploadBytes(), !cfg.IsLoopbackHost())
+	apiMux := api.NewRouterWithAuth(svc, logger, cfg.MaxUploadBytes(), !cfg.IsLoopbackHost(), authCfg)
 	mux.Handle("/api/", apiMux)
-	mux.Handle("/static/", web.StaticHandler())
-	mux.HandleFunc("/", web.Index())
+	// The dashboard shell and its assets get the baseline security
+	// headers plus a Content-Security-Policy; the API mux applies its own
+	// inside withSecurity.
+	mux.Handle("/static/", api.SecurityHeaders(web.StaticHandler(), cfg.SecureCookies))
+	mux.Handle("/", api.SecurityHeaders(web.Index(), cfg.SecureCookies))
 
 	logger.Info("tracefall starting", "addr", cfg.Addr(), "db", cfg.DBPath, "data_dir", cfg.DataDir, "max_upload_mb", cfg.MaxUploadMB)
 	printStartupBanner(os.Stdout, cfg)
 
+	// config.Validate has already REFUSED an unauthenticated non-loopback
+	// bind, so reaching here on a LAN address means authentication is on.
+	// The remaining risk is transport, not access control.
 	if !cfg.IsLoopbackHost() {
-		logger.Warn("listening on a non-loopback host: Tracefall is reachable from other machines on this network. " +
-			"There is no authentication in this phase -- do not expose this host/port beyond a trusted LAN, and never port-forward it to the public internet.")
+		logger.Warn("listening on a non-loopback host with authentication enabled. " +
+			"Traffic is plain HTTP unless you terminate TLS in front of Tracefall -- keep this on a trusted network " +
+			"and never port-forward it to the public internet.")
 	}
 
 	if err := http.ListenAndServe(cfg.Addr(), requestLogger(logger, mux)); err != nil {

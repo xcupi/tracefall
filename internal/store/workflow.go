@@ -2,6 +2,7 @@ package store
 
 import (
 	"database/sql"
+	"errors"
 	"time"
 
 	"tracefall/internal/model"
@@ -11,6 +12,12 @@ import (
 // inline inside Store.DeleteCase's own transaction (matching that
 // method's existing style of a flat list of DELETE statements), not via
 // helpers here.
+
+// ErrNoteNotFound means the note does not exist, or does not belong to
+// the case the caller is acting within. The two are deliberately
+// indistinguishable so the API cannot be used to probe for note ids in
+// cases the caller cannot see.
+var ErrNoteNotFound = errors.New("note not found")
 
 // ---------- Notes ----------
 
@@ -33,17 +40,48 @@ func (s *Store) CreateNote(n model.Note) error {
 	return err
 }
 
-func (s *Store) UpdateNote(id, text string) error {
-	_, err := s.db.Exec(`UPDATE notes SET note = ?, updated_at = ? WHERE id = ?`, text, fmtTime(time.Now()), id)
-	return err
+// UpdateNote edits a note that belongs to caseID.
+//
+// The case is part of the WHERE clause, not merely checked beforehand,
+// so the ownership rule cannot be bypassed by a caller that forgets the
+// check or by a race between checking and writing. A note id from
+// another case matches no row and reports ErrNoteNotFound -- which is
+// also what an unknown id reports, so the API cannot be used to discover
+// which note ids exist in cases the caller cannot see.
+func (s *Store) UpdateNote(caseID, id, text string) error {
+	res, err := s.db.Exec(`UPDATE notes SET note = ?, updated_at = ? WHERE id = ? AND case_id = ?`,
+		text, fmtTime(time.Now()), id, caseID)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return ErrNoteNotFound
+	}
+	return nil
 }
 
 // DeleteNote removes a note by ID -- an analyst deleting their own
 // annotation, distinct from the automatic evidence-deletion behavior
 // (which never touches notes -- see model.Note's doc comment).
-func (s *Store) DeleteNote(id string) error {
-	_, err := s.db.Exec(`DELETE FROM notes WHERE id = ?`, id)
-	return err
+// DeleteNote removes a note that belongs to caseID. Scoped for the same
+// reason as UpdateNote.
+func (s *Store) DeleteNote(caseID, id string) error {
+	res, err := s.db.Exec(`DELETE FROM notes WHERE id = ? AND case_id = ?`, id, caseID)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return ErrNoteNotFound
+	}
+	return nil
 }
 
 // ListNotes returns a case's notes, optionally filtered to one target

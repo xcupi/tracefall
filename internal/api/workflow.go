@@ -110,19 +110,26 @@ func (s *Service) ListNotes(caseID, targetType, targetID string) ([]model.Note, 
 	return s.store.ListNotes(caseID, targetType, targetID)
 }
 
-func (s *Service) UpdateNote(id, text string) (model.Note, error) {
+// UpdateNote edits one note within caseID.
+//
+// caseID is REQUIRED and is enforced in the store's WHERE clause. Before
+// Phase 12 this took a bare note id, so any caller who knew or guessed
+// an id could edit a note in any case -- an authorization bypass by id.
+func (s *Service) UpdateNote(caseID, id, text string) (model.Note, error) {
 	text = strings.TrimSpace(text)
 	if text == "" {
 		return model.Note{}, fmt.Errorf("note text is required")
 	}
-	if err := s.store.UpdateNote(id, text); err != nil {
+	if err := s.store.UpdateNote(caseID, id, text); err != nil {
 		return model.Note{}, err
 	}
 	return model.Note{}, nil
 }
 
-func (s *Service) DeleteNote(id string) error {
-	return s.store.DeleteNote(id)
+// DeleteNote removes one note within caseID. Scoped for the same reason
+// as UpdateNote.
+func (s *Service) DeleteNote(caseID, id string) error {
+	return s.store.DeleteNote(caseID, id)
 }
 
 // ---------------- Tags ----------------

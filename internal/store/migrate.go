@@ -56,6 +56,22 @@ func migrate(db *sql.DB) error {
 	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_source_files_collection_path ON source_files(collection_id, path)`); err != nil {
 		return fmt.Errorf("creating source_files collection/path index: %w", err)
 	}
+	// Phase 12 bootstrap refinement: gate an account behind a mandatory
+	// password change. Existing accounts default to 0 -- a deployment
+	// that already has users has already chosen their passwords, and
+	// forcing every one of them to change on upgrade would be a
+	// disruption this column does not need to cause.
+	if err := addColumnIfMissing(db, "users", "must_change_password", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return fmt.Errorf("migrating users (must_change_password): %w", err)
+	}
+	// Phase 11: attribute a finding to the analysis run that produced it.
+	// Added as a nullable-by-default column so every existing finding
+	// keeps an EMPTY run id -- which is the honest answer for a finding
+	// written before runs were recorded. Nothing is backfilled: inventing
+	// a run id for a historical finding would fabricate provenance.
+	if err := addColumnIfMissing(db, "findings", "analysis_run_id", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return fmt.Errorf("migrating findings (analysis_run_id): %w", err)
+	}
 	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_events_case_dedup ON events(case_id, dedup_hash)`); err != nil {
 		return fmt.Errorf("creating events dedup index: %w", err)
 	}

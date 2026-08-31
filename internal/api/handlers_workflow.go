@@ -17,7 +17,7 @@ func (h *handlers) updateCaseMetadata(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	c, err := h.svc.UpdateCaseMetadata(id, req)
+	c, err := h.as(r).UpdateCaseMetadata(id, req)
 	if h.fail(w, err) {
 		return
 	}
@@ -28,7 +28,7 @@ func (h *handlers) listNotes(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	targetType := r.URL.Query().Get("target_type")
 	targetID := r.URL.Query().Get("target_id")
-	notes, err := h.svc.ListNotes(id, targetType, targetID)
+	notes, err := h.as(r).ListNotes(id, targetType, targetID)
 	if h.fail(w, err) {
 		return
 	}
@@ -48,7 +48,7 @@ func (h *handlers) createNote(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	n, err := h.svc.CreateNote(id, req.TargetType, req.TargetID, req.Note)
+	n, err := h.as(r).CreateNote(id, req.TargetType, req.TargetID, req.Note)
 	if h.fail(w, err) {
 		return
 	}
@@ -56,22 +56,22 @@ func (h *handlers) createNote(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *handlers) updateNote(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("noteID")
+	caseID, id := r.PathValue("id"), r.PathValue("noteID")
 	var req struct {
 		Note string `json:"note"`
 	}
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	if _, err := h.svc.UpdateNote(id, req.Note); h.fail(w, err) {
+	if _, err := h.as(r).UpdateNote(caseID, id, req.Note); h.fail(w, err) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "updated"})
 }
 
 func (h *handlers) deleteNote(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("noteID")
-	if err := h.svc.DeleteNote(id); h.fail(w, err) {
+	caseID, id := r.PathValue("id"), r.PathValue("noteID")
+	if err := h.as(r).DeleteNote(caseID, id); h.fail(w, err) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
@@ -81,7 +81,7 @@ func (h *handlers) listTags(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	targetType := r.URL.Query().Get("target_type")
 	targetID := r.URL.Query().Get("target_id")
-	tags, err := h.svc.ListTags(id, targetType, targetID)
+	tags, err := h.as(r).ListTags(id, targetType, targetID)
 	if h.fail(w, err) {
 		return
 	}
@@ -101,7 +101,7 @@ func (h *handlers) addTag(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	t, err := h.svc.AddTag(id, req.TargetType, req.TargetID, req.Tag)
+	t, err := h.as(r).AddTag(id, req.TargetType, req.TargetID, req.Tag)
 	if h.fail(w, err) {
 		return
 	}
@@ -118,7 +118,7 @@ func (h *handlers) removeTag(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	if err := h.svc.RemoveTag(id, req.TargetType, req.TargetID, req.Tag); h.fail(w, err) {
+	if err := h.as(r).RemoveTag(id, req.TargetType, req.TargetID, req.Tag); h.fail(w, err) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "removed"})
@@ -133,7 +133,7 @@ func (h *handlers) setFindingStatus(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	a, err := h.svc.SetFindingStatus(id, findingID, req.Status, req.Note)
+	a, err := h.as(r).SetFindingStatus(id, findingID, req.Status, req.Note)
 	if h.fail(w, err) {
 		return
 	}
@@ -149,7 +149,7 @@ func (h *handlers) setInvestigationStatus(w http.ResponseWriter, r *http.Request
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	a, err := h.svc.SetInvestigationStatus(id, investigationID, req.Status, req.Note)
+	a, err := h.as(r).SetInvestigationStatus(id, investigationID, req.Status, req.Note)
 	if h.fail(w, err) {
 		return
 	}
@@ -158,7 +158,7 @@ func (h *handlers) setInvestigationStatus(w http.ResponseWriter, r *http.Request
 
 func (h *handlers) listAnalystStatus(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	statuses, err := h.svc.ListAnalystStatus(id)
+	statuses, err := h.as(r).ListAnalystStatus(id)
 	if h.fail(w, err) {
 		return
 	}
@@ -170,7 +170,7 @@ func (h *handlers) listAnalystStatus(w http.ResponseWriter, r *http.Request) {
 
 func (h *handlers) auditLog(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	events, err := h.svc.AuditLog(id)
+	events, err := h.as(r).AuditLog(id)
 	if h.fail(w, err) {
 		return
 	}
@@ -182,7 +182,7 @@ func (h *handlers) auditLog(w http.ResponseWriter, r *http.Request) {
 
 func (h *handlers) exportCase(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	export, err := h.svc.ExportCase(id)
+	export, err := h.as(r).ExportCase(id)
 	if h.fail(w, err) {
 		return
 	}
@@ -192,7 +192,7 @@ func (h *handlers) exportCase(w http.ResponseWriter, r *http.Request) {
 
 func (h *handlers) exportInvestigation(w http.ResponseWriter, r *http.Request) {
 	id, investigationID := r.PathValue("id"), r.PathValue("investigationID")
-	export, err := h.svc.ExportInvestigation(id, investigationID)
+	export, err := h.as(r).ExportInvestigation(id, investigationID)
 	if h.fail(w, err) {
 		return
 	}
@@ -204,7 +204,7 @@ func (h *handlers) exportTimelineCSV(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	w.Header().Set("Content-Type", "text/csv")
 	w.Header().Set("Content-Disposition", `attachment; filename="timeline-`+id+`.csv"`)
-	if err := h.svc.ExportTimelineCSV(id, w); err != nil {
+	if err := h.as(r).ExportTimelineCSV(id, w); err != nil {
 		h.log.Error("timeline CSV export failed", "case", id, "error", err)
 	}
 }
@@ -213,7 +213,7 @@ func (h *handlers) exportFindingsCSV(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	w.Header().Set("Content-Type", "text/csv")
 	w.Header().Set("Content-Disposition", `attachment; filename="findings-`+id+`.csv"`)
-	if err := h.svc.ExportFindingsCSV(id, w); err != nil {
+	if err := h.as(r).ExportFindingsCSV(id, w); err != nil {
 		h.log.Error("findings CSV export failed", "case", id, "error", err)
 	}
 }

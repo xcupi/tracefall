@@ -15,7 +15,7 @@ import (
 
 // ---------------- shared helpers ----------------
 
-func deleteSourceFile(t *testing.T, mux *http.ServeMux, caseID, sourceFileID string) (*httptest.ResponseRecorder, DeletedEvidenceResult) {
+func deleteSourceFile(t *testing.T, mux http.Handler, caseID, sourceFileID string) (*httptest.ResponseRecorder, DeletedEvidenceResult) {
 	t.Helper()
 	rec := doJSON(t, mux, "DELETE", "/api/cases/"+caseID+"/evidence/"+sourceFileID, nil, nil)
 	var res DeletedEvidenceResult
@@ -25,7 +25,7 @@ func deleteSourceFile(t *testing.T, mux *http.ServeMux, caseID, sourceFileID str
 	return rec, res
 }
 
-func deleteSourceFiles(t *testing.T, mux *http.ServeMux, caseID string, ids []string) (*httptest.ResponseRecorder, DeletedEvidenceResult) {
+func deleteSourceFiles(t *testing.T, mux http.Handler, caseID string, ids []string) (*httptest.ResponseRecorder, DeletedEvidenceResult) {
 	t.Helper()
 	rec := doJSON(t, mux, "DELETE", "/api/cases/"+caseID+"/evidence", map[string][]string{"source_file_ids": ids}, nil)
 	var res DeletedEvidenceResult
@@ -35,12 +35,12 @@ func deleteSourceFiles(t *testing.T, mux *http.ServeMux, caseID string, ids []st
 	return rec, res
 }
 
-func deleteCase(t *testing.T, mux *http.ServeMux, caseID string) *httptest.ResponseRecorder {
+func deleteCase(t *testing.T, mux http.Handler, caseID string) *httptest.ResponseRecorder {
 	t.Helper()
 	return doJSON(t, mux, "DELETE", "/api/cases/"+caseID, nil, nil)
 }
 
-func bulkDeleteCases(t *testing.T, mux *http.ServeMux, ids []string) (*httptest.ResponseRecorder, BulkDeleteCasesResult) {
+func bulkDeleteCases(t *testing.T, mux http.Handler, ids []string) (*httptest.ResponseRecorder, BulkDeleteCasesResult) {
 	t.Helper()
 	rec := doJSON(t, mux, "DELETE", "/api/cases", map[string][]string{"case_ids": ids}, nil)
 	var res BulkDeleteCasesResult

@@ -37,16 +37,271 @@ function apiError(res, body) {
   return err;
 }
 
+// csrfToken reads the CSRF cookie the server set at login.
+//
+// Deliberately NOT HttpOnly on the server side: the double-submit check
+// requires this page to read the value and echo it back in a header,
+// which is precisely what a cross-site attacker cannot do. Its only
+// power is to prove the request came from Tracefall's own page.
+function csrfToken() {
+  const m = document.cookie.match(/(?:^|;\s*)tracefall_csrf=([^;]+)/);
+  return m ? decodeURIComponent(m[1]) : "";
+}
+
+// SAFE_METHODS need no CSRF token; the server applies the same rule.
+const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
+
 async function api(path, opts) {
-  const res = await fetch("/api" + path, {
-    headers: { "Content-Type": "application/json" },
-    ...opts,
-  });
+  const method = ((opts && opts.method) || "GET").toUpperCase();
+  const headers = { "Content-Type": "application/json", ...((opts && opts.headers) || {}) };
+  if (!SAFE_METHODS.has(method)) {
+    const t = csrfToken();
+    if (t) headers["X-Tracefall-CSRF"] = t;
+  }
+  const res = await fetch("/api" + path, { ...opts, headers });
   const body = await res.json().catch(() => null);
   if (!res.ok) {
+    // A 401 mid-session means the session expired or was revoked. Send
+    // the analyst to the login screen rather than surfacing a confusing
+    // error on whatever they happened to be reading.
+    //
+    // The login endpoint itself is excluded: a 401 there means "wrong
+    // password", not "session lost". Treating it as a session loss
+    // re-rendered the login form and destroyed the error box before the
+    // caller could write the message into it, so a failed sign-in
+    // silently did nothing.
+    if (res.status === 401 && authState.enabled && !path.startsWith("/auth/login")) {
+      handleSessionLost();
+    }
+    // The server refuses everything but the password change while the
+    // account is gated. Honour that rather than showing the refusal as a
+    // generic error on whatever view happened to make the request.
+    if (res.status === 403 && body && /change your password/i.test(body.error || "")) {
+      authState.mustChangePassword = true;
+      renderPasswordChange();
+    }
     throw apiError(res, body);
   }
   return body;
+}
+
+// ---------------- authentication (Phase 12) ----------------
+
+// authState is what the dashboard knows about the current session. It is
+// a CONVENIENCE for rendering only: every permission it reflects is
+// re-checked by the server on every request, so hiding a button is never
+// the thing that stops an action.
+const authState = { enabled: false, authenticated: false, username: "", role: "", canDelete: true, setupRequired: false, mustChangePassword: false };
+
+async function loadSession() {
+  try {
+    const info = await api("/auth/session");
+    authState.enabled = !!info.auth_enabled;
+    authState.authenticated = !!info.authenticated;
+    authState.username = info.username || "";
+    authState.role = info.role || "";
+    // With authentication off, the single local operator is unrestricted
+    // -- exactly as before Phase 12.
+    authState.canDelete = info.auth_enabled ? !!info.can_delete : true;
+    authState.setupRequired = !!info.setup_required;
+    authState.mustChangePassword = !!info.must_change_password;
+  } catch (e) {
+    authState.enabled = false;
+  }
+}
+
+function handleSessionLost() {
+  authState.authenticated = false;
+  renderLogin("Your session has expired. Sign in again to continue.");
+}
+
+// renderLogin replaces the whole application with the sign-in form.
+function renderLogin(message) {
+  document.getElementById("user-bar").innerHTML = "";
+  app.innerHTML = `
+    <div class="login-wrap">
+      <form class="login-card panel" id="login-form" autocomplete="on">
+        <h1 class="login-title">Tracefall</h1>
+        <p class="muted small">Sign in to continue.</p>
+        ${message ? `<div class="login-message" role="status">${esc(message)}</div>` : ""}
+        <div class="field">
+          <label for="login-username">Username</label>
+          <div class="input-wrap"><input id="login-username" name="username" autocomplete="username" required autofocus /></div>
+        </div>
+        <div class="field">
+          <label for="login-password">Password</label>
+          <div class="input-wrap"><input id="login-password" name="password" type="password" autocomplete="current-password" required /></div>
+        </div>
+        <div id="login-error" role="alert"></div>
+        <button type="submit" id="login-submit">Sign in</button>
+      </form>
+    </div>`;
+
+  const form = document.getElementById("login-form");
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const btn = document.getElementById("login-submit");
+    const errBox = document.getElementById("login-error");
+    errBox.innerHTML = "";
+    btn.disabled = true;
+    btn.textContent = "Signing in...";
+    try {
+      const info = await api("/auth/login", {
+        method: "POST",
+        body: JSON.stringify({
+          username: document.getElementById("login-username").value,
+          password: document.getElementById("login-password").value,
+        }),
+      });
+      authState.enabled = true;
+      authState.authenticated = true;
+      authState.username = info.username;
+      authState.role = info.role;
+      authState.canDelete = !!info.can_delete;
+      authState.mustChangePassword = !!info.must_change_password;
+      renderUserBar();
+      if (authState.mustChangePassword) {
+        renderPasswordChange();
+        return;
+      }
+      route();
+    } catch (err) {
+      errBox.innerHTML = errorBox(err);
+      btn.disabled = false;
+      btn.textContent = "Sign in";
+      document.getElementById("login-password").value = "";
+      document.getElementById("login-password").focus();
+    }
+  });
+}
+
+// canDelete reports whether the signed-in user may destroy evidence.
+//
+// Used ONLY to decide whether to render a destructive control. It is not
+// a security boundary: the server re-checks the role on every
+// destructive request (see requiredRole in internal/api/middleware.go),
+// so a user who forges the UI state still gets a 403. Hiding the button
+// exists so an analyst is not offered an action that can only fail.
+function canDelete() {
+  return !authState.enabled || authState.canDelete;
+}
+
+// renderPasswordChange is the mandatory password-change screen.
+//
+// It replaces the whole application rather than appearing as a banner:
+// the account genuinely cannot do anything else, and the server enforces
+// that independently (see isPasswordChangeRoute in
+// internal/api/middleware.go), so an interface that let the user browse
+// around would only be showing them things every request would refuse.
+function renderPasswordChange(message) {
+  app.innerHTML = `
+    <div class="login-wrap">
+      <form class="login-card panel" id="pwchange-form" autocomplete="on">
+        <h1 class="login-title">Change your password</h1>
+        <p class="muted small">
+          This account was created with a password generated by the server and shown once in the
+          startup output. Choose your own password to continue.
+        </p>
+        ${message ? `<div class="login-message" role="status">${esc(message)}</div>` : ""}
+        <input type="text" name="username" autocomplete="username" value="${esc(authState.username)}" hidden readonly />
+        <div class="field">
+          <label for="pw-current">Current password</label>
+          <div class="input-wrap"><input id="pw-current" type="password" autocomplete="current-password" required autofocus /></div>
+        </div>
+        <div class="field">
+          <label for="pw-new">New password</label>
+          <div class="input-wrap"><input id="pw-new" type="password" autocomplete="new-password" required minlength="12" /></div>
+          <p class="muted small">At least 12 characters. Length matters more than symbols.</p>
+        </div>
+        <div class="field">
+          <label for="pw-confirm">Confirm new password</label>
+          <div class="input-wrap"><input id="pw-confirm" type="password" autocomplete="new-password" required minlength="12" /></div>
+        </div>
+        <div id="pw-error" role="alert"></div>
+        <button type="submit" id="pw-submit">Set new password</button>
+      </form>
+    </div>`;
+
+  const form = document.getElementById("pwchange-form");
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const btn = document.getElementById("pw-submit");
+    const errBox = document.getElementById("pw-error");
+    const next = document.getElementById("pw-new").value;
+    const confirm = document.getElementById("pw-confirm").value;
+    errBox.innerHTML = "";
+
+    // Checked here purely to save a round trip; every other rule
+    // (length, correctness of the current password, difference from it)
+    // is enforced by the server.
+    if (next !== confirm) {
+      errBox.innerHTML = errorBox(new Error("The two new passwords do not match."));
+      return;
+    }
+    btn.disabled = true;
+    btn.textContent = "Saving...";
+    try {
+      const info = await api("/auth/change-password", {
+        method: "POST",
+        body: JSON.stringify({
+          current_password: document.getElementById("pw-current").value,
+          new_password: next,
+        }),
+      });
+      authState.mustChangePassword = false;
+      if (info && info.authenticated) {
+        authState.authenticated = true;
+        authState.username = info.username;
+        authState.role = info.role;
+        authState.canDelete = !!info.can_delete;
+        renderUserBar();
+        route();
+        return;
+      }
+      // The change succeeded but the fresh session was not issued; sign
+      // in again rather than pretending to be authenticated.
+      authState.authenticated = false;
+      renderLogin("Your password has been changed. Sign in with your new password.");
+    } catch (err) {
+      errBox.innerHTML = errorBox(err);
+      btn.disabled = false;
+      btn.textContent = "Set new password";
+      document.getElementById("pw-current").value = "";
+      document.getElementById("pw-current").focus();
+    }
+  });
+}
+
+// renderUserBar shows who is signed in and offers sign-out.
+function renderUserBar() {
+  const bar = document.getElementById("user-bar");
+  if (!bar) return;
+  if (!authState.enabled) {
+    // Single-operator mode: say so plainly rather than implying an
+    // identity Tracefall does not have.
+    bar.innerHTML = `<span class="user-chip muted small" title="Authentication is disabled; Tracefall is bound to localhost.">Local operator &middot; no authentication</span>`;
+    return;
+  }
+  if (!authState.authenticated) {
+    bar.innerHTML = "";
+    return;
+  }
+  bar.innerHTML = `
+    <span class="user-chip">
+      <span class="user-name">${esc(authState.username)}</span>
+      <span class="badge status user-role">${esc(authState.role)}</span>
+    </span>
+    <button type="button" class="secondary small" id="logout-btn">Sign out</button>`;
+  document.getElementById("logout-btn").addEventListener("click", async () => {
+    try {
+      await api("/auth/logout", { method: "POST" });
+    } catch (e) {
+      /* signing out locally regardless is the safer failure mode */
+    }
+    authState.authenticated = false;
+    window.location.hash = "#/";
+    renderLogin("You have been signed out.");
+  });
 }
 
 // apiUpload posts a file as multipart/form-data. Deliberately not using
@@ -1264,8 +1519,25 @@ function eventDetailValue(e) {
 // ---------------- Router ----------------
 
 window.addEventListener("hashchange", route);
-window.addEventListener("DOMContentLoaded", () => {
+window.addEventListener("DOMContentLoaded", async () => {
   checkHealth();
+  // The session is resolved BEFORE the first route render, so an
+  // unauthenticated visitor never briefly sees a case list shell before
+  // being sent to the login form.
+  await loadSession();
+  renderUserBar();
+  if (authState.enabled && !authState.authenticated) {
+    renderLogin(authState.setupRequired
+      ? "No accounts exist yet. Sign in with the administrator account printed in the server's startup output."
+      : "");
+    return;
+  }
+  // A gated account goes straight to the change-password screen, on this
+  // load and on every subsequent one until the change is made.
+  if (authState.enabled && authState.mustChangePassword) {
+    renderPasswordChange();
+    return;
+  }
   route();
 });
 
@@ -1410,7 +1682,9 @@ function wireCaseSelection() {
       .map((cb) => cb.dataset.id);
     // The host reserves its height either way (.bulk-bar-host), so
     // showing/hiding the bar never shifts the list beneath it.
-    if (selected.length === 0) {
+    // Suppressed entirely for a non-admin: the bar's only action is a
+    // delete, which the server would refuse.
+    if (selected.length === 0 || !canDelete()) {
       bulkBar.innerHTML = "";
       return;
     }
@@ -1518,7 +1792,8 @@ async function renderCaseDetail(caseId, tab) {
 
   wireSidebar(caseId);
   wireCaseMetadataControls(caseId);
-  document.getElementById("delete-case-btn").addEventListener("click", () =>
+  // Absent for a non-admin: the control is not rendered at all.
+  document.getElementById("delete-case-btn")?.addEventListener("click", () =>
     confirmAndDeleteCases([caseId], () => {
       window.location.hash = "#/";
     })
@@ -1665,7 +1940,7 @@ function renderCaseHeader(caseId, c, summary, staleAnalysis) {
               <a role="menuitem" href="/api/cases/${caseId}/export/findings.csv" target="_blank" rel="noopener">Findings CSV</a>
             </div>
           </div>
-          <button type="button" class="danger small" id="delete-case-btn">Delete Case</button>
+          ${canDelete() ? `<button type="button" class="danger small" id="delete-case-btn">Delete Case</button>` : ""}
         </div>
       </div>
 
@@ -2096,6 +2371,7 @@ function wireCollectionIntegrity(caseId, root) {
             <div><span class="muted small">Hosts observed</span><div class="small">${cd.hosts_observed && cd.hosts_observed.length ? esc(cd.hosts_observed.join(", ")) : "Unknown"}</div></div>
             <div><span class="muted small">Event time range</span><div class="small">${cd.earliest_event ? esc(fmtTime(cd.earliest_event)) + " &rarr; " + esc(fmtTime(cd.latest_event)) : "Unknown"}${cd.undated_events ? `<div class="muted small" title="These events are real observations, but their artifact records no time, so they fall outside the range above rather than being placed on it.">+ ${cd.undated_events} event(s) with no timestamp</div>` : ""}</div></div>
           </div>
+          ${renderIntegrityVerifyPanel(caseId, cd)}
           <div class="muted small" style="margin-top:8px">Parser coverage</div>
           ${
             cd.parser_coverage && cd.parser_coverage.length
@@ -2134,6 +2410,7 @@ function wireCollectionIntegrity(caseId, root) {
         `;
         detail.dataset.loaded = "1";
         wireIntegrityHash(detail);
+        wireIntegrityVerify(caseId, card.dataset.collection, detail);
       } catch (e) {
         detail.innerHTML = errorBox(e);
       }
@@ -2233,7 +2510,7 @@ async function renderNotesSection(container, caseId, targetType, targetId) {
   `;
   container.querySelectorAll(".delete-note-btn").forEach((btn) =>
     btn.addEventListener("click", async () => {
-      await api(`/notes/${btn.dataset.id}`, { method: "DELETE" });
+      await api(`/cases/${caseId}/notes/${btn.dataset.id}`, { method: "DELETE" });
       renderNotesSection(container, caseId, targetType, targetId);
     })
   );
@@ -3746,6 +4023,278 @@ function setHashExpanded(container, expanded) {
   return code;
 }
 
+// ---------------- Provenance views (Phase 11) ----------------
+//
+// These answer "what evidence is this standing on?" by walking
+// relationships that already existed -- finding -> supporting events ->
+// source files -> collection -> evidence hash. Nothing here invents a
+// link: an unresolved step is shown as unresolved.
+
+async function mountFindingProvenance(detail, caseId, findingId) {
+  const host = document.createElement("div");
+  host.className = "provenance";
+  host.innerHTML = `<h4>Evidence provenance</h4><p class="muted small">Loading provenance...</p>`;
+  detail.appendChild(host);
+  try {
+    const p = await api(`/cases/${caseId}/findings/${findingId}/provenance`);
+    host.innerHTML = `<h4>Evidence provenance</h4>${renderFindingProvenance(p)}`;
+    wireIntegrityHash(host);
+  } catch (e) {
+    host.innerHTML = `<h4>Evidence provenance</h4>${errorBox(e)}`;
+  }
+}
+
+function renderFindingProvenance(p) {
+  // The gap between referenced and resolved events is itself
+  // provenance: it means evidence this finding rests on has since been
+  // deleted, which an analyst must not have to infer from a smaller
+  // number than they expected.
+  const missing = p.supporting_event_count - p.resolved_event_count;
+  const eventLine =
+    `${fmtCount(p.resolved_event_count)} supporting event(s)` +
+    (missing > 0 ? ` <span class="prov-badge-deleted">${fmtCount(missing)} no longer present</span>` : "") +
+    (p.timestampless_event_count
+      ? ` <span class="muted small">&middot; ${fmtCount(p.timestampless_event_count)} with no timestamp</span>`
+      : "");
+
+  const files = p.source_files.length
+    ? p.source_files
+        .map(
+          (f) => `<div class="prov-file">
+            <span class="mono small ${f.deleted ? "prov-deleted" : ""}" title="${esc(f.path)}">${esc(f.original_filename || f.path)}</span>
+            ${f.deleted ? `<span class="prov-badge-deleted">Deleted</span>` : ""}
+            ${f.parser ? `<span class="muted small">${esc(f.parser)}</span>` : ""}
+          </div>`
+        )
+        .join("")
+    : `<span class="muted small">No source file could be resolved for this finding's events.</span>`;
+
+  const collections = p.collections.length
+    ? p.collections.map(renderProvenanceCollection).join("")
+    : `<span class="muted small">No evidence collection could be resolved.</span>`;
+
+  return `
+    <div class="prov-chain">
+      <div class="prov-step">
+        <div class="prov-label">Finding</div>
+        <div class="prov-value">${esc(p.title)} <span class="muted small mono">${esc(p.rule_id)}</span></div>
+      </div>
+      <div class="prov-step">
+        <div class="prov-label">Supporting events</div>
+        <div class="prov-value">${eventLine}</div>
+      </div>
+      <div class="prov-step">
+        <div class="prov-label">Source files (${fmtCount(p.source_files.length)})</div>
+        <div class="prov-value">${files}</div>
+      </div>
+      <div class="prov-step">
+        <div class="prov-label">Evidence</div>
+        <div class="prov-value">${collections}</div>
+      </div>
+      <div class="prov-step">
+        <div class="prov-label">Produced by</div>
+        <div class="prov-value">${renderAnalysisRunRef(p)}</div>
+      </div>
+    </div>`;
+}
+
+// renderAnalysisRunRef states which analysis produced a finding, or says
+// plainly that the finding predates run tracking. It never invents a
+// run: "legacy" is the correct answer, not a placeholder id.
+function renderAnalysisRunRef(p) {
+  if (!p.analysis_run_available || !p.analysis_run) {
+    return `<span class="prov-badge-legacy">Legacy</span> <span class="muted small">This finding predates analysis-run tracking, so the run that produced it was never recorded.</span>`;
+  }
+  const r = p.analysis_run;
+  return `<span class="mono small">${esc(r.analysis_run_id)}</span>
+    <div class="muted small">${esc(fmtTime(r.completed_at || r.started_at))}${r.tool_version ? " &middot; " + esc(r.tool_version) : ""}</div>`;
+}
+
+// evidenceDisplayName names an evidence object for a provenance chain.
+//
+// For an upload this is the filename. For a local-path collection
+// Collection.OriginalFilename is the absolute path the ANALYST typed,
+// which Tracefall has always displayed verbatim in the evidence list --
+// but a full server path is noise in a provenance chain and unreadable
+// at narrow widths, so the chain shows the last segment with the whole
+// value on hover. Nothing is hidden that the evidence list does not
+// already show in full.
+function evidenceDisplayName(c) {
+  const raw = c.original_filename || "";
+  if (!raw) return collectionLabel(c.collection_id);
+  const parts = raw.split(/[\\/]/).filter(Boolean);
+  return parts.length ? parts[parts.length - 1] : raw;
+}
+
+function renderProvenanceCollection(c) {
+  return `<div class="prov-collection">
+    <div class="small" title="${esc(c.original_filename || "")}">${esc(evidenceDisplayName(c))}
+      <span class="muted small">&middot; ${esc(SOURCE_TYPE_LABELS[c.source_type] || c.source_type)}</span></div>
+    <div class="muted small">Imported ${esc(fmtTime(c.imported_at))}</div>
+    ${
+      c.integrity_recorded
+        ? `<div class="muted small" style="margin-top:4px">Evidence integrity (SHA-512)</div>${integrityHashCell(c.integrity_sha512)}`
+        : `<div class="muted small">${esc(LEGACY_UNAVAILABLE)}: no integrity digest was recorded for this collection.</div>`
+    }
+  </div>`;
+}
+
+// toggleSourceFileProvenance shows what one source file produced.
+//
+// The counts come from the server, which derives them by counting real
+// relationships at read time. They are deliberately NOT read from a
+// stored counter: a counter drifts from the truth after evidence
+// deletion or re-analysis, and a provenance figure that can be wrong is
+// worse than one that costs a query.
+async function toggleSourceFileProvenance(caseId, btn) {
+  const host = btn.closest(".evidence-file-row").querySelector(".evidence-file-provenance");
+  if (!host.hidden) {
+    host.hidden = true;
+    btn.setAttribute("aria-expanded", "false");
+    btn.textContent = "Provenance";
+    return;
+  }
+  host.hidden = false;
+  btn.setAttribute("aria-expanded", "true");
+  btn.textContent = "Hide";
+  if (host.dataset.loaded) return;
+
+  host.innerHTML = `<p class="muted small">Loading provenance...</p>`;
+  try {
+    const p = await api(`/cases/${caseId}/sources/${btn.dataset.id}/provenance`);
+    host.innerHTML = renderSourceFileProvenance(p);
+    host.dataset.loaded = "1";
+    wireIntegrityHash(host);
+  } catch (e) {
+    host.innerHTML = errorBox(e);
+  }
+}
+
+function renderSourceFileProvenance(p) {
+  const sf = p.source_file;
+  const row = (label, value) =>
+    value ? `<div class="prov-step"><div class="prov-label">${label}</div><div class="prov-value">${value}</div></div>` : "";
+
+  return `<div class="prov-chain">
+    ${row("File", `<span class="mono small ${sf.deleted ? "prov-deleted" : ""}">${esc(sf.original_filename)}</span>
+       ${sf.deleted ? `<span class="prov-badge-deleted">Deleted</span>` : ""}`)}
+    ${row("Path in evidence", `<span class="mono small">${esc(sf.path)}</span>`)}
+    ${row("Artifact type", esc(artifactLabel(sf.artifact_type)))}
+    ${row("Parser", sf.parser ? `<span class="mono small">${esc(sf.parser)}</span>` : `<span class="muted small">${esc(LEGACY_UNAVAILABLE)}</span>`)}
+    ${row("Status", esc(SOURCE_FILE_STATUS_LABELS[sf.import_status] || sf.import_status))}
+    ${row("Imported", sf.imported_at ? esc(fmtTime(sf.imported_at)) : `<span class="muted small">Not recorded</span>`)}
+    ${sf.deleted ? row("Deleted", esc(fmtTime(sf.deleted_at))) : ""}
+    ${row("File hash (SHA-256)", sf.sha256 ? `<span class="mono small">${esc(sf.sha256)}</span>` : `<span class="muted small">Not recorded</span>`)}
+    ${row("Produced", `Used by <strong>${fmtCount(p.event_count)}</strong> event(s) &middot; contributed to <strong>${fmtCount(p.finding_count)}</strong> finding(s)`)}
+    ${p.collection ? row("Evidence", renderProvenanceCollection(p.collection)) : ""}
+  </div>`;
+}
+
+// LEGACY_UNAVAILABLE is the one wording used everywhere a record
+// predates the provenance being captured, so the distinction between
+// "unknown" and "absent" reads the same on every screen.
+const LEGACY_UNAVAILABLE = "Legacy - provenance unavailable";
+
+// ---------------- Integrity verification (Phase 11) ----------------
+//
+// Phase 10A RECORDED a SHA-512 of each collection's original evidence.
+// This is where an investigator re-checks it: has the evidence changed
+// since Tracefall first saw it?
+//
+// The recorded digest is a historical fact and is never rewritten by a
+// check. What the panel shows is a comparison, and it distinguishes
+// three outcomes rather than two -- verified, mismatch, and "could not
+// be checked" -- because not knowing is not the same as knowing the
+// evidence changed.
+
+function renderIntegrityVerifyPanel(caseId, cd) {
+  if (!cd.integrity_sha512) {
+    // Nothing to verify against. Say why, rather than offering a button
+    // that could only ever report a non-answer.
+    return `<div class="integrity-verify">
+      <p class="muted small">Integrity verification is unavailable for this collection: it was ingested before Tracefall recorded integrity digests, so there is no original digest to compare against.</p>
+    </div>`;
+  }
+  return `<div class="integrity-verify">
+    <button type="button" class="secondary small verify-integrity-btn"
+            aria-describedby="verify-result-${esc(cd.collection_id)}">Verify Integrity</button>
+    <div class="verify-result" id="verify-result-${esc(cd.collection_id)}" role="status" aria-live="polite"></div>
+  </div>`;
+}
+
+function wireIntegrityVerify(caseId, collectionId, root) {
+  const btn = root.querySelector(".verify-integrity-btn");
+  if (!btn) return;
+  const result = root.querySelector(".verify-result");
+
+  btn.addEventListener("click", async (e) => {
+    // The panel lives inside the collection card, whose own click
+    // handler toggles the card open/closed.
+    e.stopPropagation();
+    const original = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = "Verifying...";
+    // Real work, not a fake bar: re-hashing a large evidence object
+    // genuinely takes time, and the honest thing to show is that it is
+    // in progress, not an invented percentage.
+    result.innerHTML = `<p class="muted small">Recomputing SHA-512 over the original evidence...</p>`;
+    try {
+      const res = await api(`/cases/${caseId}/evidence/${collectionId}/verify-integrity`, { method: "POST" });
+      result.innerHTML = renderIntegrityResult(res);
+      wireIntegrityHash(result);
+    } catch (err) {
+      result.innerHTML = errorBox(err);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = original;
+    }
+  });
+}
+
+// renderIntegrityResult states the outcome in words first, then the
+// evidence for it.
+//
+// The status is carried by text and an icon, never by colour alone --
+// a red/green swap would be the only signal for a reader who cannot
+// distinguish them, on a result that matters.
+function renderIntegrityResult(res) {
+  const when = `<div class="muted small">Checked ${esc(fmtTime(res.verified_at))} &middot; ${esc(res.tool_version || "")}${
+    res.duration_ms ? ` &middot; ${fmtCount(res.duration_ms)} ms` : ""
+  }</div>`;
+
+  if (res.status === "verified") {
+    return `<div class="verify-box verify-ok">
+      <div class="verify-head"><span aria-hidden="true">&#10003;</span> <strong>INTEGRITY VERIFIED</strong></div>
+      <div class="small">The evidence hashes exactly as it did when Tracefall received it.</div>
+      <div class="muted small">Covered: ${esc(res.evidence_kind || "evidence")}</div>
+      ${integrityHashCell(res.recorded_sha512)}
+      ${when}
+    </div>`;
+  }
+  if (res.status === "mismatch") {
+    return `<div class="verify-box verify-bad">
+      <div class="verify-head"><span aria-hidden="true">&#9888;</span> <strong>INTEGRITY MISMATCH</strong></div>
+      <div class="small">The evidence does not hash as it did when Tracefall received it. It has changed on disk since ingestion.</div>
+      <div class="muted small">Covered: ${esc(res.evidence_kind || "evidence")}</div>
+      <div class="verify-digest">
+        <div class="muted small">Recorded at ingestion</div>
+        ${integrityHashCell(res.recorded_sha512)}
+      </div>
+      <div class="verify-digest">
+        <div class="muted small">Computed now</div>
+        ${integrityHashCell(res.computed_sha512)}
+      </div>
+      ${when}
+    </div>`;
+  }
+  return `<div class="verify-box verify-unknown">
+    <div class="verify-head"><span aria-hidden="true">&#9432;</span> <strong>NOT VERIFIED</strong></div>
+    <div class="small">${esc(res.reason || "This collection's integrity could not be checked.")}</div>
+    ${res.recorded_sha512 ? `<div class="verify-digest"><div class="muted small">Recorded at ingestion (unchanged)</div>${integrityHashCell(res.recorded_sha512)}</div>` : ""}
+    ${when}
+  </div>`;
+}
+
 // renderSeverityExplanation answers "why is this finding this severe?".
 //
 // Every statement it shows is generated by the server from either the
@@ -3891,6 +4440,10 @@ async function toggleFindingDetail(card, caseId, findingId) {
     `;
     detail.dataset.loaded = "1";
     wireDetailCells(detail);
+    // Provenance is loaded separately and appended, so a provenance
+    // failure can never blank the supporting-evidence table the analyst
+    // came here to read.
+    mountFindingProvenance(detail, caseId, findingId);
     detail.querySelectorAll(".view-raw-btn").forEach((btn) => {
       btn.addEventListener("click", async (ev) => {
         ev.stopPropagation();
@@ -4582,8 +5135,11 @@ function rowForEvidenceFile(f) {
           : esc(SOURCE_FILE_STATUS_LABELS[f.import_status] || f.import_status)
       }</span>
       <span class="evidence-file-actions">
-        <button type="button" class="small danger evidence-file-delete-btn" data-id="${esc(f.id)}" data-name="${esc(f.original_filename)}">Delete</button>
+        <button type="button" class="secondary small evidence-file-prov-btn" data-id="${esc(f.id)}"
+                aria-expanded="false" aria-label="Show provenance for ${esc(f.original_filename)}">Provenance</button>
+        ${canDelete() ? `<button type="button" class="small danger evidence-file-delete-btn" data-id="${esc(f.id)}" data-name="${esc(f.original_filename)}">Delete</button>` : ""}
       </span>
+      <div class="evidence-file-provenance" hidden></div>
     </div>`;
 }
 
@@ -4600,7 +5156,8 @@ function wireEvidenceFileSelection(caseId, container) {
     // .bulk-bar-host reserves this row's height whether or not a bar is
     // in it, so ticking a checkbox no longer pushes the whole evidence
     // list down (and the row under the cursor no longer moves).
-    if (selected.length === 0) {
+    // Suppressed for a non-admin, as above.
+    if (selected.length === 0 || !canDelete()) {
       bulkBar.innerHTML = "";
       return;
     }
@@ -4626,7 +5183,12 @@ function wireEvidenceFileSelection(caseId, container) {
   });
   container.addEventListener("click", (e) => {
     const btn = e.target.closest(".evidence-file-delete-btn");
-    if (btn) confirmAndDeleteEvidence(caseId, [btn.dataset.id]);
+    if (btn) {
+      confirmAndDeleteEvidence(caseId, [btn.dataset.id]);
+      return;
+    }
+    const provBtn = e.target.closest(".evidence-file-prov-btn");
+    if (provBtn) toggleSourceFileProvenance(caseId, provBtn);
   });
 
   // Scoped to the files currently shown, and labelled that way. Unlike

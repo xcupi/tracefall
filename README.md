@@ -71,13 +71,28 @@ TRACEFALL_HOST=0.0.0.0 TRACEFALL_PORT=9000 TRACEFALL_DB=/path/to/case.db go run 
 | `-data-dir` | `TRACEFALL_DATA_DIR` | `./data` | root directory for uploaded/extracted case evidence |
 | `-max-upload-mb` | `TRACEFALL_MAX_UPLOAD_MB` | `2048` | maximum accepted KAPE package upload size |
 
-**LAN access**: set `-host 0.0.0.0` (or `TRACEFALL_HOST=0.0.0.0`) to make
-Tracefall reachable from other machines on your network at
-`http://<this-machine's-LAN-IP>:8080`. There is still no
-authentication in this phase — see
-[docs/deployment.md](docs/deployment.md) for the full security model,
-firewall configuration, and why this must stay LAN-only, never exposed
-to the public internet.
+**LAN access requires authentication.** Set `-host 0.0.0.0` (or
+`TRACEFALL_HOST=0.0.0.0`) *together with* `TRACEFALL_AUTH=on` to make
+Tracefall reachable from other machines at
+`http://<this-machine's-LAN-IP>:8080`:
+
+```bash
+TRACEFALL_AUTH=on TRACEFALL_HOST=0.0.0.0 ./tracefall
+```
+
+A non-loopback bind **without** authentication is refused at startup —
+it would publish every case, all evidence, the audit log and every
+destructive endpoint to the network.
+
+On first start with authentication enabled, Tracefall creates a
+`tracefall` administrator, prints its generated password **once**, and
+requires that password to be changed before the account can do anything
+else. Restarting never regenerates or reprints it.
+
+Traffic is plain HTTP; put a TLS terminator in front for anything beyond
+a trusted network. See [docs/security.md](docs/security.md) for the
+security model and [docs/deployment.md](docs/deployment.md) for
+configuration and firewall setup.
 
 Open `http://localhost:8080` in a browser for the dashboard.
 
@@ -232,9 +247,14 @@ See also: [ARCHITECTURE.md](ARCHITECTURE.md),
   Task Scheduler XML, not raw binary EVTX/Prefetch/registry hive
   formats directly — see ARCHITECTURE.md for why, and
   docs/adding-parsers.md for how to add a raw-format parser later.
-- No authentication and no multi-user support — anyone who can reach the
-  configured host:port has full access. LAN-only, by design, in this
-  phase; see docs/deployment.md.
+- **No TLS.** Tracefall speaks plain HTTP and does not terminate TLS;
+  put a reverse proxy in front of it on any shared network.
+- **No per-case access control.** Any authenticated analyst can read and
+  export every case; the model is "everyone on this team may see this
+  team's cases". Roles separate *analysis* from *deletion and user
+  administration*, not case from case. See docs/security.md.
+- Deleting a case still removes that case's audit log with it; the
+  system-wide security log survives.
 - Detection rules are a representative starter set (7 rules), not
   comprehensive coverage.
 - No LLM/AI anywhere in this phase, by design.

@@ -51,12 +51,19 @@ import (
 	"tracefall/internal/prefetch"
 	"tracefall/internal/regf"
 	"tracefall/internal/store"
+	"tracefall/internal/version"
 )
 
 var (
 	ErrCaseNotFound       = errors.New("case not found")
 	ErrNotIngested        = errors.New("case has no ingested evidence yet")
 	ErrCollectionNotFound = errors.New("evidence collection not found")
+	// Phase 11 provenance lookups. Separate sentinels so a missing
+	// finding and a missing source file map to 404 individually rather
+	// than falling through to a generic 500 -- the same classification
+	// discipline Phase 8.2 established for discovery errors.
+	ErrFindingNotFound    = errors.New("finding not found")
+	ErrSourceFileNotFound = errors.New("source file not found")
 	// ErrCaseNameRequired means the case name was empty after trimming
 	// leading/trailing whitespace (see CreateCase's normalization).
 	ErrCaseNameRequired = errors.New("name is required")
@@ -155,10 +162,23 @@ type Service struct {
 	// consulted by the synchronous import path -- see importjob.go for
 	// why job state must not live in the database.
 	jobs *importJobs
+	// throttle rate-limits failed logins. In-memory for the same reason
+	// jobs is: throttling state is operational, not forensic -- it must
+	// not survive a restart, must not be exported with a case, and must
+	// not add a database write per failed guess.
+	throttle *loginThrottle
+	// actor is the identity behind the CURRENT request, set by
+	// WithActor on a per-request copy. The shared Service always has the
+	// zero value; only request-scoped copies carry an identity.
+	actor Principal
 }
 
 func NewService(s *store.Store, files *casefiles.Store) *Service {
-	return &Service{store: s, files: files, extractLimits: archive.DefaultLimits, ad1Limits: ad1.DefaultLimits, jobs: newImportJobs()}
+	return &Service{
+		store: s, files: files,
+		extractLimits: archive.DefaultLimits, ad1Limits: ad1.DefaultLimits,
+		jobs: newImportJobs(), throttle: newLoginThrottle(),
+	}
 }
 
 // ---------- Cases ----------
@@ -225,11 +245,37 @@ func (s *Service) audit(caseID, action, targetType, targetID, summary string) {
 		CaseID:     caseID,
 		Timestamp:  time.Now().UTC(),
 		Action:     action,
-		Actor:      model.ActorLocalUser,
+		Actor:      s.auditActor(),
 		TargetType: targetType,
 		TargetID:   targetID,
 		Summary:    summary,
 	})
+}
+
+// WithActor returns a Service bound to the identity behind one request.
+//
+// A shallow copy, not a mutation: Service is shared by every concurrent
+// request, so setting an actor field on it would let two requests
+// overwrite each other's identity and mis-attribute an audit entry --
+// which for a chain-of-custody record is worse than not recording one.
+// Every field of Service is a pointer or immutable config, so copying is
+// cheap and shares the same store, files and job registry.
+func (s *Service) WithActor(p Principal) *Service {
+	c := *s
+	c.actor = p
+	return &c
+}
+
+// auditActor returns the username to record for an action.
+//
+// Falls back to model.ActorLocalUser when no principal is bound, which
+// is exactly the single-operator localhost case: the audit trail of a
+// deployment that does not use authentication reads as it always did.
+func (s *Service) auditActor() string {
+	if s.actor.Username != "" {
+		return s.actor.Username
+	}
+	return model.ActorLocalUser
 }
 
 func (s *Service) checkDuplicateCase(name string) error {
@@ -1651,16 +1697,54 @@ func (s *Service) AnalyzeCase(caseID string) (AnalyzeResultSummary, error) {
 		return AnalyzeResultSummary{}, ErrNotIngested
 	}
 
+	// Phase 11: record the run BEFORE any work, so an analysis that dies
+	// mid-way leaves a row saying it started and never finished, rather
+	// than leaving no trace at all. The run row is provenance, not
+	// control flow -- if recording it fails, analysis still proceeds and
+	// the findings simply carry no run id, which is the same honest
+	// "unavailable" state legacy findings have.
+	run := model.AnalysisRun{
+		ID:          uuid.NewString(),
+		CaseID:      caseID,
+		StartedAt:   time.Now().UTC(),
+		Status:      model.AnalysisRunRunning,
+		ToolVersion: version.String(),
+	}
+	// Recording the run is best-effort, exactly like s.audit: provenance
+	// must never be the reason an analysis fails. If the insert fails the
+	// run id is cleared, and the findings simply carry no run id -- the
+	// same honest "unavailable" state a legacy finding has, rather than a
+	// run id pointing at a row that does not exist.
+	if err := s.store.CreateAnalysisRun(run); err != nil {
+		run.ID = ""
+	}
+	finishRun := func(status, errMsg string, events, findings, correlations int) {
+		if run.ID == "" {
+			return
+		}
+		_ = s.store.FinishAnalysisRun(run.ID, status, time.Now().UTC(), events, findings, correlations, errMsg)
+	}
+
 	s.audit(caseID, model.AuditAnalysisStarted, model.TargetCase, caseID, "Analysis started")
 
 	events, err := s.store.ListEvents(caseID)
 	if err != nil {
+		finishRun(model.AnalysisRunFailed, "loading events failed", 0, 0, 0)
 		s.audit(caseID, model.AuditAnalysisFailed, model.TargetCase, caseID, "Analysis failed: "+err.Error())
 		return AnalyzeResultSummary{}, fmt.Errorf("loading events: %w", err)
 	}
 
 	findings := detect.Run(caseID, events)
 	correlations := correlate.Run(caseID, events)
+
+	// Stamp the findings with the run that produced them. This happens
+	// AFTER detect.Run and touches only a provenance field, so no rule,
+	// severity, confidence or StableID input is affected -- a finding's
+	// identity and verdict are exactly what they would have been without
+	// run tracking.
+	for i := range findings {
+		findings[i].AnalysisRunID = run.ID
+	}
 
 	// ReplaceAnalysis is one atomic transaction (clear + save + mark
 	// analyzed) -- see its doc comment in internal/store/store.go. If it
@@ -1672,10 +1756,12 @@ func (s *Service) AnalyzeCase(caseID string) (AnalyzeResultSummary, error) {
 	// reflect the last successful analysis, and this error return is
 	// exactly what tells the caller the CURRENT attempt didn't succeed.
 	if err := s.store.ReplaceAnalysis(caseID, findings, correlations); err != nil {
+		finishRun(model.AnalysisRunFailed, "saving analysis results failed", len(events), 0, 0)
 		s.audit(caseID, model.AuditAnalysisFailed, model.TargetCase, caseID, "Analysis failed: "+err.Error())
 		return AnalyzeResultSummary{}, fmt.Errorf("saving analysis results: %w", err)
 	}
 
+	finishRun(model.AnalysisRunCompleted, "", len(events), len(findings), len(correlations))
 	s.audit(caseID, model.AuditAnalysisCompleted, model.TargetCase, caseID,
 		fmt.Sprintf("Analysis completed: %d finding(s), %d correlation(s)", len(findings), len(correlations)))
 	return AnalyzeResultSummary{Findings: findings, Correlations: correlations}, nil
@@ -1795,6 +1881,18 @@ type EventProvenance struct {
 	RawEvidence  model.RawEvidence        `json:"raw_evidence"`
 	SourceFile   model.SourceFile         `json:"source_file"`
 	Observations []model.EventObservation `json:"observations"`
+
+	// Collection completes the chain (Phase 11). Before this the view
+	// stopped at the source file, so answering "which evidence object,
+	// and what was its hash?" needed a separate lookup the UI had to know
+	// to make. Nil when the collection cannot be resolved.
+	Collection *ProvenanceCollection `json:"collection,omitempty"`
+
+	// TimestampKnown states explicitly whether this event's artifact
+	// recorded a time. Derivable from Event.Timestamp, but a provenance
+	// answer should not require the reader to know that a zero time is
+	// Tracefall's encoding of "no timestamp exists".
+	TimestampKnown bool `json:"timestamp_known"`
 }
 
 func (s *Service) EventProvenance(caseID, eventID string) (EventProvenance, error) {
@@ -1806,22 +1904,30 @@ func (s *Service) EventProvenance(caseID, eventID string) (EventProvenance, erro
 	if err != nil {
 		return EventProvenance{}, fmt.Errorf("raw evidence not found: %w", err)
 	}
-	sources, err := s.store.ListSourceFiles(caseID)
+	// Resolve the source file BY ID. This previously listed every source
+	// file in the case and scanned linearly for one row -- on a
+	// 7,000-file image that is a full table read per event provenance
+	// lookup, and the Finding provenance view issues one per supporting
+	// event. GetSourceFile also finds soft-deleted rows, which is what
+	// lets an event whose evidence was later removed still report where
+	// it came from.
+	sf, err := s.store.GetSourceFile(ev.SourceFileID)
 	if err != nil {
-		return EventProvenance{}, err
-	}
-	var sf model.SourceFile
-	for _, f := range sources {
-		if f.ID == ev.SourceFileID {
-			sf = f
-			break
-		}
+		sf = model.SourceFile{}
 	}
 	observations, err := s.store.ListEventObservations(eventID)
 	if err != nil {
 		return EventProvenance{}, err
 	}
-	return EventProvenance{Event: ev, RawEvidence: raw, SourceFile: sf, Observations: observations}, nil
+	out := EventProvenance{
+		Event: ev, RawEvidence: raw, SourceFile: sf, Observations: observations,
+		TimestampKnown: !ev.Timestamp.IsZero(),
+	}
+	if c, err := s.store.GetCollection(ev.CollectionID); err == nil && c.CaseID == caseID {
+		pc := provenanceCollection(c)
+		out.Collection = &pc
+	}
+	return out, nil
 }
 
 // ---------------- Investigations (Phase 5) ----------------

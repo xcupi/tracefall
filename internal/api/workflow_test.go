@@ -63,7 +63,7 @@ func TestNotes_HTTPLifecycle(t *testing.T) {
 		t.Fatalf("list notes: status %d, got %d notes", rec.Code, len(notes))
 	}
 
-	rec = doJSON(t, mux, "PATCH", "/api/notes/"+n.ID, map[string]string{"note": "confirmed: routine admin activity"}, nil)
+	rec = doJSON(t, mux, "PATCH", "/api/cases/"+c.ID+"/notes/"+n.ID, map[string]string{"note": "confirmed: routine admin activity"}, nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("update note: status %d, body %s", rec.Code, rec.Body.String())
 	}
@@ -72,7 +72,7 @@ func TestNotes_HTTPLifecycle(t *testing.T) {
 		t.Errorf("note text = %q, want updated text", notes[0].Text)
 	}
 
-	rec = doJSON(t, mux, "DELETE", "/api/notes/"+n.ID, nil, nil)
+	rec = doJSON(t, mux, "DELETE", "/api/cases/"+c.ID+"/notes/"+n.ID, nil, nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("delete note: status %d, body %s", rec.Code, rec.Body.String())
 	}

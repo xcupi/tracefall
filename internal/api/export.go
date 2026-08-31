@@ -16,6 +16,7 @@ import (
 
 	"tracefall/internal/investigate"
 	"tracefall/internal/model"
+	"tracefall/internal/version"
 )
 
 // CaseExport is the full Case JSON export (Phase 6 section 13.1) --
@@ -36,6 +37,21 @@ type CaseExport struct {
 	Tags             []model.Tag           `json:"tags"`
 	AuditLog         []model.AuditEvent    `json:"audit_log"`
 	ExportedAt       time.Time             `json:"exported_at"`
+
+	// Provenance (Phase 11) is ADDITIVE: every field above keeps its
+	// name, type and position, so an existing consumer of this export is
+	// unaffected. It records what produced the export and from what
+	// state, which the export could previously only imply.
+	//
+	// The evidence hashes are not repeated here -- Collections above
+	// already carries archive_hash and integrity_sha512 for every
+	// collection, and duplicating them would create two copies that could
+	// disagree.
+	ToolVersion string `json:"tool_version"`
+	// AnalysisRuns is the case's run history. Findings carry
+	// analysis_run_id, so a reader can attribute each finding to the run
+	// that produced it -- or see that it predates run tracking.
+	AnalysisRuns []model.AnalysisRun `json:"analysis_runs"`
 }
 
 // ExportCase assembles the full Case JSON export.
@@ -86,8 +102,18 @@ func (s *Service) ExportCase(caseID string) (CaseExport, error) {
 		return CaseExport{}, fmt.Errorf("loading audit log: %w", err)
 	}
 
+	// Best-effort, like the audit write below: an export must not fail
+	// because its run history could not be read. An empty list is the
+	// honest representation of "no runs recorded".
+	runs, err := s.store.ListAnalysisRuns(caseID)
+	if err != nil {
+		runs = []model.AnalysisRun{}
+	}
+
 	s.audit(caseID, model.AuditExport, model.TargetCase, caseID, "Case exported as JSON")
 	return CaseExport{
+		ToolVersion:      version.String(),
+		AnalysisRuns:     runs,
 		Case:             c,
 		Collections:      collections,
 		SourceFiles:      sourceFiles,

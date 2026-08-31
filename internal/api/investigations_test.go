@@ -12,7 +12,7 @@ import (
 // getInvestigations/getInvestigationDetail reuse the same doJSON/mustDecode
 // pattern as getFindings/getCorrelations in phase4_scenarios_test.go.
 
-func getInvestigations(t *testing.T, mux *http.ServeMux, caseID string) []model.Investigation {
+func getInvestigations(t *testing.T, mux http.Handler, caseID string) []model.Investigation {
 	t.Helper()
 	var invs []model.Investigation
 	rec := doJSON(t, mux, "GET", "/api/cases/"+caseID+"/investigations", nil, &invs)
@@ -22,7 +22,7 @@ func getInvestigations(t *testing.T, mux *http.ServeMux, caseID string) []model.
 	return invs
 }
 
-func getInvestigationDetail(t *testing.T, mux *http.ServeMux, caseID, investigationID string) InvestigationDetail {
+func getInvestigationDetail(t *testing.T, mux http.Handler, caseID, investigationID string) InvestigationDetail {
 	t.Helper()
 	var detail InvestigationDetail
 	rec := doJSON(t, mux, "GET", "/api/cases/"+caseID+"/investigations/"+investigationID, nil, &detail)

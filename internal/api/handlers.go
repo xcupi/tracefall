@@ -10,6 +10,7 @@ import (
 	"tracefall/internal/ad1"
 	"tracefall/internal/archive"
 	"tracefall/internal/model"
+	"tracefall/internal/store"
 )
 
 // NewRouter builds Tracefall's HTTP API mux. It registers only the JSON
@@ -46,8 +47,20 @@ import (
 // the dashboard so an analyst actually looking at the web UI sees the
 // "no authentication, don't expose this beyond a trusted LAN" warning
 // too, not just whoever reads the process's startup log.
-func NewRouter(svc *Service, logger *slog.Logger, maxUploadBytes int64, lanExposed bool) *http.ServeMux {
-	h := &handlers{svc: svc, log: logger, maxUploadBytes: maxUploadBytes, lanExposed: lanExposed}
+// NewRouter builds the API router with authentication DISABLED -- the
+// single-operator localhost mode Tracefall shipped with before Phase 12.
+//
+// Kept as-is so existing callers and the whole pre-Phase-12 test suite
+// continue to describe the behaviour they were written for. A LAN
+// deployment must use NewRouterWithAuth; cmd/tracefall refuses to start
+// otherwise (see cmd/tracefall/main.go).
+func NewRouter(svc *Service, logger *slog.Logger, maxUploadBytes int64, lanExposed bool) http.Handler {
+	return NewRouterWithAuth(svc, logger, maxUploadBytes, lanExposed, AuthConfig{})
+}
+
+// NewRouterWithAuth builds the API router with an explicit auth config.
+func NewRouterWithAuth(svc *Service, logger *slog.Logger, maxUploadBytes int64, lanExposed bool, authCfg AuthConfig) http.Handler {
+	h := &handlers{svc: svc, log: logger, maxUploadBytes: maxUploadBytes, lanExposed: lanExposed, auth: authCfg}
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("POST /api/cases", h.createCase)
@@ -83,6 +96,15 @@ func NewRouter(svc *Service, logger *slog.Logger, maxUploadBytes int64, lanExpos
 	mux.HandleFunc("DELETE /api/cases/{id}/evidence/{sourceFileID}", h.deleteSourceFile)
 	mux.HandleFunc("GET /api/cases/{id}/sources", h.sources)
 	mux.HandleFunc("GET /api/cases/{id}/events/{eventID}", h.eventProvenance)
+	// Phase 11: provenance and integrity. Read-only except
+	// verify-integrity, which writes only an audit entry recording that
+	// the check ran. Scoped under the existing /api/cases/{id}/... shape
+	// rather than a new top-level namespace, so case ownership is checked
+	// the same way every other route already checks it.
+	mux.HandleFunc("GET /api/cases/{id}/provenance", h.caseProvenance)
+	mux.HandleFunc("GET /api/cases/{id}/findings/{findingID}/provenance", h.findingProvenance)
+	mux.HandleFunc("GET /api/cases/{id}/sources/{sourceFileID}/provenance", h.sourceFileProvenance)
+	mux.HandleFunc("POST /api/cases/{id}/evidence/{collectionID}/verify-integrity", h.verifyIntegrity)
 	mux.HandleFunc("POST /api/cases/{id}/analyze", h.analyzeCase)
 	mux.HandleFunc("GET /api/cases/{id}/timeline", h.timeline)
 	mux.HandleFunc("GET /api/cases/{id}/findings", h.findings)
@@ -98,8 +120,12 @@ func NewRouter(svc *Service, logger *slog.Logger, maxUploadBytes int64, lanExpos
 	// Phase 6: analyst workflow (notes, tags, audit log, export).
 	mux.HandleFunc("GET /api/cases/{id}/notes", h.listNotes)
 	mux.HandleFunc("POST /api/cases/{id}/notes", h.createNote)
-	mux.HandleFunc("PATCH /api/notes/{noteID}", h.updateNote)
-	mux.HandleFunc("DELETE /api/notes/{noteID}", h.deleteNote)
+	// Case-scoped (Phase 12). These were previously /api/notes/{noteID}
+	// with no case in the path and no ownership check in the store, so a
+	// note id alone was enough to edit or delete a note in ANY case. The
+	// case is now part of both the route and the SQL predicate.
+	mux.HandleFunc("PATCH /api/cases/{id}/notes/{noteID}", h.updateNote)
+	mux.HandleFunc("DELETE /api/cases/{id}/notes/{noteID}", h.deleteNote)
 	mux.HandleFunc("GET /api/cases/{id}/tags", h.listTags)
 	mux.HandleFunc("POST /api/cases/{id}/tags", h.addTag)
 	mux.HandleFunc("DELETE /api/cases/{id}/tags", h.removeTag)
@@ -111,14 +137,43 @@ func NewRouter(svc *Service, logger *slog.Logger, maxUploadBytes int64, lanExpos
 
 	mux.HandleFunc("GET /api/healthz", h.healthz)
 
-	return mux
+	// Authentication and account administration (Phase 12).
+	// login/session are public; everything under /api/admin/ is
+	// admin-only by the requiredRole rule in middleware.go.
+	mux.HandleFunc("POST /api/auth/login", h.login)
+	mux.HandleFunc("POST /api/auth/logout", h.logout)
+	mux.HandleFunc("GET /api/auth/session", h.currentSession)
+	mux.HandleFunc("POST /api/auth/change-password", h.changeOwnPassword)
+	mux.HandleFunc("GET /api/admin/users", h.listUsers)
+	mux.HandleFunc("POST /api/admin/users", h.createUser)
+	mux.HandleFunc("DELETE /api/admin/users/{userID}", h.deleteUser)
+	mux.HandleFunc("PATCH /api/admin/users/{userID}", h.updateUser)
+	mux.HandleFunc("GET /api/admin/security-log", h.securityLog)
+
+	// Every API request passes through withSecurity, so authorization is
+	// enforced in one place rather than per handler. A route added later
+	// is protected by default; a forgotten check denies rather than opens.
+	return h.withSecurity(mux)
+}
+
+// as returns the Service bound to this request's authenticated identity,
+// so anything it audits is attributed to the user who actually asked.
+//
+// Handlers call h.as(r) rather than h.svc for exactly this reason; the
+// shared h.svc carries no identity and would record every action as the
+// generic local operator.
+func (h *handlers) as(r *http.Request) *Service {
+	return h.svc.WithActor(principalFrom(r))
 }
 
 type handlers struct {
 	svc            *Service
 	log            *slog.Logger
 	maxUploadBytes int64
-	lanExposed     bool
+	// auth controls whether requests must carry a valid session. See
+	// AuthConfig; the zero value is authentication disabled.
+	auth       AuthConfig
+	lanExposed bool
 }
 
 func (h *handlers) healthz(w http.ResponseWriter, r *http.Request) {
@@ -133,7 +188,7 @@ func (h *handlers) createCase(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	c, err := h.svc.CreateCase(req.Name, req.Description)
+	c, err := h.as(r).CreateCase(req.Name, req.Description)
 	if h.fail(w, err) {
 		return
 	}
@@ -141,7 +196,7 @@ func (h *handlers) createCase(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *handlers) listCases(w http.ResponseWriter, r *http.Request) {
-	cases, err := h.svc.ListCases()
+	cases, err := h.as(r).ListCases()
 	if h.fail(w, err) {
 		return
 	}
@@ -153,11 +208,11 @@ func (h *handlers) listCases(w http.ResponseWriter, r *http.Request) {
 
 func (h *handlers) getCase(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	c, err := h.svc.GetCase(id)
+	c, err := h.as(r).GetCase(id)
 	if h.fail(w, err) {
 		return
 	}
-	summary, err := h.svc.CaseSummary(id)
+	summary, err := h.as(r).CaseSummary(id)
 	if h.fail(w, err) {
 		return
 	}
@@ -172,7 +227,7 @@ func (h *handlers) getCase(w http.ResponseWriter, r *http.Request) {
 // internal/web always asks before calling this, since it's irreversible.
 func (h *handlers) deleteCase(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	if err := h.svc.DeleteCase(id); h.fail(w, err) {
+	if err := h.as(r).DeleteCase(id); h.fail(w, err) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"deleted_case_id": id})
@@ -192,7 +247,7 @@ func (h *handlers) deleteCases(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "case_ids is required")
 		return
 	}
-	res := h.svc.DeleteCases(req.CaseIDs)
+	res := h.as(r).DeleteCases(req.CaseIDs)
 	writeJSON(w, http.StatusOK, res)
 }
 
@@ -214,7 +269,7 @@ func (h *handlers) discoverEvidencePath(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusBadRequest, "path is required (a local filesystem directory containing the evidence package)")
 		return
 	}
-	res, err := h.svc.DiscoverEvidenceFromPath(id, req.Path)
+	res, err := h.as(r).DiscoverEvidenceFromPath(id, req.Path)
 	if h.fail(w, err) {
 		return
 	}
@@ -259,7 +314,7 @@ func (h *handlers) discoverEvidenceUpload(w http.ResponseWriter, r *http.Request
 	}
 	defer file.Close()
 
-	res, err := h.svc.DiscoverEvidenceFromUpload(id, file, header.Filename)
+	res, err := h.as(r).DiscoverEvidenceFromUpload(id, file, header.Filename)
 	if h.fail(w, err) {
 		return
 	}
@@ -280,7 +335,7 @@ func (h *handlers) importEvidence(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "source_file_ids is required (the discovered files to import)")
 		return
 	}
-	res, err := h.svc.ImportEvidence(id, collectionID, req.SourceFileIDs)
+	res, err := h.as(r).ImportEvidence(id, collectionID, req.SourceFileIDs)
 	if h.fail(w, err) {
 		return
 	}
@@ -292,7 +347,7 @@ func (h *handlers) importEvidence(w http.ResponseWriter, r *http.Request) {
 // internal/web always asks before calling this.
 func (h *handlers) deleteSourceFile(w http.ResponseWriter, r *http.Request) {
 	id, sourceFileID := r.PathValue("id"), r.PathValue("sourceFileID")
-	res, err := h.svc.DeleteSourceFile(id, sourceFileID)
+	res, err := h.as(r).DeleteSourceFile(id, sourceFileID)
 	if h.fail(w, err) {
 		return
 	}
@@ -313,7 +368,7 @@ func (h *handlers) deleteSourceFiles(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "source_file_ids is required")
 		return
 	}
-	res, err := h.svc.DeleteSourceFiles(id, req.SourceFileIDs)
+	res, err := h.as(r).DeleteSourceFiles(id, req.SourceFileIDs)
 	if h.fail(w, err) {
 		return
 	}
@@ -322,7 +377,7 @@ func (h *handlers) deleteSourceFiles(w http.ResponseWriter, r *http.Request) {
 
 func (h *handlers) listCollections(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	collections, err := h.svc.ListCollections(id)
+	collections, err := h.as(r).ListCollections(id)
 	if h.fail(w, err) {
 		return
 	}
@@ -333,11 +388,11 @@ func (h *handlers) listCollections(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *handlers) severityModel(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, h.svc.SeverityModelReport())
+	writeJSON(w, http.StatusOK, h.as(r).SeverityModelReport())
 }
 
 func (h *handlers) capabilities(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, h.svc.Capabilities())
+	writeJSON(w, http.StatusOK, h.as(r).Capabilities())
 }
 
 // startImport begins an import in the background and returns its job ID
@@ -346,7 +401,7 @@ func (h *handlers) capabilities(w http.ResponseWriter, r *http.Request) {
 // guarantee.
 // evidenceFiles serves one filtered page of a collection's catalog.
 func (h *handlers) evidenceFiles(w http.ResponseWriter, r *http.Request) {
-	page, err := h.svc.EvidenceFiles(
+	page, err := h.as(r).EvidenceFiles(
 		r.PathValue("id"), r.PathValue("collectionID"),
 		parseEvidenceFilter(r),
 		parsePageRequest(r, evidencePageSizes, defaultEvidencePageSize),
@@ -366,7 +421,7 @@ func (h *handlers) evidenceFiles(w http.ResponseWriter, r *http.Request) {
 // records -- which is what makes "select all matching" affordable on a
 // catalog the browser is deliberately never sent in full.
 func (h *handlers) evidenceFileIDs(w http.ResponseWriter, r *http.Request) {
-	ids, err := h.svc.EvidenceFileIDs(
+	ids, err := h.as(r).EvidenceFileIDs(
 		r.PathValue("id"), r.PathValue("collectionID"), parseEvidenceFilter(r))
 	if err != nil {
 		h.fail(w, err)
@@ -387,7 +442,7 @@ func (h *handlers) startImport(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "source_file_ids is required (the discovered files to import)")
 		return
 	}
-	jobID, err := h.svc.StartImport(id, collectionID, req.SourceFileIDs)
+	jobID, err := h.as(r).StartImport(id, collectionID, req.SourceFileIDs)
 	if err != nil {
 		if errors.Is(err, ErrImportInProgress) {
 			writeError(w, http.StatusConflict, err.Error())
@@ -404,7 +459,7 @@ func (h *handlers) startImport(w http.ResponseWriter, r *http.Request) {
 // stays responsive while the import holds the single write connection.
 func (h *handlers) importJobStatus(w http.ResponseWriter, r *http.Request) {
 	id, jobID := r.PathValue("id"), r.PathValue("jobID")
-	progress, err := h.svc.ImportJob(id, jobID)
+	progress, err := h.as(r).ImportJob(id, jobID)
 	if err != nil {
 		if errors.Is(err, ErrJobNotFound) {
 			writeError(w, http.StatusNotFound, "import job not found")
@@ -418,7 +473,7 @@ func (h *handlers) importJobStatus(w http.ResponseWriter, r *http.Request) {
 
 func (h *handlers) collectionDetail(w http.ResponseWriter, r *http.Request) {
 	id, collectionID := r.PathValue("id"), r.PathValue("collectionID")
-	detail, err := h.svc.CollectionDetail(id, collectionID)
+	detail, err := h.as(r).CollectionDetail(id, collectionID)
 	if h.fail(w, err) {
 		return
 	}
@@ -427,7 +482,7 @@ func (h *handlers) collectionDetail(w http.ResponseWriter, r *http.Request) {
 
 func (h *handlers) analyzeCase(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	res, err := h.svc.AnalyzeCase(id)
+	res, err := h.as(r).AnalyzeCase(id)
 	if h.fail(w, err) {
 		return
 	}
@@ -439,7 +494,7 @@ func (h *handlers) analyzeCase(w http.ResponseWriter, r *http.Request) {
 func (h *handlers) timeline(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	collectionID := r.URL.Query().Get("collection")
-	events, err := h.svc.Timeline(id, collectionID)
+	events, err := h.as(r).Timeline(id, collectionID)
 	if h.fail(w, err) {
 		return
 	}
@@ -451,7 +506,7 @@ func (h *handlers) timeline(w http.ResponseWriter, r *http.Request) {
 
 func (h *handlers) findings(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	findings, err := h.svc.Findings(id)
+	findings, err := h.as(r).Findings(id)
 	if h.fail(w, err) {
 		return
 	}
@@ -463,7 +518,7 @@ func (h *handlers) findings(w http.ResponseWriter, r *http.Request) {
 
 func (h *handlers) findingDetail(w http.ResponseWriter, r *http.Request) {
 	id, findingID := r.PathValue("id"), r.PathValue("findingID")
-	fd, err := h.svc.Finding(id, findingID)
+	fd, err := h.as(r).Finding(id, findingID)
 	if h.fail(w, err) {
 		return
 	}
@@ -472,7 +527,7 @@ func (h *handlers) findingDetail(w http.ResponseWriter, r *http.Request) {
 
 func (h *handlers) attack(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	techniques, err := h.svc.AttackSummary(id)
+	techniques, err := h.as(r).AttackSummary(id)
 	if h.fail(w, err) {
 		return
 	}
@@ -484,7 +539,7 @@ func (h *handlers) attack(w http.ResponseWriter, r *http.Request) {
 
 func (h *handlers) sources(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	sources, err := h.svc.Sources(id)
+	sources, err := h.as(r).Sources(id)
 	if h.fail(w, err) {
 		return
 	}
@@ -496,16 +551,58 @@ func (h *handlers) sources(w http.ResponseWriter, r *http.Request) {
 
 func (h *handlers) eventProvenance(w http.ResponseWriter, r *http.Request) {
 	id, eventID := r.PathValue("id"), r.PathValue("eventID")
-	prov, err := h.svc.EventProvenance(id, eventID)
+	prov, err := h.as(r).EventProvenance(id, eventID)
 	if h.fail(w, err) {
 		return
 	}
 	writeJSON(w, http.StatusOK, prov)
 }
 
+// caseProvenance returns the case-level chain-of-custody summary.
+func (h *handlers) caseProvenance(w http.ResponseWriter, r *http.Request) {
+	prov, err := h.as(r).CaseProvenanceFor(r.PathValue("id"))
+	if h.fail(w, err) {
+		return
+	}
+	writeJSON(w, http.StatusOK, prov)
+}
+
+// findingProvenance answers "what evidence is this finding standing on?".
+func (h *handlers) findingProvenance(w http.ResponseWriter, r *http.Request) {
+	prov, err := h.as(r).FindingProvenanceFor(r.PathValue("id"), r.PathValue("findingID"))
+	if h.fail(w, err) {
+		return
+	}
+	writeJSON(w, http.StatusOK, prov)
+}
+
+// sourceFileProvenance reports one source file and what it produced.
+func (h *handlers) sourceFileProvenance(w http.ResponseWriter, r *http.Request) {
+	prov, err := h.as(r).SourceFileProvenanceFor(r.PathValue("id"), r.PathValue("sourceFileID"))
+	if h.fail(w, err) {
+		return
+	}
+	writeJSON(w, http.StatusOK, prov)
+}
+
+// verifyIntegrity recomputes a collection's SHA-512 and compares it with
+// the digest recorded at ingestion.
+//
+// POST because it is an ACTION an analyst takes and it appends to the
+// audit trail -- not because it changes any evidence, which it never
+// does. A mismatch is a 200 carrying a mismatch result, not an HTTP
+// error: the request succeeded, and what it found is the answer.
+func (h *handlers) verifyIntegrity(w http.ResponseWriter, r *http.Request) {
+	res, err := h.as(r).VerifyCollectionIntegrity(r.PathValue("id"), r.PathValue("collectionID"))
+	if h.fail(w, err) {
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
 func (h *handlers) correlations(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	corr, err := h.svc.Correlations(id)
+	corr, err := h.as(r).Correlations(id)
 	if h.fail(w, err) {
 		return
 	}
@@ -517,7 +614,7 @@ func (h *handlers) correlations(w http.ResponseWriter, r *http.Request) {
 
 func (h *handlers) investigations(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	invs, err := h.svc.Investigations(id)
+	invs, err := h.as(r).Investigations(id)
 	if h.fail(w, err) {
 		return
 	}
@@ -529,7 +626,7 @@ func (h *handlers) investigations(w http.ResponseWriter, r *http.Request) {
 
 func (h *handlers) investigationDetail(w http.ResponseWriter, r *http.Request) {
 	id, investigationID := r.PathValue("id"), r.PathValue("investigationID")
-	detail, err := h.svc.Investigation(id, investigationID)
+	detail, err := h.as(r).Investigation(id, investigationID)
 	if h.fail(w, err) {
 		return
 	}
@@ -547,7 +644,9 @@ func (h *handlers) fail(w http.ResponseWriter, err error) bool {
 	var dupErr *DuplicateEvidenceError
 	var dupCaseErr *DuplicateCaseError
 	switch {
-	case errors.Is(err, ErrCaseNotFound), errors.Is(err, ErrCollectionNotFound):
+	case errors.Is(err, ErrCaseNotFound), errors.Is(err, ErrCollectionNotFound),
+		errors.Is(err, ErrFindingNotFound), errors.Is(err, ErrSourceFileNotFound),
+		errors.Is(err, store.ErrNoteNotFound):
 		writeError(w, http.StatusNotFound, err.Error())
 	case errors.As(err, &dupErr):
 		// Structured, not just a message, so the dashboard can show

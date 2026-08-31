@@ -151,6 +151,21 @@ clipboard API is unavailable. The copy control falls back to
 so that Ctrl+C copies the full value, reporting `Selected - press
 Ctrl+C` rather than asking the investigator to copy nothing.
 
+## Verifying integrity later
+
+Phase 11 added an explicit **Verify Integrity** action that recomputes a
+collection's SHA-512 and compares it with the digest recorded here at
+ingestion. It re-uses the exact functions documented above — the same
+upload-bytes, AD1-segment and directory-stream semantics — rather than a
+second implementation that could canonicalize differently.
+
+Verification is read-only and never rewrites the recorded digest, which
+is the historical fact it exists to check. See
+[provenance-and-custody.md](provenance-and-custody.md) for the three
+outcomes it distinguishes (`verified` / `mismatch` / `unavailable`), why
+"could not check" is kept separate from "changed", and what a mismatch
+does and does not prove.
+
 ## Collections ingested before integrity hashing
 
 `integrity_sha512` was added in Phase 10A. Collections ingested by an
