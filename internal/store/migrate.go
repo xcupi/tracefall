@@ -42,6 +42,20 @@ func migrate(db *sql.DB) error {
 	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_source_files_collection ON source_files(collection_id)`); err != nil {
 		return fmt.Errorf("creating source_files collection index: %w", err)
 	}
+	// (collection_id, path) matches ListSourceFilesByCollection's WHERE
+	// and ORDER BY together, so a collection's catalog is read out
+	// already ordered.
+	//
+	// Phase 10B pages that catalog on the server, which means the query
+	// runs on every page navigation rather than once per discovery. With
+	// only the collection_id index, SQLite found the rows by index and
+	// then SORTED them -- 56ms for a 7,074-file collection, on the single
+	// write connection, every page. Ordering by index instead removes the
+	// sort entirely. Purely additive: no column, statement or result
+	// order changes.
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_source_files_collection_path ON source_files(collection_id, path)`); err != nil {
+		return fmt.Errorf("creating source_files collection/path index: %w", err)
+	}
 	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_events_case_dedup ON events(case_id, dedup_hash)`); err != nil {
 		return fmt.Errorf("creating events dedup index: %w", err)
 	}
@@ -93,6 +107,13 @@ func migrate(db *sql.DB) error {
 	// pre-Phase-7 ever had one.
 	if err := addColumnIfMissing(db, "source_files", "embedded_hash", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return fmt.Errorf("migrating source_files (embedded_hash): %w", err)
+	}
+	// Phase 10A: forensic integrity hash on the evidence collection.
+	// Existing collections predate it and get '' -- honestly "not
+	// recorded" rather than a hash computed later over evidence that may
+	// since have been extracted, which would not be integrity evidence.
+	if err := addColumnIfMissing(db, "collections", "integrity_sha512", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return fmt.Errorf("migrating collections (integrity_sha512): %w", err)
 	}
 	// Must come last: it rebuilds source_files, so everything above that
 	// reads or writes the retired columns has to have run already.

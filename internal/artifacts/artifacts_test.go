@@ -1,6 +1,7 @@
 package artifacts_test
 
 import (
+	"strings"
 	"testing"
 
 	"tracefall/internal/artifacts"
@@ -73,11 +74,10 @@ func TestClassify_UnsupportedArtifactKeepsItsRealPriority(t *testing.T) {
 		wantPriority artifacts.Priority
 		wantFamily   artifacts.Family
 	}{
-		{"Windows/Prefetch/CMD.EXE-A1B2C3D4.pf", "Prefetch (raw .pf)", artifacts.PriorityHigh, artifacts.FamilyPrefetch},
 		{"C/$MFT", "NTFS $MFT", artifacts.PriorityHigh, artifacts.FamilyFileSystem},
 		{"Windows/appcompat/Programs/Amcache.hve", "Amcache hive", artifacts.PriorityHigh, artifacts.FamilyExecution},
 		{"Windows/System32/sru/SRUDB.dat", "SRUM database", artifacts.PriorityHigh, artifacts.FamilyExecution},
-		{"Users/j/AppData/.../PSReadline/ConsoleHost_history.txt", "PowerShell console history", artifacts.PriorityHigh, artifacts.FamilyPowerShell},
+		{"Users/j/AppData/Local/Microsoft/Windows/WebCache/WebCacheV01.dat", "Browser data (unsupported format)", artifacts.PriorityMedium, artifacts.FamilyBrowser},
 		{"Windows/Logs/CBS/CBS.log", "Log file", artifacts.PriorityLow, artifacts.FamilyLog},
 	}
 	for _, tc := range cases {
@@ -108,28 +108,55 @@ func TestClassify_UnsupportedArtifactKeepsItsRealPriority(t *testing.T) {
 	}
 }
 
-// A raw Prefetch file is HIGH priority and unsupported, while PECmd's CSV
-// export of the same evidence is HIGH priority and supported. Both facts
-// must be expressible at once -- that is the whole distinction.
-func TestClassify_SameFamilySupportedAndUnsupported(t *testing.T) {
+// Phase 10A made raw Prefetch, PowerShell console history and the two
+// browser history schemas genuinely supported. The registry must now say
+// so -- support is derived from the parser registry, so this proves the
+// parsers really are wired in rather than the table being edited.
+func TestClassify_Phase10AArtifactsAreNowSupported(t *testing.T) {
 	r := registry()
 
-	raw := r.Classify("Windows/Prefetch/CMD.EXE-A1B2C3D4.pf", "")
-	viaCSV := r.Classify("PECmd/20260301_PECmd_Output.csv", model.ArtifactPrefetch)
+	cases := []struct {
+		name         string
+		artifactType string
+		wantFamily   artifacts.Family
+		wantPriority artifacts.Priority
+	}{
+		{"raw Prefetch", model.ArtifactPrefetch, artifacts.FamilyPrefetch, artifacts.PriorityHigh},
+		{"PowerShell console history", model.ArtifactPowerShellHistory, artifacts.FamilyPowerShell, artifacts.PriorityHigh},
+		{"browser history", model.ArtifactBrowserHistory, artifacts.FamilyBrowser, artifacts.PriorityMedium},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := r.Classify("whatever/path", tc.artifactType)
+			if !c.Supported {
+				t.Error("classified as unsupported despite a registered parser")
+			}
+			if c.Parser == "" {
+				t.Error("supported but names no parser")
+			}
+			if c.Family != tc.wantFamily {
+				t.Errorf("family = %q, want %q", c.Family, tc.wantFamily)
+			}
+			if c.Priority != tc.wantPriority {
+				t.Errorf("priority = %q, want %q", c.Priority, tc.wantPriority)
+			}
+			if c.Reason != "" {
+				t.Errorf("a supported artifact carries an unsupported reason: %q", c.Reason)
+			}
+		})
+	}
+}
 
-	if raw.Family != viaCSV.Family {
-		t.Errorf("raw Prefetch family %q != PECmd family %q; an investigator filtering by family expects both",
-			raw.Family, viaCSV.Family)
-	}
-	if raw.Supported {
-		t.Error("raw .pf must not be marked supported")
-	}
-	if !viaCSV.Supported {
-		t.Error("PECmd CSV output must be marked supported")
-	}
-	if raw.Priority != artifacts.PriorityHigh || viaCSV.Priority != artifacts.PriorityHigh {
-		t.Errorf("priorities differ by support (%q vs %q); priority describes the artifact, not the parser",
-			raw.Priority, viaCSV.Priority)
+// The registry must no longer claim these are unparsed -- a stale
+// "Tracefall has no X parser" reason would actively mislead.
+func TestUnsupported_NoLongerClaimsTheNewParsersAreMissing(t *testing.T) {
+	for _, c := range registry().Unsupported() {
+		lower := strings.ToLower(c.Label + " " + c.Reason)
+		for _, gone := range []string{"no raw prefetch", "no consolehost_history parser", "has no browser history parser"} {
+			if strings.Contains(lower, gone) {
+				t.Errorf("unsupported entry %q still claims a parser is missing that now exists: %q", c.Label, c.Reason)
+			}
+		}
 	}
 }
 
@@ -169,9 +196,11 @@ func TestClassify_IsCaseInsensitive(t *testing.T) {
 
 // Windows paths arrive with backslashes from some containers.
 func TestClassify_HandlesBackslashPaths(t *testing.T) {
-	c := registry().Classify(`Windows\Prefetch\CMD.EXE-A1B2C3D4.pf`, "")
-	if c.Label != "Prefetch (raw .pf)" {
-		t.Errorf("label = %q; a backslash path must classify the same as a forward-slash one", c.Label)
+	r := registry()
+	back := r.Classify(`Windows\Logs\CBS\CBS.log`, "")
+	fwd := r.Classify("Windows/Logs/CBS/CBS.log", "")
+	if back.Label != fwd.Label {
+		t.Errorf("label = %q; a backslash path must classify the same as a forward-slash one (%q)", back.Label, fwd.Label)
 	}
 }
 

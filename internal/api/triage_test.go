@@ -66,13 +66,13 @@ func TestDiscovery_ClassifiesAndCountsTheWholeCatalog(t *testing.T) {
 	if cov.Discovered != 6 {
 		t.Errorf("discovered = %d, want 6", cov.Discovered)
 	}
-	// Security.evtx, NTUSER.DAT and COMPONENTS are all claimed by a
-	// parser; the .pf, $MFT and font are not.
-	if cov.Supported != 3 || cov.Unsupported != 3 {
-		t.Errorf("supported/unsupported = %d/%d, want 3/3", cov.Supported, cov.Unsupported)
+	// Security.evtx, NTUSER.DAT, COMPONENTS and (since Phase 10A) the
+	// .pf are all claimed by a parser; $MFT and the font are not.
+	if cov.Supported != 4 || cov.Unsupported != 2 {
+		t.Errorf("supported/unsupported = %d/%d, want 4/2", cov.Supported, cov.Unsupported)
 	}
-	if cov.Recommended != 3 {
-		t.Errorf("recommended = %d, want 3 (the supported high/critical files)", cov.Recommended)
+	if cov.Recommended != 4 {
+		t.Errorf("recommended = %d, want 4 (the supported high/critical files)", cov.Recommended)
 	}
 	if len(cov.ByType) == 0 {
 		t.Fatal("coverage has no per-artifact-type breakdown")
@@ -104,32 +104,57 @@ func TestDiscovery_ClassifiesAndCountsTheWholeCatalog(t *testing.T) {
 
 // A HIGH-priority artifact Tracefall cannot parse must appear that way
 // in the catalog -- not hidden, and not disguised as broken evidence.
+// $MFT is the example now that raw Prefetch is parsed.
 func TestDiscovery_UnsupportedHighPriorityArtifactIsVisible(t *testing.T) {
 	mux := newTestRouter(t)
 	c := mustCreateCase(t, mux, "Unsupported visibility")
 	disc := discoverBinaryDir(t, mux, c.ID, mixedCatalog())
 
-	pf, ok := sourceFileByPath(disc.SourceFiles, "Windows/Prefetch/CMD.EXE-A1B2C3D4.pf")
+	mft, ok := sourceFileByPath(disc.SourceFiles, "C/$MFT")
 	if !ok {
-		t.Fatal("the Prefetch file was not cataloged at all")
+		t.Fatal("$MFT was not cataloged at all")
 	}
-	if pf.Supported {
-		t.Error("raw Prefetch reported as supported")
+	if mft.Supported {
+		t.Error("$MFT reported as supported")
 	}
-	if pf.Priority != "high" {
-		t.Errorf("priority = %q, want high -- an unsupported artifact still has forensic value", pf.Priority)
+	if mft.Priority != "high" {
+		t.Errorf("priority = %q, want high -- an unsupported artifact still has forensic value", mft.Priority)
 	}
-	if pf.ImportStatus != model.SourceFileUnsupported {
-		t.Errorf("import status = %q, want unsupported", pf.ImportStatus)
+	if mft.ImportStatus != model.SourceFileUnsupported {
+		t.Errorf("import status = %q, want unsupported", mft.ImportStatus)
 	}
-	if pf.ImportStatus == model.SourceFileFailed {
+	if mft.ImportStatus == model.SourceFileFailed {
 		t.Error("an unsupported file must never be reported as a parse failure")
 	}
-	if pf.UnsupportedReason == "" {
-		t.Error("no reason given for why Prefetch cannot be parsed")
+	if mft.UnsupportedReason == "" {
+		t.Error("no reason given for why $MFT cannot be parsed")
 	}
-	if pf.Recommended {
+	if mft.Recommended {
 		t.Error("an unimportable file must not be recommended")
+	}
+}
+
+// Phase 10A: raw Prefetch is now SUPPORTED and selectable.
+func TestDiscovery_RawPrefetchIsNowSupported(t *testing.T) {
+	mux := newTestRouter(t)
+	c := mustCreateCase(t, mux, "Prefetch support")
+	disc := discoverBinaryDir(t, mux, c.ID, mixedCatalog())
+
+	pf, ok := sourceFileByPath(disc.SourceFiles, "Windows/Prefetch/CMD.EXE-A1B2C3D4.pf")
+	if !ok {
+		t.Fatal("the Prefetch file was not cataloged")
+	}
+	if !pf.Supported {
+		t.Error("raw Prefetch is still reported as unsupported")
+	}
+	if pf.Priority != "high" {
+		t.Errorf("priority = %q, want high", pf.Priority)
+	}
+	if pf.ImportStatus != model.SourceFileDiscovered {
+		t.Errorf("import status = %q, want discovered (selectable)", pf.ImportStatus)
+	}
+	if !pf.Recommended {
+		t.Error("a supported high-priority artifact should be recommended")
 	}
 }
 
@@ -389,11 +414,27 @@ func TestImport_ParseFailureIsDistinctFromUnsupported(t *testing.T) {
 		t.Errorf("COMPONENTS is not among the reported failures: %+v", res.ParseFailures)
 	}
 
-	// The unsupported files must NOT appear as parse failures.
+	// The genuinely unsupported files must NOT appear as parse failures.
 	for _, f := range res.ParseFailures {
-		if f.Filename == "CMD.EXE-A1B2C3D4.pf" || f.Filename == "$MFT" || f.Filename == "segoeui.ttf" {
+		if f.Filename == "$MFT" || f.Filename == "segoeui.ttf" {
 			t.Errorf("unsupported file %q reported as a parse failure", f.Filename)
 		}
+	}
+	// The .pf fixture IS a MAM-compressed Prefetch: supported (Tracefall
+	// recognizes it) but unreadable (Tracefall does not decompress it).
+	// That combination must surface as a parse failure with a reason, not
+	// as silence -- it is the Phase 10A limitation made visible.
+	var sawCompressed bool
+	for _, f := range res.ParseFailures {
+		if f.Filename == "CMD.EXE-A1B2C3D4.pf" {
+			sawCompressed = true
+			if f.Message == "" {
+				t.Error("the compressed Prefetch failure carries no message")
+			}
+		}
+	}
+	if !sawCompressed {
+		t.Errorf("the MAM-compressed Prefetch produced no parse failure: %+v", res.ParseFailures)
 	}
 
 	// And the failed file must be marked failed in the catalog, while the
@@ -410,9 +451,14 @@ func TestImport_ParseFailureIsDistinctFromUnsupported(t *testing.T) {
 			if s.ImportStatus != model.SourceFileImported {
 				t.Errorf("%s status = %q, want imported", s.OriginalFilename, s.ImportStatus)
 			}
-		case "CMD.EXE-A1B2C3D4.pf", "$MFT", "segoeui.ttf":
+		case "$MFT", "segoeui.ttf":
 			if s.ImportStatus != model.SourceFileUnsupported {
 				t.Errorf("%s status = %q, want unsupported", s.OriginalFilename, s.ImportStatus)
+			}
+		case "CMD.EXE-A1B2C3D4.pf":
+			// Supported but compressed: a parse failure, not unsupported.
+			if s.ImportStatus != model.SourceFileFailed {
+				t.Errorf("%s status = %q, want failed (MAM-compressed)", s.OriginalFilename, s.ImportStatus)
 			}
 		}
 	}

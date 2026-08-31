@@ -28,12 +28,23 @@ The invented cast is the same one the rest of Tracefall's fixtures use:
 | `NTUSER.DAT` | Valid REGF hive. Per-user `Run` and `RunOnce` entries. |
 | `Broken.evtx` | **Deliberately damaged**: a valid EVTX whose first chunk fails its CRC. Exercises partial recovery — the reader must skip that chunk, keep the rest, and report the failure. |
 | `Truncated.dat` | **Deliberately damaged**: a hive cut off at 2500 bytes, before its bins data. Must be rejected cleanly. |
+| `UPDATE.EXE-0BADF00D.pf` | Valid uncompressed SCCA Prefetch. Several retained execution times, so the parser emits one event per recorded run rather than one per file. |
+| `EDGE.EXE-11111111.pf` | **Deliberately unreadable**: a MAM (LZXPRESS Huffman) compressed Prefetch file, the Windows 10/11 form Tracefall does not decompress. Exercises the named `ErrCompressed` path, which must report the format rather than a generic parse failure. |
+| `ConsoleHost_history.txt` | PSReadLine console history. Records no timestamps at all, so its events carry a zero `Timestamp` and say so in `Extra` -- the file's mtime is deliberately never substituted. |
+| `History` | Valid Chromium history database (SQLite, tables `urls` + `visits`, WebKit epoch). Also the fixture proving parsing never mutates evidence: it is copied, with any sidecars, before SQLite opens it. |
+| `places.sqlite` | Valid Firefox history database (SQLite, tables `moz_places` + `moz_historyvisits`, Unix-microsecond epoch). |
 
 Together the two event logs and three hives tell one story an
 investigator can follow end to end: a password spray succeeds, the
 account gains privileges, a payload is written to `%TEMP%` and executed,
 it resolves a domain and connects out, and it persists four different
 ways.
+
+The Phase 10A additions extend the same invented story into the three
+artifact classes that phase taught Tracefall to read: the same operator
+browses to `updates.example.test`, runs the download-and-persist
+commands by hand at a PowerShell prompt, and leaves execution traces in
+Prefetch.
 
 ## These are generated, not hand-maintained
 

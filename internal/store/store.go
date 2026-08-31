@@ -250,13 +250,14 @@ func (s *Store) ListCases() ([]model.Case, error) {
 
 // ---------- Collections ----------
 
-const collectionCols = `id, case_id, created_at, source_type, original_filename, archive_hash, evidence_directory, ingestion_status, file_count, supported_file_count, unsupported_file_count, imported_file_count, parsed_event_count`
+const collectionCols = `id, case_id, created_at, source_type, original_filename, archive_hash, integrity_sha512, evidence_directory, ingestion_status, file_count, supported_file_count, unsupported_file_count, imported_file_count, parsed_event_count`
 
 func scanCollection(row interface{ Scan(...any) error }) (model.Collection, error) {
 	var c model.Collection
 	var createdAt string
 	err := row.Scan(&c.ID, &c.CaseID, &createdAt, &c.SourceType, &c.OriginalFilename, &c.ArchiveHash,
-		&c.EvidenceDirectory, &c.IngestionStatus, &c.FileCount, &c.SupportedFileCount, &c.UnsupportedFileCount, &c.ImportedFileCount, &c.ParsedEventCount)
+		&c.IntegritySHA512, &c.EvidenceDirectory, &c.IngestionStatus, &c.FileCount, &c.SupportedFileCount,
+		&c.UnsupportedFileCount, &c.ImportedFileCount, &c.ParsedEventCount)
 	if err != nil {
 		return model.Collection{}, err
 	}
@@ -280,9 +281,10 @@ type execer interface {
 }
 
 func insertCollection(db execer, c model.Collection) error {
-	_, err := db.Exec(`INSERT INTO collections (`+collectionCols+`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+	_, err := db.Exec(`INSERT INTO collections (`+collectionCols+`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		c.ID, c.CaseID, fmtTime(c.CreatedAt), c.SourceType, c.OriginalFilename, c.ArchiveHash,
-		c.EvidenceDirectory, c.IngestionStatus, c.FileCount, c.SupportedFileCount, c.UnsupportedFileCount, c.ImportedFileCount, c.ParsedEventCount)
+		c.IntegritySHA512, c.EvidenceDirectory, c.IngestionStatus, c.FileCount, c.SupportedFileCount,
+		c.UnsupportedFileCount, c.ImportedFileCount, c.ParsedEventCount)
 	if isUniqueConstraintViolation(err) {
 		return ErrDuplicateCollection
 	}
@@ -323,7 +325,13 @@ func (s *Store) CreateCollectionWithSourceFiles(c model.Collection, files []mode
 	return tx.Commit()
 }
 
-// UpdateCollection overwrites a collection's mutable fields (status and
+// UpdateCollection overwrites a collection's MUTABLE fields (status and
+// counts) only. It deliberately cannot touch archive_hash or
+// integrity_sha512: an evidence integrity hash that could be rewritten
+// after the fact would not be integrity evidence at all, so the column
+// is simply absent from this statement -- see docs/evidence-integrity.md.
+//
+// Original doc: overwrites a collection's mutable fields (status and
 // counts) -- called both when a discovery/import pass finishes and
 // whenever evidence deletion changes what a collection actually
 // contains (see Service.recomputeCollectionCounts).

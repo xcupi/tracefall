@@ -199,6 +199,10 @@ type CapabilityReport struct {
 type LabeledValue struct {
 	Value string `json:"value"`
 	Label string `json:"label"`
+	// Count is how many records in the whole catalog carry this value.
+	// Omitted where it is not meaningful (the capability report, which
+	// describes the build rather than a case).
+	Count int `json:"count,omitempty"`
 }
 
 // Capabilities reports this build's artifact coverage.

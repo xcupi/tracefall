@@ -25,9 +25,12 @@ import (
 
 	"tracefall/internal/model"
 	"tracefall/internal/parsers"
+	"tracefall/internal/parsers/browserhistory"
 	evtxnative "tracefall/internal/parsers/evtx"
 	"tracefall/internal/parsers/evtxcsv"
 	"tracefall/internal/parsers/pecmd"
+	"tracefall/internal/parsers/prefetchraw"
+	"tracefall/internal/parsers/pshistory"
 	"tracefall/internal/parsers/recmd"
 	"tracefall/internal/parsers/registry"
 	"tracefall/internal/parsers/scheduledtasks"
@@ -51,6 +54,12 @@ func Registry() []parsers.ArtifactParser {
 		// log that arrives under an unrecognized name.
 		evtxnative.New(),
 		registry.New(),
+		// Phase 10A. Ordered after the EZ Tools CSV parsers for the same
+		// reason: a collection holding both PECmd output and the .pf it
+		// came from classifies each by its own most specific match.
+		prefetchraw.New(),
+		pshistory.New(),
+		browserhistory.New(),
 	}
 }
 

@@ -53,15 +53,61 @@ async function api(path, opts) {
 // api() above: fetch needs to set its own multipart boundary in
 // Content-Type, which api()'s hardcoded "application/json" header would
 // clobber.
-async function apiUpload(path, file) {
-  const fd = new FormData();
-  fd.append("file", file);
-  const res = await fetch("/api" + path, { method: "POST", body: fd });
-  const body = await res.json().catch(() => null);
-  if (!res.ok) {
-    throw apiError(res, body);
-  }
-  return body;
+// apiUpload posts a file as multipart/form-data, reporting genuine
+// byte-level upload progress.
+//
+// It uses XMLHttpRequest rather than fetch because fetch still has no
+// upload-progress event: a fetch-based upload can report that it started
+// and that it finished, and nothing in between. For a two-gigabyte AD1
+// that is the difference between an investigator watching a real
+// transfer and watching a spinner with no idea whether anything is
+// happening.
+//
+// onProgress receives {loaded, total, lengthComputable}. When the browser
+// cannot determine the total (lengthComputable false), the caller is told
+// so and shows an indeterminate indicator rather than inventing a
+// percentage.
+function apiUpload(path, file, onProgress) {
+  return new Promise((resolve, reject) => {
+    const fd = new FormData();
+    fd.append("file", file);
+
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", "/api" + path, true);
+
+    if (onProgress) {
+      xhr.upload.addEventListener("progress", (e) => {
+        onProgress({ loaded: e.loaded, total: e.total, lengthComputable: e.lengthComputable });
+      });
+      // The last byte leaving the browser is NOT the end of the
+      // operation: the server still has to hash, inspect and catalog the
+      // evidence. Signalling that transition is the whole point of
+      // distinguishing the stages.
+      xhr.upload.addEventListener("load", () => {
+        onProgress({ loaded: file.size, total: file.size, lengthComputable: true, uploadComplete: true });
+      });
+    }
+
+    xhr.addEventListener("load", () => {
+      let body = null;
+      try {
+        body = JSON.parse(xhr.responseText);
+      } catch (_) {
+        body = null;
+      }
+      if (xhr.status >= 200 && xhr.status < 300) {
+        resolve(body);
+        return;
+      }
+      // Preserve the existing error shape so duplicate-evidence and
+      // validation errors render exactly as they did before.
+      reject(apiError({ status: xhr.status, statusText: xhr.statusText || `HTTP ${xhr.status}` }, body));
+    });
+    xhr.addEventListener("error", () => reject(new Error("the upload failed to reach the server")));
+    xhr.addEventListener("abort", () => reject(new Error("the upload was cancelled")));
+
+    xhr.send(fd);
+  });
 }
 
 function h(html) {
@@ -87,8 +133,24 @@ function esc(s) {
 // Tracefall's API returns is always UTC already (see
 // internal/normalize.Timestamp) -- this only formats for display, it
 // never converts a timezone.
+// isNoTimestamp recognizes an event whose artifact records no time at
+// all. Go marshals such a zero time.Time as "0001-01-01T00:00:00Z", and
+// rendering that literally puts a year-1 date on the screen -- a date
+// that was never in the evidence. The parsers deliberately refuse to
+// substitute a file mtime for a missing execution time (see
+// internal/parsers/pshistory), and the UI must not undo that by
+// displaying a fabricated one.
+function isNoTimestamp(ts) {
+  if (!ts) return true;
+  const d = new Date(ts);
+  return isNaN(d.getTime()) ? false : d.getUTCFullYear() <= 1;
+}
+
+const NO_TIMESTAMP_LABEL = "No timestamp";
+
 function fmtTime(ts) {
   if (!ts) return "-";
+  if (isNoTimestamp(ts)) return NO_TIMESTAMP_LABEL;
   const d = new Date(ts);
   if (isNaN(d.getTime())) return ts;
   return d.toISOString().replace("T", " ").replace(/\.\d+Z$/, "").replace(/Z$/, "") + " UTC";
@@ -96,6 +158,7 @@ function fmtTime(ts) {
 
 function fmtDate(ts) {
   if (!ts) return "-";
+  if (isNoTimestamp(ts)) return NO_TIMESTAMP_LABEL;
   const d = new Date(ts);
   if (isNaN(d.getTime())) return ts;
   return d.toLocaleDateString(undefined, { day: "2-digit", month: "short", year: "numeric" }) + " " + d.toISOString().slice(11, 16) + " UTC";
@@ -1229,7 +1292,9 @@ function route() {
   const caseMatch = hash.match(/^\/cases\/([^/]+)(?:\/(\w+))?$/);
   if (caseMatch) {
     const [, caseId, rawTab] = caseMatch;
-    const tab = rawTab || "summary";
+    // Overview is the landing view now that it is a destination rather
+    // than several screens of scrolling above every other view.
+    const tab = rawTab || "overview";
     // Same case already on screen: swap just the tab body. Falls through
     // to a full render when switchTab declines (different case, or the
     // chrome isn't mounted).
@@ -1423,15 +1488,173 @@ async function renderCaseDetail(caseId, tab) {
   // condition, which additionally offers the "Re-run analysis" action.
   const staleAnalysis = c.status !== "analyzed" && (summary.findings > 0 || summary.correlations > 0);
 
+  // ---- Application shell (Phase 10B) ----
+  //
+  // The horizontal tab strip is replaced by a sidebar. Two things follow
+  // from that and both matter:
+  //
+  //  * The case header stays mounted in <main>, so case identity, status
+  //    and priority are visible from every view -- an investigator must
+  //    never have to remember which case they are reading.
+  //  * The panels that used to sit permanently above the tabs (notes,
+  //    investigations preview, evidence collections, analysis) move into
+  //    an "Overview" view. They were several screens of scrolling in
+  //    front of every other tab; as a destination they cost nothing to
+  //    reach and nothing to scroll past.
   app.innerHTML = `
-    <p><a href="#/">&larr; All cases</a></p>
-    <div class="panel">
-      <div class="row between">
-        <div>
-          <h1>${esc(c.name)}</h1>
-          <div class="muted">${esc(c.description || "")}</div>
+    <div class="app-shell">
+      ${renderSidebar(caseId, c, tab)}
+      <main class="app-main" id="app-main">
+        ${renderCaseHeader(caseId, c, summary, staleAnalysis)}
+        <div id="tab-content"><p class="empty">Loading...</p></div>
+      </main>
+    </div>
+  `;
+
+  // Data the Overview view needs but that is fetched once, here, with
+  // the rest of the case. Held so switching away and back does not
+  // refetch what has not changed.
+  overviewData = { c, summary, collections, findings, attackTechniques, investigations };
+
+  wireSidebar(caseId);
+  wireCaseMetadataControls(caseId);
+  document.getElementById("delete-case-btn").addEventListener("click", () =>
+    confirmAndDeleteCases([caseId], () => {
+      window.location.hash = "#/";
+    })
+  );
+
+  renderedCaseId = caseId;
+  renderedTab = tab;
+  await renderTabContent(caseId, tab, collections);
+}
+
+// overviewData caches the case-level payloads the Overview view renders,
+// so moving between views does not refetch them.
+let overviewData = null;
+
+// CASE_NAV is the single definition of the case's navigation: order,
+// labels, and the route key each maps to. The sidebar renders from it
+// and switchTab marks the active item from it, so the two can never
+// disagree about what "findings" means.
+const CASE_NAV = [
+  { key: "overview", label: "Overview" },
+  { key: "evidence", label: "Evidence" },
+  { key: "summary", label: "Timeline" },
+  { key: "findings", label: "Findings" },
+  { key: "investigations", label: "Investigations" },
+  { key: "correlations", label: "Activity Chains" },
+  { key: "attack", label: "ATT&CK" },
+  { key: "audit", label: "Audit History" },
+];
+
+// renderSidebar draws the application navigation.
+//
+// It is a real <nav> of <a href> elements: these DO change location
+// (the hash route), so they are links, and middle-click/open-in-new-tab
+// keep working. The active item carries aria-current="page".
+function renderSidebar(caseId, c, tab) {
+  const item = (n) => {
+    const active = n.key === tab;
+    return `<a class="sidenav-item${active ? " active" : ""}" data-tab="${n.key}"
+               href="#/cases/${caseId}/${n.key}"${active ? ' aria-current="page"' : ""}>${n.label}</a>`;
+  };
+  return `
+    <a class="skip-link" href="#app-main">Skip to main content</a>
+    <button type="button" class="sidebar-toggle" id="sidebar-toggle"
+            aria-expanded="false" aria-controls="sidebar" aria-label="Open navigation menu">
+      <span class="sidebar-toggle-bars" aria-hidden="true"></span>
+      <span>Menu</span>
+    </button>
+    <div class="sidebar-scrim" id="sidebar-scrim" hidden></div>
+    <aside class="sidebar" id="sidebar">
+      <div class="sidebar-brand">Tracefall</div>
+      <nav class="sidenav" aria-label="Case navigation">
+        <div class="sidenav-group">
+          <div class="sidenav-heading" id="sidenav-case-heading">Case</div>
+          <div class="sidenav-case" title="${esc(c.name)}">${esc(c.name)}</div>
+          ${CASE_NAV.map(item).join("")}
         </div>
-        <div class="row">
+        <div class="sidenav-group">
+          <div class="sidenav-heading">System</div>
+          <a class="sidenav-item" href="#/">All Cases</a>
+        </div>
+      </nav>
+    </aside>`;
+}
+
+// wireSidebar handles the small-viewport menu.
+//
+// aria-expanded tracks the real state, focus moves into the panel when
+// it opens and back to the button when it closes, Escape closes it, and
+// choosing a destination closes it -- a menu that stayed open over the
+// content it just navigated to would hide the answer.
+function wireSidebar(caseId) {
+  const toggle = document.getElementById("sidebar-toggle");
+  const sidebar = document.getElementById("sidebar");
+  const scrim = document.getElementById("sidebar-scrim");
+  if (!toggle || !sidebar) return;
+
+  toggle.addEventListener("click", () => setSidebarOpen(!document.body.classList.contains("sidebar-open")));
+  scrim.addEventListener("click", () => closeSidebarAndRestoreFocus());
+  sidebar.addEventListener("click", (e) => {
+    if (e.target.closest("a")) setSidebarOpen(false);
+  });
+}
+
+// setSidebarOpen looks its elements up at CALL TIME rather than closing
+// over them.
+//
+// The sidebar is re-rendered on every case render, so a handler that
+// captured the elements would keep driving a detached toggle from a
+// previous render: Escape closed the menu (the body class is global) but
+// set aria-expanded on an element no longer in the document, leaving the
+// real button announcing "expanded" over a closed menu, and moving focus
+// to a detached node.
+function setSidebarOpen(open) {
+  const toggle = document.getElementById("sidebar-toggle");
+  const sidebar = document.getElementById("sidebar");
+  const scrim = document.getElementById("sidebar-scrim");
+  document.body.classList.toggle("sidebar-open", open);
+  if (toggle) {
+    toggle.setAttribute("aria-expanded", String(open));
+    toggle.setAttribute("aria-label", open ? "Close navigation menu" : "Open navigation menu");
+  }
+  if (scrim) scrim.hidden = !open;
+  if (open && sidebar) sidebar.querySelector(".sidenav-item")?.focus();
+}
+
+function closeSidebarAndRestoreFocus() {
+  setSidebarOpen(false);
+  document.getElementById("sidebar-toggle")?.focus();
+}
+
+// Registered ONCE for the life of the page, not per render -- see
+// setSidebarOpen. Re-registering per render accumulated a listener for
+// every case ever opened.
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && document.body.classList.contains("sidebar-open")) {
+    closeSidebarAndRestoreFocus();
+  }
+});
+
+// renderCaseHeader is the always-visible case identity band.
+//
+// Two rows by design (section 15): identity and actions on top,
+// metadata below. Both wrap rather than overflow, so a narrow viewport
+// stacks them instead of introducing a horizontal scrollbar -- and
+// nothing is hidden to achieve that, because case status and priority
+// are forensic context, not decoration.
+function renderCaseHeader(caseId, c, summary, staleAnalysis) {
+  return `
+    <header class="case-header">
+      <div class="case-header-top">
+        <div class="case-identity">
+          <h1>${esc(c.name)}</h1>
+          ${c.description ? `<div class="muted small">${esc(c.description)}</div>` : ""}
+          <div class="muted small mono case-id">${esc(c.id)}</div>
+        </div>
+        <div class="case-header-actions">
           ${statusBadge(c.status)}
           <div class="dropdown">
             <button type="button" class="secondary small" id="export-case-btn"
@@ -1445,41 +1668,53 @@ async function renderCaseDetail(caseId, tab) {
           <button type="button" class="danger small" id="delete-case-btn">Delete Case</button>
         </div>
       </div>
-      <div class="muted small mono" style="margin-top:6px">${esc(c.id)}</div>
 
-      <div class="row" style="margin-top:10px; gap:16px; flex-wrap:wrap">
-        <div>
-          <label class="muted small" for="case-status-select">Case status</label><br/>
+      <div class="case-meta">
+        <div class="case-meta-item">
+          <label class="muted small" for="case-status-select">Case status</label>
           <select id="case-status-select" class="filter-input">
-            ${["open", "investigating", "contained", "closed"].map((s) => `<option value="${s}" ${c.case_status === s ? "selected" : ""}>${s[0].toUpperCase() + s.slice(1)}</option>`).join("")}
+            ${["open", "investigating", "contained", "closed"].map((st) => `<option value="${st}" ${c.case_status === st ? "selected" : ""}>${st[0].toUpperCase() + st.slice(1)}</option>`).join("")}
           </select>
         </div>
-        <div>
-          <label class="muted small" for="case-priority-select">Priority</label><br/>
+        <div class="case-meta-item">
+          <label class="muted small" for="case-priority-select">Priority</label>
           <select id="case-priority-select" class="filter-input">
-            ${["low", "medium", "high", "critical"].map((p) => `<option value="${p}" ${c.priority === p ? "selected" : ""}>${p[0].toUpperCase() + p.slice(1)}</option>`).join("")}
+            ${["low", "medium", "high", "critical"].map((pr) => `<option value="${pr}" ${c.priority === pr ? "selected" : ""}>${pr[0].toUpperCase() + pr.slice(1)}</option>`).join("")}
           </select>
         </div>
-        <div>
-          <span class="muted small">Created</span><br/>
+        <div class="case-meta-item">
+          <span class="muted small">Created</span>
           <span class="small">${esc(fmtTime(c.created_at))}</span>
         </div>
-        <div>
-          <span class="muted small">Last analyzed</span><br/>
+        <div class="case-meta-item">
+          <span class="muted small">Last analyzed</span>
           <span class="small">${c.analyzed_at ? esc(fmtTime(c.analyzed_at)) : "Never analyzed"}</span>
         </div>
       </div>
       <div id="case-metadata-error"></div>
-
       ${
         staleAnalysis
-          ? `<div class="stale-banner" style="margin-top:12px">
+          ? `<div class="stale-banner">
         <strong>Evidence changed since last analysis</strong>
-        <div>The findings, correlations, investigations, and ATT&amp;CK techniques shown below (on every tab) are from the analysis run at ${esc(fmtTime(c.analyzed_at))} and do not reflect evidence added or removed since. Re-run analysis (below, under Evidence Collections) before treating these as current.</div>
+        <div>The findings, correlations, investigations, and ATT&amp;CK techniques shown on every view are from the analysis run at ${esc(fmtTime(c.analyzed_at))} and do not reflect evidence added or removed since. Re-run analysis (Overview &rarr; Evidence Collections) before treating these as current.</div>
       </div>`
           : ""
       }
+    </header>`;
+}
 
+// renderOverviewTab is the case's landing view: the panels that used to
+// sit permanently above the tab strip. Everything it renders and wires
+// is unchanged -- only where it lives has moved.
+function renderOverviewTab(content, caseId) {
+  if (!overviewData) {
+    content.innerHTML = `<p class="empty">Loading...</p>`;
+    return;
+  }
+  const { c, summary, collections, findings, attackTechniques, investigations } = overviewData;
+
+  content.innerHTML = `
+    <div class="panel">
       <div class="summary-grid">
         <div class="stat"><div class="n">${summary.collections}</div><div class="l">Collections</div></div>
         <div class="stat"><div class="n">${summary.imported_source_files}</div><div class="l">Imported source files</div></div>
@@ -1549,34 +1784,13 @@ async function renderCaseDetail(caseId, tab) {
     </div>
 
     <div class="panel" id="analysis-panel">${renderAnalysisAction(c, summary)}</div>
-
-    <div class="tabs">
-      ${tabLink(caseId, "investigations", "Investigations", tab)}
-      ${tabLink(caseId, "summary", "Timeline", tab)}
-      ${tabLink(caseId, "findings", "Findings", tab)}
-      ${tabLink(caseId, "attack", "ATT&CK", tab)}
-      ${tabLink(caseId, "correlations", "Activity Chains", tab)}
-      ${tabLink(caseId, "evidence", "Evidence", tab)}
-      ${tabLink(caseId, "audit", "Audit History", tab)}
-    </div>
-    <div id="tab-content" class="panel"><p class="empty">Loading...</p></div>
   `;
 
   wireEvidenceHeader(caseId);
   wireAnalysisAction(caseId);
   wireCollectionIntegrity(caseId, document.getElementById("collections-list"));
-  wireCaseMetadataControls(caseId);
   renderNotesSection(document.getElementById("case-notes"), caseId, "case", caseId);
   renderTagsSection(document.getElementById("case-tags"), caseId, "case", caseId);
-  document.getElementById("delete-case-btn").addEventListener("click", () =>
-    confirmAndDeleteCases([caseId], () => {
-      window.location.hash = "#/";
-    })
-  );
-
-  renderedCaseId = caseId;
-  renderedTab = tab;
-  await renderTabContent(caseId, tab, collections);
 }
 
 // renderTabContent renders exactly one tab into #tab-content. Split out
@@ -1588,6 +1802,9 @@ async function renderTabContent(caseId, tab, collections) {
   if (!content) return;
   try {
     switch (tab) {
+      case "overview":
+        renderOverviewTab(content, caseId);
+        break;
       case "investigations":
         await renderInvestigationsTab(content, caseId);
         break;
@@ -1634,8 +1851,11 @@ async function switchTab(caseId, tab) {
   tabScroll.set(renderedTab, window.scrollY);
   renderedTab = tab;
 
-  document.querySelectorAll(".tabs .tab").forEach((a) => {
-    a.classList.toggle("active", a.dataset.tab === tab);
+  document.querySelectorAll(".sidenav-item[data-tab]").forEach((a) => {
+    const active = a.dataset.tab === tab;
+    a.classList.toggle("active", active);
+    if (active) a.setAttribute("aria-current", "page");
+    else a.removeAttribute("aria-current");
   });
 
   // Hold the content box at its current height while the new tab loads,
@@ -1659,11 +1879,148 @@ async function switchTab(caseId, tab) {
   return true;
 }
 
-function tabLink(caseId, key, label, active) {
-  const cls = key === active || (key === "summary" && active === "summary") ? "tab active" : "tab";
-  // data-tab lets switchTab move the active marker without re-rendering
-  // the strip (and so without losing scroll position).
-  return `<a class="${cls}" data-tab="${key}" href="#/cases/${caseId}/${key}">${label}</a>`;
+// ---------------- Pagination (Phase 10B) ----------------
+//
+// ONE pagination implementation, shared by Evidence, Timeline, Findings
+// and Investigations. Four screens needing the same control is exactly
+// how four subtly different controls get written -- one that clamps an
+// out-of-range page and one that blanks, one that resets on filter and
+// one that does not -- so the behaviour is defined once here.
+//
+// The rule that matters forensically: a page is a VIEW, never a filter
+// on what exists. Every pager states the true total of matching records,
+// so a page boundary is never mistaken for the end of the evidence.
+
+// pagerStates holds one state object per pager, keyed by prefix. Like
+// filterStates it is scoped, so paging one case's Findings never
+// restores a page number from a different case.
+const pagerStates = new Map();
+
+// pagerFor returns the live state for a pager, creating it (or replacing
+// a state belonging to a different scope) as needed.
+function pagerFor(prefix, cfg) {
+  const sizes = cfg.sizes || [25, 50, 100];
+  const scope = cfg.scope || "";
+  const stored = pagerStates.get(prefix);
+  if (stored && stored.scope === scope) return stored;
+  const fresh = {
+    scope,
+    sizes,
+    page: 1,
+    pageSize: sizes.includes(cfg.defaultSize) ? cfg.defaultSize : sizes[0],
+  };
+  pagerStates.set(prefix, fresh);
+  return fresh;
+}
+
+// resetPage sends a pager back to page 1. Called whenever the RESULT SET
+// changes -- a filter, a search, a page-size change -- because staying on
+// page 7 of a result that now has two pages shows an empty screen and
+// reads as "no results".
+function resetPage(prefix) {
+  const st = pagerStates.get(prefix);
+  if (st) st.page = 1;
+}
+
+// paginate slices the current page out of an already-filtered, ordered
+// array, clamping the page if the set shrank underneath it.
+function paginate(prefix, items) {
+  const st = pagerStates.get(prefix);
+  if (!st) return { items, page: 1, pageSize: items.length, total: items.length, totalPages: 1, from: 1, to: items.length };
+  const total = items.length;
+  const totalPages = Math.max(1, Math.ceil(total / st.pageSize));
+  if (st.page > totalPages) st.page = totalPages;
+  if (st.page < 1) st.page = 1;
+  const start = (st.page - 1) * st.pageSize;
+  const slice = items.slice(start, start + st.pageSize);
+  return {
+    items: slice,
+    page: st.page,
+    pageSize: st.pageSize,
+    total,
+    totalPages,
+    from: total === 0 ? 0 : start + 1,
+    to: start + slice.length,
+  };
+}
+
+// renderPager draws the control. `p` is either the object paginate()
+// returned (client-side pagers) or the same shape built from a server
+// page response, so both kinds render identically.
+//
+// It is a <nav> with labelled buttons rather than links: these change a
+// view, not a location, and a screen reader announcing "link" for
+// something that does not navigate is a lie.
+function renderPager(prefix, p, opts) {
+  const o = opts || {};
+  const noun = o.noun || "records";
+  const sizes = (pagerStates.get(prefix) || {}).sizes || [25, 50, 100];
+  const first = p.page <= 1;
+  const last = p.page >= p.totalPages;
+  const btn = (action, label, aria, disabled) =>
+    `<button type="button" class="pager-btn" data-pager="${esc(prefix)}" data-page-action="${action}"
+             aria-label="${esc(aria)}"${disabled ? " disabled" : ""}>${label}</button>`;
+
+  return `
+    <nav class="pager" data-total-pages="${p.totalPages}" aria-label="${esc(o.label || "Pagination")}">
+      <div class="pager-summary small muted" role="status" aria-live="polite">
+        ${p.total === 0
+          ? `No ${esc(noun)}`
+          : `Showing <strong>${fmtCount(p.from)}–${fmtCount(p.to)}</strong> of <strong>${fmtCount(p.total)}</strong> ${esc(noun)}`}
+      </div>
+      <div class="pager-controls">
+        <label class="pager-size small muted">
+          <span>Per page</span>
+          <select class="filter-input" data-pager="${esc(prefix)}" data-page-size aria-label="Records per page">
+            ${sizes.map((n) => `<option value="${n}"${n === p.pageSize ? " selected" : ""}>${n}</option>`).join("")}
+          </select>
+        </label>
+        <div class="pager-nav">
+          ${btn("first", "&laquo;", "First page", first)}
+          ${btn("prev", "&lsaquo;", "Previous page", first)}
+          <span class="pager-position small" aria-current="page">Page ${fmtCount(p.page)} of ${fmtCount(p.totalPages)}</span>
+          ${btn("next", "&rsaquo;", "Next page", last)}
+          ${btn("last", "&raquo;", "Last page", last)}
+        </div>
+      </div>
+    </nav>`;
+}
+
+// wirePager delegates from a container, so the pager can be re-rendered
+// as part of the content it pages without needing to be re-wired.
+//
+// onChange is called after the state has already been updated, so a
+// caller only ever has to re-render.
+function wirePager(prefix, container, onChange) {
+  if (!container || container.dataset[`pagerWired${prefix}`]) return;
+  container.dataset[`pagerWired${prefix}`] = "1";
+
+  container.addEventListener("click", (e) => {
+    const b = e.target.closest(`.pager-btn[data-pager="${prefix}"]`);
+    if (!b || b.disabled) return;
+    const st = pagerStates.get(prefix);
+    if (!st) return;
+    const totalPages = Number(b.closest(".pager").dataset.totalPages || 1);
+    switch (b.dataset.pageAction) {
+      case "first": st.page = 1; break;
+      case "prev": st.page = Math.max(1, st.page - 1); break;
+      case "next": st.page = st.page + 1; break;
+      case "last": st.page = totalPages; break;
+    }
+    onChange();
+  });
+
+  container.addEventListener("change", (e) => {
+    const sel = e.target.closest(`select[data-pager="${prefix}"][data-page-size]`);
+    if (!sel) return;
+    const st = pagerStates.get(prefix);
+    if (!st) return;
+    st.pageSize = Number(sel.value);
+    // A page-size change re-cuts the whole result, so the old page
+    // number means nothing against the new pages.
+    st.page = 1;
+    onChange();
+  });
 }
 
 // ---------------- Evidence Collections header ----------------
@@ -1735,8 +2092,9 @@ function wireCollectionIntegrity(caseId, root) {
           <div class="integrity-grid">
             <div><span class="muted small">Collection ID</span><div class="mono small">${esc(cd.collection_id)}</div></div>
             <div><span class="muted small">Evidence package hash (SHA-256)</span><div class="mono small">${cd.archive_hash ? esc(cd.archive_hash) : "Unknown"}</div></div>
+            <div><span class="muted small">Evidence integrity (SHA-512)</span>${integrityHashCell(cd.integrity_sha512)}</div>
             <div><span class="muted small">Hosts observed</span><div class="small">${cd.hosts_observed && cd.hosts_observed.length ? esc(cd.hosts_observed.join(", ")) : "Unknown"}</div></div>
-            <div><span class="muted small">Event time range</span><div class="small">${cd.earliest_event ? esc(fmtTime(cd.earliest_event)) + " &rarr; " + esc(fmtTime(cd.latest_event)) : "Unknown"}</div></div>
+            <div><span class="muted small">Event time range</span><div class="small">${cd.earliest_event ? esc(fmtTime(cd.earliest_event)) + " &rarr; " + esc(fmtTime(cd.latest_event)) : "Unknown"}${cd.undated_events ? `<div class="muted small" title="These events are real observations, but their artifact records no time, so they fall outside the range above rather than being placed on it.">+ ${cd.undated_events} event(s) with no timestamp</div>` : ""}</div></div>
           </div>
           <div class="muted small" style="margin-top:8px">Parser coverage</div>
           ${
@@ -1775,6 +2133,7 @@ function wireCollectionIntegrity(caseId, root) {
           }
         `;
         detail.dataset.loaded = "1";
+        wireIntegrityHash(detail);
       } catch (e) {
         detail.innerHTML = errorBox(e);
       }
@@ -2037,10 +2396,28 @@ function wireEvidenceHeader(caseId) {
 
     uploadBtn.disabled = true;
     uploadBtn.textContent = "Uploading...";
-    progress.innerHTML = uploadStep("Uploading and inspecting evidence...", false);
+    // Four stages, each corresponding to work that actually happens:
+    // bytes leaving the browser, the server hashing and identifying the
+    // upload, discovery cataloging every file inside it, and the
+    // selection screen being ready. See renderUploadProgress.
+    let stage = { phase: "uploading", loaded: 0, total: file.size, lengthComputable: file.size > 0 };
+    const paint = () => (progress.innerHTML = renderUploadProgress(stage));
+    paint();
 
     try {
-      const disc = await apiUpload(`/cases/${caseId}/evidence`, file);
+      const disc = await apiUpload(`/cases/${caseId}/evidence`, file, (p) => {
+        if (p.uploadComplete) {
+          // Every byte is on the server; it is now hashing and
+          // identifying the evidence. Staying at "100% uploading" here
+          // would tell the investigator the operation had finished when
+          // the slowest part may just have started.
+          stage = { phase: "inspecting" };
+        } else {
+          stage = { phase: "uploading", loaded: p.loaded, total: p.total, lengthComputable: p.lengthComputable };
+        }
+        paint();
+      });
+      stage = { phase: "ready" };
       progress.innerHTML = renderDiscoveryResults(disc);
       wireDiscoverySelection(progress, caseId, disc.collection.collection_id, disc);
     } catch (e) {
@@ -2072,6 +2449,77 @@ function wireEvidenceHeader(caseId) {
       ingestBtn.textContent = "Discover";
     }
   });
+}
+
+// renderUploadProgress shows where a browser upload actually is.
+//
+// Four stages, each backed by real work:
+//
+//   uploading   bytes leaving the browser -- a genuine percentage from
+//               XMLHttpRequest's upload progress events, never a timer
+//   inspecting  every byte is on the server, which is hashing (SHA-256
+//               for duplicate detection and SHA-512 for integrity) and
+//               identifying the container. Indeterminate: the server
+//               does not stream progress for this step, so no percentage
+//               is invented for it
+//   cataloging  discovery is walking and classifying every file inside
+//   ready       the selection screen is up
+//
+// The upload bar is NEVER left sitting at 100% while the server works:
+// that would report the operation as finished when the slowest part may
+// have just started.
+const UPLOAD_STAGES = [
+  { key: "uploading", label: "Uploading" },
+  { key: "inspecting", label: "Inspecting" },
+  { key: "cataloging", label: "Cataloging" },
+  { key: "ready", label: "Ready for selection" },
+];
+
+function renderUploadProgress(stage) {
+  const activeIndex = UPLOAD_STAGES.findIndex((s) => s.key === stage.phase);
+  const steps = UPLOAD_STAGES.map((s, i) => {
+    const state = i < activeIndex ? "done" : i === activeIndex ? "active" : "pending";
+    return `<span class="upload-stage upload-stage-${state}">${
+      state === "done" ? "&check; " : ""
+    }${esc(s.label)}</span>`;
+  }).join('<span class="upload-stage-sep" aria-hidden="true">&rsaquo;</span>');
+
+  const uploading = stage.phase === "uploading";
+  const known = uploading && stage.lengthComputable && stage.total > 0;
+  const pct = known ? Math.floor((stage.loaded / stage.total) * 100) : -1;
+
+  return `
+    <div class="panel import-progress" style="background:var(--bg-panel); margin-top:var(--space-3); margin-bottom:0">
+      <h3>Uploading evidence</h3>
+      <div class="upload-stages small">${steps}</div>
+      <div class="progress-track${pct < 0 ? " indeterminate" : ""}" role="progressbar"
+           ${pct < 0 ? 'aria-valuetext="in progress"' : `aria-valuenow="${pct}" aria-valuemin="0" aria-valuemax="100"`}>
+        <div class="progress-fill" style="${pct < 0 ? "" : `width:${pct}%`}"></div>
+      </div>
+      <div class="row between small" style="margin-top:var(--space-2)">
+        <span>${pct < 0 ? esc(uploadStageNote(stage.phase)) : `${pct}%`}</span>
+        ${
+          known
+            ? `<span class="muted">${esc(fmtBytes(stage.loaded))} / ${esc(fmtBytes(stage.total))}</span>`
+            : ""
+        }
+      </div>
+    </div>`;
+}
+
+// uploadStageNote says what is happening whenever there is no honest
+// percentage to show.
+function uploadStageNote(phase) {
+  switch (phase) {
+    case "inspecting":
+      return "Hashing and identifying the uploaded evidence...";
+    case "cataloging":
+      return "Cataloging files inside the evidence...";
+    case "ready":
+      return "Ready";
+    default:
+      return "Uploading... (total size unknown)";
+  }
 }
 
 // uploadStep renders one line of the upload progress list. done=true
@@ -2114,35 +2562,25 @@ const SOURCE_FILE_STATUS_LABELS = {
 //     investigator who filtered to "Registry" and pressed Select All
 //     must not silently queue seven thousand files for import.
 
-// evidenceCatalog holds the discovery result currently being triaged,
-// keyed by the container element's collection ID so the upload and
-// local-path screens never read each other's state.
+// evidenceCatalogs holds the live SELECTION for the collection being
+// triaged, keyed by collection ID so the upload and local-path screens
+// never read each other's state.
+//
+// It no longer holds the catalog itself (Phase 10B): the catalog lives
+// on the server and arrives one page at a time. What has to persist
+// across pages is the selection, and only the selection.
 const evidenceCatalogs = new Map();
-
-// MAX_EVIDENCE_ROWS caps how many rows are rendered at once. Filtering
-// is what makes a large catalog usable, so the cap exists to keep the
-// unfiltered first render cheap rather than to hide evidence: the count
-// line always states the true total, and narrowing the filter reveals
-// anything beyond the cap.
-const MAX_EVIDENCE_ROWS = 400;
 
 const PRIORITY_LABELS = { critical: "Critical", high: "High", medium: "Medium", low: "Low", unknown: "Unknown" };
 
 // renderDiscoveryResults is the FILE SELECTION SCREEN.
+//
+// Phase 10B made it server-paginated. The screen no longer holds the
+// catalog: it holds a page of it, plus a SELECTION of stable IDs. That
+// split is what lets a 7,000-file image be triaged without the browser
+// ever receiving 7,000 rows.
 function renderDiscoveryResults(disc) {
-  const files = disc.source_files || [];
   const coverage = disc.coverage || {};
-  const prefix = "ev";
-
-  // Filter vocabularies are derived from the catalog itself, so a
-  // dropdown only ever offers values that are actually present.
-  const families = filterOptions(files.map((f) => f.family_label));
-  const priorities = filterOptions(
-    files.map((f) => f.priority),
-    (p) => PRIORITY_LABELS[p] || p
-  );
-  const statuses = filterOptions(files.map(evidenceStatusValue), (v) => EVIDENCE_STATUS_LABELS[v] || v);
-
   return `
     <div class="panel" style="background:var(--bg-panel-2); margin-top:12px; margin-bottom:0">
       <h3>Select evidence to import</h3>
@@ -2155,24 +2593,19 @@ function renderDiscoveryResults(disc) {
       <div class="evidence-toolbar">
         <input type="search" id="ev-search" class="evidence-search" placeholder="Search evidence..."
                aria-label="Search evidence by filename, path, artifact type or source" autocomplete="off" />
-        ${renderFilterBar(prefix, { scope: disc.collection.collection_id, family: families, priority: priorities, status: statuses })}
+        <div id="ev-filters"></div>
       </div>
 
       <div class="row evidence-actions">
-        <button type="button" class="secondary small" id="ev-select-recommended">Select recommended (<span id="ev-recommended-count">${coverage.recommended || 0}</span>)</button>
-        <button type="button" class="secondary small" id="ev-select-filtered">Select all shown</button>
+        <button type="button" class="secondary small" id="ev-select-recommended">Select recommended (<span id="ev-recommended-count">${fmtCount(coverage.recommended || 0)}</span>)</button>
+        <button type="button" class="secondary small" id="ev-select-page">Select page</button>
+        <button type="button" class="secondary small" id="ev-select-all">Select all matching</button>
         <button type="button" class="secondary small" id="ev-clear">Clear selection</button>
-        <span class="evidence-counts small muted" id="ev-counts"></span>
       </div>
+      <div id="ev-selection-note"></div>
 
-      <div class="table-wrap"><table class="data-table">
-        <thead><tr>
-          <th></th><th>Filename</th><th>Path</th><th>Artifact type</th><th>Priority</th><th>Size</th><th>Status</th>
-        </tr></thead>
-        <tbody id="ev-rows"></tbody>
-      </table></div>
-      <p class="empty" id="ev-empty" hidden>No files match the current search and filters.</p>
-      <p class="muted small" id="ev-truncated" hidden></p>
+      <div id="ev-list" class="evidence-list"><p class="empty">Loading evidence...</p></div>
+      <div id="ev-pager"></div>
 
       <div class="row" style="margin-top:var(--space-3); align-items:center; gap:var(--space-3)">
         <button id="import-selected-btn" disabled>Import Selected (<span id="import-selected-count">0</span>)</button>
@@ -2181,6 +2614,98 @@ function renderDiscoveryResults(disc) {
       <div id="import-progress-panel"></div>
       <div id="import-result"></div>
     </div>`;
+}
+
+// rowForDiscoveredFile renders one file as a table row.
+//
+// The Path column is gone. It was the widest column by far and forced
+// the whole table into horizontal scrolling, while being the one field
+// nobody reads in full at a glance. The path is still present three
+// ways -- truncated under the filename, in the title attribute, and in
+// full in the details row -- so nothing forensic was traded away to
+// make the table fit.
+function rowForDiscoveredFile(f, selected) {
+  const canSelect = f.import_status === "discovered" && f.supported;
+  const detailsId = `evd-${++cellIdCounter}`;
+  return `<tr class="evidence-row${canSelect ? "" : " muted"}" data-id="${esc(f.id)}">
+    <td class="ev-check"><input type="checkbox" class="discover-file-checkbox" data-id="${esc(f.id)}"
+        aria-label="Select ${esc(f.original_filename)}"
+        ${selected ? "checked" : ""} ${canSelect ? "" : "disabled"} /></td>
+    <td class="ev-name">
+      <div class="mono small ev-filename">${esc(f.original_filename)}</div>
+      <div class="muted ev-path" title="${esc(f.path)}">${esc(f.path)}</div>
+    </td>
+    <td class="small ev-type">${esc(f.type_label || artifactLabel(f.artifact_type))}</td>
+    <td class="ev-priority">${priorityBadge(f.priority)}</td>
+    <td class="small nowrap num ev-size">${fmtBytes(f.size_bytes)}</td>
+    <td class="ev-status">${evidenceStatusBadge(f)}</td>
+    <td class="ev-actions">
+      <button type="button" class="secondary small ev-details-btn" aria-expanded="false"
+              aria-controls="${detailsId}" data-details="${detailsId}">Details</button>
+    </td>
+  </tr>
+  <tr class="evidence-details-row" id="${detailsId}" hidden>
+    <td colspan="7">${evidenceDetails(f)}</td>
+  </tr>`;
+}
+
+// cardForDiscoveredFile is the same record below the 900px breakpoint,
+// where a seven-column table cannot fit without either horizontal
+// scrolling or unreadable type.
+function cardForDiscoveredFile(f, selected) {
+  const canSelect = f.import_status === "discovered" && f.supported;
+  const detailsId = `evdc-${++cellIdCounter}`;
+  return `<article class="evidence-card${canSelect ? "" : " muted"}" data-id="${esc(f.id)}">
+    <div class="evidence-card-head">
+      <input type="checkbox" class="discover-file-checkbox" data-id="${esc(f.id)}"
+             aria-label="Select ${esc(f.original_filename)}"
+             ${selected ? "checked" : ""} ${canSelect ? "" : "disabled"} />
+      <div class="evidence-card-title">
+        <div class="mono small ev-filename">${esc(f.original_filename)}</div>
+        <div class="muted ev-path" title="${esc(f.path)}">${esc(f.path)}</div>
+      </div>
+    </div>
+    <div class="evidence-card-meta">
+      <span class="small">${esc(f.type_label || artifactLabel(f.artifact_type))}</span>
+      ${priorityBadge(f.priority)}
+      ${evidenceStatusBadge(f)}
+      <span class="small muted nowrap">${fmtBytes(f.size_bytes)}</span>
+    </div>
+    <button type="button" class="secondary small ev-details-btn" aria-expanded="false"
+            aria-controls="${detailsId}" data-details="${detailsId}">Details</button>
+    <div class="evidence-card-details" id="${detailsId}" hidden>${evidenceDetails(f)}</div>
+  </article>`;
+}
+
+function evidenceStatusBadge(f) {
+  const canSelect = f.import_status === "discovered" && f.supported;
+  if (canSelect) return `<span class="badge status ok-badge">supported</span>`;
+  const status = evidenceStatusValue(f);
+  return `<span class="badge status${status === "failed" ? " critical" : ""}"${
+    f.unsupported_reason ? ` title="${esc(f.unsupported_reason)}"` : ""
+  }>${esc(EVIDENCE_STATUS_LABELS[status] || status)}</span>`;
+}
+
+// evidenceDetails is where everything the narrower table no longer shows
+// as a column still lives, in full and untruncated.
+function evidenceDetails(f) {
+  const row = (label, value) =>
+    value ? `<div class="ev-detail"><span class="muted small">${label}</span><div class="small mono ev-detail-value">${esc(value)}</div></div>` : "";
+  return `
+    <div class="ev-detail-grid">
+      ${row("Full path", f.path)}
+      ${row("Artifact type", f.type_label || artifactLabel(f.artifact_type))}
+      ${row("Artifact family", f.family_label)}
+      ${row("Parser", f.parser)}
+      ${row("Forensic priority", PRIORITY_LABELS[f.priority] || f.priority)}
+      ${row("Status", EVIDENCE_STATUS_LABELS[evidenceStatusValue(f)] || f.import_status)}
+      ${row("Size", fmtBytes(f.size_bytes))}
+      ${row("SHA-256", f.sha256)}
+      ${row("Embedded hash (from container)", f.embedded_hash)}
+      ${row("Source collection", collectionLabel(f.collection_id))}
+      ${row("Events imported", f.event_count ? String(f.event_count) : "")}
+    </div>
+    ${f.unsupported_reason ? `<p class="muted small ev-detail-reason">${esc(f.unsupported_reason)}</p>` : ""}`;
 }
 
 // EVIDENCE_STATUS_LABELS maps the status vocabulary the toolbar filters
@@ -2255,139 +2780,293 @@ function fmtCount(n) {
   return typeof n === "number" ? n.toLocaleString() : "0";
 }
 
-function rowForDiscoveredFile(f, selected) {
-  const selectable = f.import_status === "discovered" && f.supported;
-  const status = evidenceStatusValue(f);
-  const statusHTML = selectable
-    ? `<span class="badge status ok-badge">supported</span>`
-    : `<span class="badge status${status === "failed" ? " critical" : ""}" ${
-        f.unsupported_reason ? `title="${esc(f.unsupported_reason)}"` : ""
-      }>${esc(EVIDENCE_STATUS_LABELS[status] || status)}</span>`;
-
-  return `<tr class="${selectable ? "" : "muted"}" data-id="${esc(f.id)}">
-    <td><input type="checkbox" class="discover-file-checkbox" data-id="${esc(f.id)}" ${selected ? "checked" : ""} ${
-    selectable ? "" : "disabled"
-  } /></td>
-    <td class="mono small">${esc(f.original_filename)}</td>
-    <td class="mono small">${esc(f.path)}</td>
-    <td class="small">${esc(f.type_label || artifactLabel(f.artifact_type))}</td>
-    <td class="small">${priorityBadge(f.priority)}</td>
-    <td class="small nowrap">${fmtBytes(f.size_bytes)}</td>
-    <td class="small">${statusHTML}${
-    f.unsupported_reason ? `<div class="muted evidence-reason">${esc(f.unsupported_reason)}</div>` : ""
-  }</td>
-  </tr>`;
-}
-
-// evidenceMatches applies the search box and the toolbar filters to one
-// file. Search is case-insensitive substring matching across the fields
-// an investigator would actually type: filename, path, artifact type,
-// and the source/parser that produced it.
-function evidenceMatches(f, term, filters) {
-  if (term) {
-    const haystack = [
-      f.original_filename,
-      f.path,
-      f.type_label,
-      f.family_label,
-      f.artifact_type,
-      f.parser,
-    ]
-      .filter(Boolean)
-      .join(" ")
-      .toLowerCase();
-    if (!haystack.includes(term)) return false;
-  }
-  if (!selMatches(filters.family, f.family_label)) return false;
-  if (!selMatches(filters.priority, f.priority)) return false;
-  if (!selMatches(filters.status, evidenceStatusValue(f))) return false;
-  if (filters.recommendedOnly && !f.recommended) return false;
-  return true;
-}
-
 // wireDiscoverySelection powers the triage screen: search, filters,
-// selection, and the import action. Scoped to `container` so the upload
-// and local-path screens never interfere with each other.
+// pagination, selection, and the import action.
+//
+// # The selection model (Phase 10B section 4)
+//
+// Selection is an explicit set of STABLE SOURCE-FILE IDs, held here and
+// never in the DOM. That is the whole design, and it is what makes
+// paginated selection safe:
+//
+//   * A checkbox is a view of the set, not the set itself, so a file
+//     stays selected when its page is left, when the page size changes,
+//     and when a filter hides it.
+//   * "Select all matching" asks the SERVER to resolve the current
+//     filter to IDs (GET .../files/ids) and adds every one of them. It
+//     can never quietly mean "the first 100": the server returns the
+//     whole match set, and the count shown is the length of what was
+//     actually added.
+//   * The alternative -- storing the filter and re-evaluating it at
+//     import time -- was rejected. It would let the imported set differ
+//     from the set the investigator was looking at when they chose it.
+//
+// Because a selection can outlive the filter that produced it, a bulk
+// selection records the filter it was made under. When the filter later
+// changes, the mismatch is stated in plain language with an explicit
+// recompute, rather than silently importing files outside the filter on
+// screen.
 function wireDiscoverySelection(container, caseId, collectionId, disc) {
   const prefix = "ev";
-  const files = (disc && disc.source_files) || [];
+  const selected = new Set();
+  // bulk records a "select all matching" action: how many IDs it added
+  // and the filter signature in force at the time.
+  let bulk = null;
+  let currentPage = null;
+  let inFlight = 0;
 
-  // Selection is held here, not in the DOM -- see this section's header.
-  const selected = new Set(files.filter((f) => f.recommended).map((f) => f.id));
-  evidenceCatalogs.set(collectionId, { files, selected });
+  evidenceCatalogs.set(collectionId, { selected });
 
   const searchInput = container.querySelector("#ev-search");
-  const rowsHost = container.querySelector("#ev-rows");
-  const emptyEl = container.querySelector("#ev-empty");
-  const truncatedEl = container.querySelector("#ev-truncated");
-  const countsEl = container.querySelector("#ev-counts");
+  const filtersHost = container.querySelector("#ev-filters");
+  const listHost = container.querySelector("#ev-list");
+  const pagerHost = container.querySelector("#ev-pager");
+  const noteHost = container.querySelector("#ev-selection-note");
   const importBtn = container.querySelector("#import-selected-btn");
   const importCount = container.querySelector("#import-selected-count");
 
-  let recommendedOnly = false;
+  pagerFor(prefix, { scope: collectionId, sizes: [25, 50, 100, 250], defaultSize: 100 });
 
-  const currentFilters = () => ({ ...readFilterBar(prefix), recommendedOnly });
-  const visibleFiles = () => {
-    const term = (searchInput.value || "").trim().toLowerCase();
-    const filters = currentFilters();
-    return files.filter((f) => evidenceMatches(f, term, filters));
-  };
+  // filterSignature is the identity of "the current filter". Two
+  // selections made under the same signature are comparable; a change
+  // means a bulk selection no longer describes what is on screen.
+  //
+  // .toString(), NOT JSON.stringify: URLSearchParams has no own
+  // enumerable properties, so JSON.stringify returns "{}" for every
+  // filter alike. That made every signature compare equal, and a bulk
+  // selection made under one filter silently kept claiming to be
+  // "every file matching the current search and filters" after the
+  // filter changed -- the precise unsafe state this check exists to
+  // prevent.
+  const filterSignature = () => queryParams().toString();
 
-  function render() {
-    const shown = visibleFiles();
-    const capped = shown.slice(0, MAX_EVIDENCE_ROWS);
-    rowsHost.innerHTML = capped.map((f) => rowForDiscoveredFile(f, selected.has(f.id))).join("");
+  function queryParams() {
+    const f = filtersHost.dataset.ready ? readFilterBar(prefix) : {};
+    const q = new URLSearchParams();
+    const term = (searchInput.value || "").trim();
+    if (term) q.set("q", term);
+    (f.family || []).forEach((v) => q.append("family", v));
+    (f.priority || []).forEach((v) => q.append("priority", v));
+    (f.status || []).forEach((v) => q.append("status", v));
+    return q;
+  }
 
-    emptyEl.hidden = shown.length !== 0;
-    truncatedEl.hidden = shown.length <= MAX_EVIDENCE_ROWS;
-    if (shown.length > MAX_EVIDENCE_ROWS) {
-      truncatedEl.textContent = `Showing the first ${MAX_EVIDENCE_ROWS.toLocaleString()} of ${shown.length.toLocaleString()} matching files. Narrow the search or filters to see the rest; selection and "Select all shown" still apply to all ${shown.length.toLocaleString()}.`;
+  function pageQuery() {
+    const q = queryParams();
+    const st = pagerStates.get(prefix);
+    q.set("page", String(st.page));
+    q.set("page_size", String(st.pageSize));
+    return q;
+  }
+
+  async function load() {
+    const token = ++inFlight;
+    listHost.setAttribute("aria-busy", "true");
+    let page;
+    try {
+      page = await api(`/cases/${caseId}/evidence/${collectionId}/files?${pageQuery()}`);
+    } catch (e) {
+      if (token !== inFlight) return;
+      listHost.innerHTML = errorBox(e);
+      listHost.removeAttribute("aria-busy");
+      return;
     }
+    // A slower earlier request must never overwrite a newer page.
+    if (token !== inFlight) return;
+    currentPage = page;
+    listHost.removeAttribute("aria-busy");
+    renderFiltersOnce(page);
+    renderList(page);
+    renderSelectionNote(page);
+    pagerHost.innerHTML = renderPager(prefix, {
+      page: page.page, pageSize: page.page_size, total: page.total,
+      totalPages: page.total_pages,
+      from: page.total === 0 ? 0 : (page.page - 1) * page.page_size + 1,
+      to: (page.page - 1) * page.page_size + page.items.length,
+    }, { noun: "files", label: "Evidence pagination" });
+    updateImportButton();
+  }
 
-    // The counts line is where the "selected files you filtered away are
-    // still selected" promise is made visible, so it is never a surprise.
-    const hiddenSelected = files.filter((f) => selected.has(f.id) && !shown.includes(f)).length;
-    countsEl.textContent =
-      `${shown.length.toLocaleString()} of ${files.length.toLocaleString()} files shown` +
-      ` · ${selected.size.toLocaleString()} selected` +
-      (hiddenSelected ? ` (${hiddenSelected.toLocaleString()} not currently shown)` : "");
+  // The filter dropdowns are built from vocabularies the SERVER derives
+  // from the whole collection, so they describe every value present --
+  // not merely the values on the page being viewed. They are rendered
+  // once: rebuilding them on each page would close any open dropdown.
+  function renderFiltersOnce(page) {
+    if (filtersHost.dataset.ready) return;
+    const opts = (list) => list.map((v) => ({ value: v.value, label: `${v.label} (${fmtCount(v.count)})` }));
+    filtersHost.innerHTML = renderFilterBar(prefix, {
+      scope: collectionId,
+      family: opts(page.families || []),
+      priority: opts(page.priorities || []),
+      status: opts(page.statuses || []),
+    });
+    filtersHost.dataset.ready = "1";
+    wireFilterBar(prefix, onFilterChanged);
+  }
 
-    importCount.textContent = selected.size.toLocaleString();
+  function renderList(page) {
+    if (page.total === 0) {
+      listHost.innerHTML = `<p class="empty">No files match the current search and filters.</p>`;
+      return;
+    }
+    // Both presentations are always emitted; CSS shows exactly one, so
+    // resizing the window never needs a re-render or a JS media query.
+    listHost.innerHTML = `
+      <div class="table-wrap evidence-table-wrap"><table class="data-table evidence-table">
+        <thead><tr>
+          <th class="ev-check"><span class="sr-only">Select</span></th>
+          <th>Filename</th><th>Artifact type</th><th>Priority</th><th class="num">Size</th><th>Status</th><th>Details</th>
+        </tr></thead>
+        <tbody>${page.items.map((f) => rowForDiscoveredFile(f, selected.has(f.id))).join("")}</tbody>
+      </table></div>
+      <div class="evidence-cards">${page.items.map((f) => cardForDiscoveredFile(f, selected.has(f.id))).join("")}</div>`;
+  }
+
+  // renderSelectionNote is where the two selection modes are told apart
+  // in words, because "100 selected" and "7,074 selected" must never
+  // look the same to someone about to press Import.
+  function renderSelectionNote(page) {
+    const onPage = page.items.filter((f) => selected.has(f.id)).length;
+    const stale = bulk && bulk.signature !== filterSignature();
+
+    let html = `<div class="ev-counts small">`;
+    if (selected.size === 0) {
+      html += `<span class="muted">Nothing selected. ${fmtCount(page.selectable_total)} of ${fmtCount(page.total)} matching file(s) can be imported.</span>`;
+    } else if (bulk && !stale) {
+      html += `<strong>${fmtCount(selected.size)} matching file(s) selected</strong>
+               <span class="muted"> &middot; every file matching the current search and filters</span>`;
+    } else {
+      html += `<strong>${fmtCount(selected.size)} file(s) selected</strong>
+               <span class="muted"> &middot; ${fmtCount(onPage)} on this page</span>`;
+    }
+    html += `</div>`;
+
+    if (stale) {
+      // Explicit recompute, never a silent one: the selection still
+      // holds exactly the IDs chosen earlier, and the investigator
+      // decides whether that is still what they want.
+      html += `<div class="ev-selection-warning" role="status">
+        <strong>Filters changed since "Select all matching"</strong>
+        <div class="small">${fmtCount(selected.size)} file(s) are still selected from the earlier filter. Importing now would include files outside the filter currently on screen.</div>
+        <div class="row" style="margin-top:var(--space-2)">
+          <button type="button" class="secondary small" id="ev-reselect">Re-select all matching (${fmtCount(page.selectable_total)})</button>
+          <button type="button" class="secondary small" id="ev-clear-stale">Clear selection</button>
+        </div>
+      </div>`;
+    }
+    noteHost.innerHTML = html;
+
+    noteHost.querySelector("#ev-reselect")?.addEventListener("click", selectAllMatching);
+    noteHost.querySelector("#ev-clear-stale")?.addEventListener("click", clearSelection);
+  }
+
+  function updateImportButton() {
+    importCount.textContent = fmtCount(selected.size);
     importBtn.disabled = selected.size === 0 || importInFlight;
   }
 
-  rowsHost.addEventListener("change", (e) => {
+  function refreshSelectionUI() {
+    if (currentPage) renderSelectionNote(currentPage);
+    updateImportButton();
+  }
+
+  // Any change to the RESULT SET returns to page 1: staying on page 40
+  // of a result that now has three pages shows an empty screen and reads
+  // as "no matches".
+  function onFilterChanged() {
+    resetPage(prefix);
+    load();
+  }
+
+  async function selectAllMatching() {
+    const btn = container.querySelector("#ev-select-all");
+    const original = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = "Selecting...";
+    try {
+      const res = await api(`/cases/${caseId}/evidence/${collectionId}/files/ids?${queryParams()}`);
+      selected.clear();
+      (res.ids || []).forEach((id) => selected.add(id));
+      bulk = { signature: filterSignature(), count: selected.size };
+      await load();
+    } catch (e) {
+      container.querySelector("#import-error").innerHTML = errorBox(e);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = original;
+    }
+  }
+
+  function clearSelection() {
+    // Clears the ENTIRE selection, not just what is on screen.
+    selected.clear();
+    bulk = null;
+    listHost.querySelectorAll(".discover-file-checkbox").forEach((cb) => (cb.checked = false));
+    refreshSelectionUI();
+  }
+
+  // Individual ticks refine a bulk selection rather than invalidating
+  // it; the count shown updates, which is what the investigator is
+  // actually watching.
+  listHost.addEventListener("change", (e) => {
     const cb = e.target.closest(".discover-file-checkbox");
     if (!cb) return;
     if (cb.checked) selected.add(cb.dataset.id);
     else selected.delete(cb.dataset.id);
-    render();
+    // Both presentations render the same record, so keep them in step.
+    listHost.querySelectorAll(`.discover-file-checkbox[data-id="${cb.dataset.id}"]`)
+      .forEach((other) => (other.checked = cb.checked));
+    refreshSelectionUI();
   });
 
-  searchInput.addEventListener("input", debounceRender(render));
-  container.querySelector("#ev-clear-search")?.addEventListener("click", () => {
-    searchInput.value = "";
-    render();
+  listHost.addEventListener("click", (e) => {
+    const btn = e.target.closest(".ev-details-btn");
+    if (!btn) return;
+    const target = document.getElementById(btn.dataset.details);
+    if (!target) return;
+    const open = !target.hidden;
+    target.hidden = open;
+    btn.setAttribute("aria-expanded", String(!open));
+    btn.textContent = open ? "Details" : "Hide";
   });
 
-  wireFilterBar(prefix, render);
+  searchInput.addEventListener("input", debounceRender(onFilterChanged));
+  wirePager(prefix, container, load);
 
-  container.querySelector("#ev-select-recommended").addEventListener("click", () => {
-    files.forEach((f) => {
-      if (f.recommended) selected.add(f.id);
+  container.querySelector("#ev-select-page").addEventListener("click", () => {
+    (currentPage?.items || []).forEach((f) => {
+      if (f.supported && f.import_status === "discovered") selected.add(f.id);
     });
-    render();
+    listHost.querySelectorAll(".discover-file-checkbox:not(:disabled)").forEach((cb) => (cb.checked = true));
+    refreshSelectionUI();
   });
-  // Scoped to the CURRENT FILTERED VIEW, never the whole catalog.
-  container.querySelector("#ev-select-filtered").addEventListener("click", () => {
-    visibleFiles().forEach((f) => {
-      if (f.import_status === "discovered" && f.supported) selected.add(f.id);
-    });
-    render();
-  });
-  container.querySelector("#ev-clear").addEventListener("click", () => {
-    selected.clear();
-    render();
+  container.querySelector("#ev-select-all").addEventListener("click", selectAllMatching);
+  container.querySelector("#ev-clear").addEventListener("click", clearSelection);
+
+  // Phase 9A's "Select recommended", preserved: high/critical-priority
+  // files that can ACTUALLY be imported, across the whole catalog rather
+  // than the current filter. Unsupported files are never recommended,
+  // because selecting one would do nothing.
+  //
+  // It is additive and filter-independent, so it deliberately does NOT
+  // set the bulk-selection marker: it is not a claim about "everything
+  // matching the current filter", and flagging it stale when the filter
+  // changed would be a warning about something that was never true.
+  container.querySelector("#ev-select-recommended").addEventListener("click", async () => {
+    const btn = container.querySelector("#ev-select-recommended");
+    const original = btn.innerHTML;
+    btn.disabled = true;
+    btn.textContent = "Selecting...";
+    try {
+      const res = await api(`/cases/${caseId}/evidence/${collectionId}/files/ids?recommended=true`);
+      (res.ids || []).forEach((id) => selected.add(id));
+      await load();
+    } catch (e) {
+      container.querySelector("#import-error").innerHTML = errorBox(e);
+    } finally {
+      btn.disabled = false;
+      btn.innerHTML = original;
+    }
   });
 
   let importInFlight = false;
@@ -2409,11 +3088,11 @@ function wireDiscoverySelection(container, caseId, collectionId, disc) {
       progressHost.innerHTML = "";
       importInFlight = false;
       importBtn.textContent = originalLabel;
-      render();
+      updateImportButton();
     }
   });
 
-  render();
+  load();
 }
 
 // debounceRender keeps typing responsive on a large catalog: filtering
@@ -2701,8 +3380,14 @@ async function renderTimelineTab(content, caseId, collections) {
     <div id="timeline-body"></div>
   `;
 
+  pagerFor("tl", { scope: caseId, sizes: [25, 50, 100, 250], defaultSize: 50 });
+
   const rerender = () => renderTimelineRows(caseId, events, eventFindingIdx, eventCorrIdx, readFilterBar("tl"));
-  wireFilterBar("tl", rerender);
+  wireFilterBar("tl", () => {
+    resetPage("tl");
+    rerender();
+  });
+  wirePager("tl", content, rerender);
   rerender();
 }
 
@@ -2716,6 +3401,11 @@ function renderTimelineRows(caseId, events, eventFindingIdx, eventCorrIdx, filte
     body.innerHTML = `<p class="empty">No events match the current filters.</p>`;
     return;
   }
+  // Only the current page is built into the DOM. The filtered set is
+  // still counted in full above, and the ORDER is untouched -- paging
+  // slices an already-ordered array, so a page boundary never changes
+  // which event comes before which.
+  const page = paginate("tl", filtered);
   body.innerHTML = `
     <div class="table-wrap"><table class="data-table wide">
       <thead><tr>
@@ -2724,9 +3414,10 @@ function renderTimelineRows(caseId, events, eventFindingIdx, eventCorrIdx, filte
         <th>Finding</th><th>ATT&amp;CK</th><th>Source</th><th>Collection</th>
       </tr></thead>
       <tbody>
-        ${filtered.map((e) => rowForEvent(e, eventFindingIdx[e.id], eventCorrIdx[e.id])).join("")}
+        ${page.items.map((e) => rowForEvent(e, eventFindingIdx[e.id], eventCorrIdx[e.id])).join("")}
       </tbody>
     </table></div>
+    ${renderPager("tl", page, { noun: "events", label: "Timeline pagination" })}
   `;
   wireDetailCells(body);
   wireTimelineRowClicks(caseId, body);
@@ -2763,12 +3454,23 @@ function eventMatchesFilters(e, f, eventFindingIdx) {
 // buildEventCorrelationIndex -- their presence is what visually
 // distinguishes a plain observed event from one that's part of a
 // detection or a reconstructed activity chain.
+// eventTimeCell renders an event's time, or -- for artifacts that record
+// none -- says so plainly and explains why, quoting the parser's own
+// stated basis rather than inventing wording in the UI. A timestamp-less
+// event is still a real observation; what it is not is a point on a
+// clock, and the cell has to make that difference obvious at a glance.
+function eventTimeCell(e) {
+  if (!isNoTimestamp(e.timestamp)) return esc(fmtTime(e.timestamp));
+  const basis = (e.extra && e.extra.timestamp_basis) || "This artifact does not record a timestamp.";
+  return `<span class="no-timestamp" title="${esc(basis)}">${esc(NO_TIMESTAMP_LABEL)}</span>`;
+}
+
 function rowForEvent(e, relatedFindings, relatedCorrs) {
   const sev = maxSeverity((relatedFindings || []).map((f) => f.severity));
   const techniques = techniquesForFindings(relatedFindings || []);
   const hasChain = (relatedCorrs || []).some((c) => c.correlation_type === "activity_chain");
   return `<tr class="timeline-row" data-event="${esc(e.id)}" tabindex="0">
-    <td class="mono small nowrap">${esc(fmtTime(e.timestamp))}</td>
+    <td class="mono small nowrap">${eventTimeCell(e)}</td>
     <td class="small nowrap">${categoryBadge(eventCategory(e))}</td>
     <td class="small nowrap">${esc(e.event_type)}${hasChain ? ' <span class="badge conf chain-badge" title="Part of a reconstructed activity chain">chain</span>' : ""}</td>
     <td class="mono small nowrap">${esc(e.host)}</td>
@@ -2897,8 +3599,14 @@ async function renderFindingsTab(content, caseId) {
     })}
     <div id="finding-cards"></div>
   `;
+  pagerFor("fd", { scope: caseId, sizes: [25, 50, 100], defaultSize: 50 });
+
   const rerender = () => renderFindingCards(caseId, findings, eventsById, eventCorrIdx, readFilterBar("fd"), statusIdx);
-  wireFilterBar("fd", rerender);
+  wireFilterBar("fd", () => {
+    resetPage("fd");
+    rerender();
+  });
+  wirePager("fd", content, rerender);
   rerender();
 }
 
@@ -2936,6 +3644,106 @@ function findingEntities(f, eventsById) {
   const hosts = Array.from(new Set(supporting.map((e) => e.host).filter(Boolean)));
   const users = Array.from(new Set(supporting.map((e) => e.user).filter(Boolean)));
   return { hosts, users };
+}
+
+// integrityHashCell renders the SHA-512 of the original evidence object.
+//
+// A 128-character hash is unreadable inline, so it is shown truncated
+// with the FULL value available three ways: the title attribute, the
+// copy button, and expansion. Truncation is display-only -- what gets
+// copied is always the complete digest, because a partially-copied hash
+// is worse than no hash at all.
+function integrityHashCell(hash) {
+  if (!hash) {
+    return `<div class="mono small muted">Not recorded (collection predates integrity hashing)</div>`;
+  }
+  return `<div class="integrity-hash">
+    <code class="hash-value" title="${esc(hash)}" data-full="${esc(hash)}">${esc(hash.slice(0, 32))}&hellip;</code>
+    <button type="button" class="secondary small copy-hash" data-hash="${esc(hash)}"
+            title="Copy the full SHA-512">Copy</button>
+    <button type="button" class="secondary small expand-hash" title="Show the full value">Show full</button>
+  </div>`;
+}
+
+// wireIntegrityHash makes the copy and expand controls work. Copying
+// uses the async clipboard API where available and falls back to a
+// hidden selection, so it still works over plain HTTP on a LAN -- which
+// is exactly how Tracefall is normally reached.
+function wireIntegrityHash(root) {
+  root.querySelectorAll(".copy-hash").forEach((btn) => {
+    btn.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      const value = btn.dataset.hash;
+      let ok = false;
+      try {
+        if (navigator.clipboard && window.isSecureContext) {
+          await navigator.clipboard.writeText(value);
+          ok = true;
+        }
+      } catch (_) {
+        ok = false;
+      }
+      if (!ok) {
+        const ta = document.createElement("textarea");
+        ta.value = value;
+        ta.setAttribute("readonly", "");
+        ta.style.position = "fixed";
+        ta.style.opacity = "0";
+        document.body.appendChild(ta);
+        ta.select();
+        try {
+          ok = document.execCommand("copy");
+        } catch (_) {
+          ok = false;
+        }
+        document.body.removeChild(ta);
+      }
+      if (!ok) {
+        // Neither the clipboard API (unavailable over plain HTTP, which
+        // is how Tracefall is normally reached on a LAN) nor execCommand
+        // worked. Rather than tell the investigator to press Ctrl+C with
+        // nothing selected, expand the hash in place and SELECT it, so
+        // Ctrl+C actually copies the complete digest.
+        const code = setHashExpanded(btn.parentElement, true);
+        const range = document.createRange();
+        range.selectNodeContents(code);
+        const sel = window.getSelection();
+        sel.removeAllRanges();
+        sel.addRange(range);
+      }
+      const original = btn.textContent;
+      btn.textContent = ok ? "Copied" : "Selected - press Ctrl+C";
+      btn.classList.toggle("copy-ok", ok);
+      setTimeout(() => {
+        btn.textContent = original;
+        btn.classList.remove("copy-ok");
+      }, 2000);
+    });
+  });
+  root.querySelectorAll(".expand-hash").forEach((btn) => {
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const code = btn.parentElement.querySelector(".hash-value");
+      setHashExpanded(btn.parentElement, code.textContent !== code.dataset.full);
+    });
+  });
+}
+
+// setHashExpanded is the SINGLE place the expanded/collapsed state of a
+// hash is changed, because two controls can change it: the "Show full"
+// toggle, and the copy fallback (which expands the value so it can be
+// selected). When the fallback expanded the hash on its own, the toggle
+// still read "Show full" while already showing the full value -- so
+// clicking it collapsed the hash the investigator had just been told to
+// press Ctrl+C on. Driving the text and the button label together makes
+// that state impossible.
+function setHashExpanded(container, expanded) {
+  const code = container.querySelector(".hash-value");
+  const btn = container.querySelector(".expand-hash");
+  const full = code.dataset.full;
+  code.textContent = expanded ? full : full.slice(0, 32) + "\u2026";
+  if (btn) btn.textContent = expanded ? "Show less" : "Show full";
+  return code;
 }
 
 // renderSeverityExplanation answers "why is this finding this severe?".
@@ -2989,7 +3797,8 @@ function renderFindingCards(caseId, findings, eventsById, eventCorrIdx, filters,
     return;
   }
 
-  filtered.forEach((f) => {
+  const page = paginate("fd", filtered);
+  page.items.forEach((f) => {
     const longDesc = f.description && f.description.length > 280;
     const descId = `desc-${++cellIdCounter}`;
     const descHtml = longDesc
@@ -3040,6 +3849,9 @@ function renderFindingCards(caseId, findings, eventsById, eventCorrIdx, filters,
     wireDetailCells(card);
     container.appendChild(card);
   });
+
+  container.insertAdjacentHTML("beforeend",
+    renderPager("fd", page, { noun: "findings", label: "Findings pagination" }));
 }
 
 async function toggleFindingDetail(card, caseId, findingId) {
@@ -3168,6 +3980,8 @@ async function renderInvestigationsTab(content, caseId) {
     })}
     <div id="investigations-body"></div>
   `;
+  pagerFor("iv", { scope: caseId, sizes: [25, 50, 100], defaultSize: 50 });
+
   const rerender = () => {
     const filters = readFilterBar("iv");
     const filtered = investigations.filter((inv) => {
@@ -3178,10 +3992,24 @@ async function renderInvestigationsTab(content, caseId) {
       return true;
     });
     document.getElementById("investigations-heading").textContent = `Investigations (${filtered.length} of ${investigations.length})`;
+    // Only the current page reaches the DOM: a case can hold a thousand
+    // investigations, and rendering them all is what makes the tab slow
+    // to open and impossible to scan.
+    const page = paginate("iv", filtered);
     document.getElementById("investigations-body").innerHTML =
-      filtered.length === 0 ? `<p class="empty">No investigations match the current filters.</p>` : renderInvestigationList(caseId, filtered);
+      filtered.length === 0
+        ? `<p class="empty">No investigations match the current filters.</p>`
+        : renderInvestigationList(caseId, page.items) + renderPager("iv", page, { noun: "investigations", label: "Investigations pagination" });
   };
-  wireFilterBar("iv", rerender);
+  // A filter change alters the result set, so page 7 of the old result
+  // is meaningless against the new one -- back to page 1. Pagination
+  // itself must NOT reset the filters, which is why only this direction
+  // is wired.
+  wireFilterBar("iv", () => {
+    resetPage("iv");
+    rerender();
+  });
+  wirePager("iv", content, rerender);
   rerender();
 }
 
@@ -3630,7 +4458,7 @@ async function renderEvidenceTab(content, caseId, collections) {
     <div class="row between">
       <h2>Evidence</h2>
       <div class="row">
-        <button type="button" class="secondary small" id="evidence-select-all-btn">Select All</button>
+        <button type="button" class="secondary small" id="evidence-select-all-btn">Select shown</button>
         <button type="button" class="secondary small" id="evidence-clear-btn">Clear</button>
       </div>
     </div>
@@ -3641,57 +4469,98 @@ async function renderEvidenceTab(content, caseId, collections) {
   for (const [i, col] of collections.entries()) {
     const card = h(`<div class="finding-card" style="cursor:default" data-collection="${esc(col.collection_id)}"><p class="empty">Loading files...</p></div>`);
     container.appendChild(card);
-    try {
-      const detail = await api(`/cases/${caseId}/evidence/${col.collection_id}`);
-      card.innerHTML = renderEvidenceCollectionCard(i, col, detail.source_files || []);
-    } catch (e) {
-      card.innerHTML = errorBox(e);
-    }
+    await mountCollectionFileList(card, caseId, col, i);
   }
   wireEvidenceFileSelection(caseId, container);
 }
 
-// renderEvidenceCollectionCard shows one collection's imported files as
-// the primary itemized list (checkbox, artifact type, size, event
-// count, Delete), with the collection's discovered-but-not-yet-imported
-// or unsupported files tucked into a collapsed <details> below -- the
-// main list stays focused on actual evidence, not clutter.
-function renderEvidenceCollectionCard(index, col, files) {
-  const imported = files.filter((f) => f.import_status === "imported");
-  const other = files.filter((f) => f.import_status !== "imported");
+// mountCollectionFileList renders one collection's files, a page at a
+// time, from the same server-paginated endpoint the selection screen
+// uses.
+//
+// Before Phase 10B this rendered every file the collection held. On a
+// 7,074-file image that was a megabyte of markup in one card -- the
+// exact "renders a large number of evidence rows at once" problem, just
+// on a different screen from the one usually blamed for it.
+async function mountCollectionFileList(card, caseId, col, index) {
+  // A pager per collection: two collections on screen page independently.
+  const prefix = `evc${index}`;
+  pagerFor(prefix, { scope: col.collection_id, sizes: [25, 50, 100, 250], defaultSize: 50 });
+
+  // Imported files are the default view -- this screen is about evidence
+  // actually in the case. Everything else stays one control away rather
+  // than padding the list.
+  let status = "imported";
+
+  async function load() {
+    const st = pagerStates.get(prefix);
+    const q = new URLSearchParams({ page: String(st.page), page_size: String(st.pageSize) });
+    if (status) q.set("status", status);
+    try {
+      const page = await api(`/cases/${caseId}/evidence/${col.collection_id}/files?${q}`);
+      card.innerHTML = renderEvidenceCollectionCard(index, col, page, status, prefix);
+    } catch (e) {
+      card.innerHTML = errorBox(e);
+    }
+  }
+
+  card.addEventListener("change", (e) => {
+    const sel = e.target.closest(`select[data-evstatus="${prefix}"]`);
+    if (!sel) return;
+    status = sel.value;
+    resetPage(prefix);
+    load();
+  });
+  wirePager(prefix, card, load);
+  await load();
+}
+
+// renderEvidenceCollectionCard shows one page of a collection's files.
+//
+// The status control replaces the old "imported list plus a collapsed
+// <details> of everything else" split. That split rendered BOTH lists in
+// full, so a large collection paid for every file twice over; a filter
+// the server applies costs one page either way, and lets an
+// investigator look at duplicates or parse errors directly rather than
+// scrolling a mixed list.
+function renderEvidenceCollectionCard(index, col, page, status, prefix) {
+  const statusOptions = [
+    ["imported", "Imported"],
+    ["supported", "Discovered (not imported)"],
+    ["unsupported", "Unsupported"],
+    ["duplicate", "Duplicate"],
+    ["failed", "Parse error"],
+    ["", "All files"],
+  ];
+  const p = {
+    page: page.page, pageSize: page.page_size, total: page.total, totalPages: page.total_pages,
+    from: page.total === 0 ? 0 : (page.page - 1) * page.page_size + 1,
+    to: (page.page - 1) * page.page_size + page.items.length,
+  };
   return `
     <div class="row between">
       <strong>Collection #${index + 1}</strong>
       <span class="muted small">${esc(fmtDate(col.created_at))}</span>
     </div>
     <div class="muted small">${esc(SOURCE_TYPE_LABELS[col.source_type] || col.source_type)}${col.original_filename ? " &middot; " + esc(col.original_filename) : ""}</div>
-    <div class="small" style="margin-top:4px">${col.file_count} file(s) discovered &middot; ${col.imported_file_count} file(s) imported</div>
+    <div class="small" style="margin-top:4px">${fmtCount(col.file_count)} file(s) discovered &middot; ${fmtCount(col.imported_file_count)} file(s) imported</div>
     ${col.ingestion_status === "failed" ? FAILED_COLLECTION_NOTE : ""}
-    <div class="evidence-file-list" style="margin-top:10px">
-      ${imported.length ? imported.map(rowForEvidenceFile).join("") : `<p class="empty">No evidence files imported yet from this collection.</p>`}
+
+    <div class="row" style="margin-top:10px; align-items:center; gap:var(--space-2)">
+      <label class="muted small" for="evstatus-${esc(prefix)}">Show</label>
+      <select id="evstatus-${esc(prefix)}" class="filter-input" data-evstatus="${esc(prefix)}" style="width:auto">
+        ${statusOptions.map(([v, l]) => `<option value="${v}"${v === status ? " selected" : ""}>${l}</option>`).join("")}
+      </select>
     </div>
-    ${
-      other.length
-        ? `<details style="margin-top:10px">
-      <summary class="muted small" style="cursor:pointer">${other.length} file(s) not imported (discovered or unsupported)</summary>
-      <div class="table-wrap" style="margin-top:8px"><table class="data-table">
-        <thead><tr><th>Filename</th><th>Path</th><th>Type</th><th>Status</th></tr></thead>
-        <tbody>
-          ${other
-            .map(
-              (f) => `<tr>
-              <td class="mono small">${esc(f.original_filename)}</td>
-              <td class="mono small">${esc(f.path)}</td>
-              <td class="small">${esc(artifactLabel(f.artifact_type))}</td>
-              <td class="small">${esc(SOURCE_FILE_STATUS_LABELS[f.import_status] || f.import_status)}</td>
-            </tr>`
-            )
-            .join("")}
-        </tbody>
-      </table></div>
-    </details>`
-        : ""
-    }
+
+    <div class="evidence-file-list" style="margin-top:10px">
+      ${
+        page.items.length
+          ? page.items.map(rowForEvidenceFile).join("")
+          : `<p class="empty">No files in this collection match that status.</p>`
+      }
+    </div>
+    ${page.total > 0 ? renderPager(prefix, p, { noun: "files", label: `Collection ${index + 1} file pagination` }) : ""}
   `;
 }
 
@@ -3707,7 +4576,11 @@ function rowForEvidenceFile(f) {
       </label>
       <span class="evidence-file-meta" title="${esc(artifactLabel(f.artifact_type))}">${esc(artifactLabel(f.artifact_type))}</span>
       <span class="evidence-file-meta num">${fmtBytes(f.size_bytes)}</span>
-      <span class="evidence-file-meta num">${f.event_count} event(s)</span>
+      <span class="evidence-file-meta num">${
+        f.import_status === "imported"
+          ? `${fmtCount(f.event_count)} event(s)`
+          : esc(SOURCE_FILE_STATUS_LABELS[f.import_status] || f.import_status)
+      }</span>
       <span class="evidence-file-actions">
         <button type="button" class="small danger evidence-file-delete-btn" data-id="${esc(f.id)}" data-name="${esc(f.original_filename)}">Delete</button>
       </span>
@@ -3744,7 +4617,23 @@ function wireEvidenceFileSelection(caseId, container) {
     );
   }
 
-  checkboxes().forEach((cb) => cb.addEventListener("change", updateBulkBar));
+  // DELEGATED, not bound per element. The collection cards re-render on
+  // every page change now that this list is paginated, and per-element
+  // handlers would be discarded with the markup -- leaving Delete and
+  // the checkboxes silently inert from page 2 onwards.
+  container.addEventListener("change", (e) => {
+    if (e.target.closest(".evidence-file-checkbox")) updateBulkBar();
+  });
+  container.addEventListener("click", (e) => {
+    const btn = e.target.closest(".evidence-file-delete-btn");
+    if (btn) confirmAndDeleteEvidence(caseId, [btn.dataset.id]);
+  });
+
+  // Scoped to the files currently shown, and labelled that way. Unlike
+  // the import selection screen -- where selection is a set that
+  // outlives the page -- these buttons feed a DELETE, so acting on
+  // records the investigator cannot see would be the most dangerous
+  // thing this screen could do.
   document.getElementById("evidence-select-all-btn").addEventListener("click", () => {
     checkboxes().forEach((cb) => (cb.checked = true));
     updateBulkBar();
@@ -3752,9 +4641,6 @@ function wireEvidenceFileSelection(caseId, container) {
   document.getElementById("evidence-clear-btn").addEventListener("click", () => {
     checkboxes().forEach((cb) => (cb.checked = false));
     updateBulkBar();
-  });
-  container.querySelectorAll(".evidence-file-delete-btn").forEach((btn) => {
-    btn.addEventListener("click", () => confirmAndDeleteEvidence(caseId, [btn.dataset.id]));
   });
 }
 

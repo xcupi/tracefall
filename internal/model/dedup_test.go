@@ -112,3 +112,54 @@ func TestDedupHash_NoDelimiterCollision(t *testing.T) {
 		t.Error("expected different hashes; a naive delimiter-free join would have collided these")
 	}
 }
+
+// ---------------- Phase 10A: timestamp-less artifacts ----------------
+
+// The zero-time rule must be invisible to every event that has a real
+// timestamp. If this ever fails, previously-stored evidence would change
+// identity and stop deduplicating against itself.
+func TestDedupHash_TimestampedEventsAreUnaffectedByTheZeroTimeRule(t *testing.T) {
+	base := Event{
+		EventType:    EventProcessCreate,
+		Timestamp:    time.Date(2026, 3, 1, 9, 0, 0, 0, time.UTC),
+		Host:         "WKSTN-042",
+		User:         "jdoe",
+		ProcessName:  "powershell.exe",
+		ArtifactType: ArtifactWindowsEventLog,
+	}
+	withCmd := base
+	withCmd.CommandLine = "powershell.exe -enc AAAA"
+	other := base
+	other.CommandLine = "completely different command"
+
+	// Same real event, different command-line rendering -> same identity.
+	if base.ComputeDedupHash() != withCmd.ComputeDedupHash() {
+		t.Error("adding a command line changed the identity of a timestamped event")
+	}
+	if withCmd.ComputeDedupHash() != other.ComputeDedupHash() {
+		t.Error("command line is affecting the identity of timestamped events; it must not")
+	}
+}
+
+// With no timestamp, the command text is the only thing distinguishing
+// two records, so it MUST take part in the identity or the history
+// collapses to one event.
+func TestDedupHash_TimestamplessEventsAreDistinguishedByCommand(t *testing.T) {
+	base := Event{
+		EventType:    EventPowerShellScript,
+		Host:         "WKSTN-042",
+		User:         "jdoe",
+		ArtifactType: ArtifactPowerShellHistory,
+	}
+	a, b, dup := base, base, base
+	a.CommandLine = "Get-Process"
+	b.CommandLine = "whoami /priv"
+	dup.CommandLine = "Get-Process"
+
+	if a.ComputeDedupHash() == b.ComputeDedupHash() {
+		t.Error("two different timestamp-less commands collapsed to one identity -- history would be lost")
+	}
+	if a.ComputeDedupHash() != dup.ComputeDedupHash() {
+		t.Error("the same timestamp-less command produced two identities; re-collection would duplicate it")
+	}
+}

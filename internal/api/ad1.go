@@ -14,6 +14,7 @@ package api
 
 import (
 	"crypto/sha256"
+	"crypto/sha512"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -64,7 +65,7 @@ func sniffStagedFile(path string) (isAD1, isEncrypted bool, err error) {
 // collectionID)), not by this name, so a blank, missing, or
 // attacker-influenced filename here can't affect where Tracefall reads
 // evidence bytes from -- see that function's doc comment.
-func (s *Service) discoverAD1Upload(caseID string, stagingPath string, stagingClaimed *bool, uploadSize int64, archiveHash string, filename string) (DiscoverResult, error) {
+func (s *Service) discoverAD1Upload(caseID string, stagingPath string, stagingClaimed *bool, uploadSize int64, archiveHash, integrity, filename string) (DiscoverResult, error) {
 	collectionID := uuid.NewString()
 	ad1Path := s.files.AD1Path(caseID, collectionID)
 	if filename == "" {
@@ -72,7 +73,7 @@ func (s *Service) discoverAD1Upload(caseID string, stagingPath string, stagingCl
 	}
 	collection := model.Collection{
 		ID: collectionID, CaseID: caseID, CreatedAt: time.Now().UTC(),
-		SourceType: model.SourceTypeAD1, ArchiveHash: archiveHash,
+		SourceType: model.SourceTypeAD1, ArchiveHash: archiveHash, IntegritySHA512: integrity,
 		OriginalFilename:  filename, // display only -- see doc comment above
 		EvidenceDirectory: s.files.EvidenceDir(caseID, collectionID),
 		IngestionStatus:   model.CollectionStatusPending,
@@ -126,7 +127,7 @@ func (s *Service) discoverAD1FromPath(caseID, path string) (DiscoverResult, erro
 		return DiscoverResult{}, fmt.Errorf("locating AD1 segment files: %w", err)
 	}
 
-	hash, err := hashAD1Segments(segmentPaths)
+	hash, integrity, err := hashAD1Segments(segmentPaths)
 	if err != nil {
 		return DiscoverResult{}, fmt.Errorf("fingerprinting AD1 image: %w", err)
 	}
@@ -137,7 +138,7 @@ func (s *Service) discoverAD1FromPath(caseID, path string) (DiscoverResult, erro
 	collectionID := uuid.NewString()
 	collection := model.Collection{
 		ID: collectionID, CaseID: caseID, CreatedAt: time.Now().UTC(),
-		SourceType: model.SourceTypeAD1, ArchiveHash: hash,
+		SourceType: model.SourceTypeAD1, ArchiveHash: hash, IntegritySHA512: integrity,
 		OriginalFilename:  path, // the investigator's own first segment, reopened at import time -- never modified, never copied
 		EvidenceDirectory: s.files.EvidenceDir(caseID, collectionID),
 		IngestionStatus:   model.CollectionStatusPending,
@@ -177,20 +178,24 @@ func ad1SegmentPathsForLocalFile(first string) ([]string, error) {
 // file's raw bytes in order -- the AD1 analog of hashDirectory, streamed
 // rather than loaded into memory (see internal/ad1's package doc comment
 // on why an AD1 image is never fully buffered).
-func hashAD1Segments(segmentPaths []string) (string, error) {
-	h := sha256.New()
+func hashAD1Segments(segmentPaths []string) (sha256Hex, sha512Hex string, err error) {
+	// Segments are hashed in order as one continuous byte stream: a
+	// segmented AD1 is one logical evidence object, so its integrity
+	// hash covers the whole image, not each part separately.
+	h256, h512 := sha256.New(), sha512.New()
+	h := io.MultiWriter(h256, h512)
 	for _, p := range segmentPaths {
 		f, err := os.Open(p)
 		if err != nil {
-			return "", err
+			return "", "", err
 		}
 		_, err = io.Copy(h, f)
 		f.Close()
 		if err != nil {
-			return "", err
+			return "", "", err
 		}
 	}
-	return hex.EncodeToString(h.Sum(nil)), nil
+	return hex.EncodeToString(h256.Sum(nil)), hex.EncodeToString(h512.Sum(nil)), nil
 }
 
 // catalogAD1 opens the AD1 image at segmentPaths and walks it
@@ -294,7 +299,8 @@ func (s *Service) catalogAD1(caseID string, collection model.Collection, segment
 
 	triaged := triageAll(sourceFiles)
 	return DiscoverResult{
-		Collection: full, SourceFiles: triaged, Coverage: computeCoverage(triaged),
+		Collection: full, SourceFiles: firstEvidencePage(triaged), Coverage: computeCoverage(triaged),
+		SourceFilesTotal: len(triaged), SourceFilesPageSize: defaultEvidencePageSize,
 		DiscoveredCount: len(sourceFiles), SupportedCount: supported, UnsupportedCount: unsupported, DuplicateCount: duplicate,
 	}, nil
 }

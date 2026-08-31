@@ -54,6 +54,26 @@ func (e Event) ComputeDedupHash() string {
 		e.NetworkDest,
 		strconv.Itoa(e.NetworkDestPort),
 	}
+	// Timestamp-less artifacts (Phase 10A).
+	//
+	// The exclusion of CommandLine above rests on one assumption, stated
+	// in that paragraph: that "host + process + PID + an EXACT TIMESTAMP
+	// already pin down a specific execution". For an artifact that
+	// records no timestamp at all, that assumption does not hold -- every
+	// command in a PowerShell ConsoleHost_history file shares the same
+	// (zero) time, the same host, the same user and the same event type,
+	// so without the command text they would all collapse into a single
+	// event and the rest of the history would be silently lost.
+	//
+	// CommandLine is therefore included ONLY when there is no timestamp
+	// to identify the event by. This cannot change the hash of any event
+	// that has a real timestamp -- which is every event produced by every
+	// other artifact -- so existing evidence keeps its identity exactly.
+	// TestDedupHash_TimestampedEventsAreUnaffectedByTheZeroTimeRule pins
+	// that down.
+	if e.Timestamp.IsZero() {
+		parts = append(parts, e.CommandLine)
+	}
 	sum := sha256.Sum256([]byte(strings.Join(parts, unitSep)))
 	return hex.EncodeToString(sum[:])
 }

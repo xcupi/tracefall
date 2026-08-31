@@ -73,6 +73,13 @@ func NewRouter(svc *Service, logger *slog.Logger, maxUploadBytes int64, lanExpos
 	mux.HandleFunc("POST /api/cases/{id}/evidence/{collectionID}/import/start", h.startImport)
 	mux.HandleFunc("GET /api/cases/{id}/import-jobs/{jobID}", h.importJobStatus)
 	mux.HandleFunc("GET /api/cases/{id}/evidence/{collectionID}", h.collectionDetail)
+	// Phase 10B: one page of a collection's catalog, filtered on the
+	// server. The dashboard renders exactly what this returns, so a
+	// 7,000-file image costs one page of rows rather than all of them.
+	mux.HandleFunc("GET /api/cases/{id}/evidence/{collectionID}/files", h.evidenceFiles)
+	// The stable IDs of every importable file matching a filter -- what
+	// "select all matching" materializes its selection from.
+	mux.HandleFunc("GET /api/cases/{id}/evidence/{collectionID}/files/ids", h.evidenceFileIDs)
 	mux.HandleFunc("DELETE /api/cases/{id}/evidence/{sourceFileID}", h.deleteSourceFile)
 	mux.HandleFunc("GET /api/cases/{id}/sources", h.sources)
 	mux.HandleFunc("GET /api/cases/{id}/events/{eventID}", h.eventProvenance)
@@ -337,6 +344,37 @@ func (h *handlers) capabilities(w http.ResponseWriter, r *http.Request) {
 // for polling. Returns 409 if this collection already has one running --
 // the server-side half of the "don't submit the same selection twice"
 // guarantee.
+// evidenceFiles serves one filtered page of a collection's catalog.
+func (h *handlers) evidenceFiles(w http.ResponseWriter, r *http.Request) {
+	page, err := h.svc.EvidenceFiles(
+		r.PathValue("id"), r.PathValue("collectionID"),
+		parseEvidenceFilter(r),
+		parsePageRequest(r, evidencePageSizes, defaultEvidencePageSize),
+	)
+	if err != nil {
+		h.fail(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, page)
+}
+
+// evidenceFileIDs resolves the current filter to the stable IDs of every
+// importable file matching it.
+//
+// It returns IDs only. The client needs identity to build a selection,
+// not content, and a list of IDs is roughly a fiftieth the size of the
+// records -- which is what makes "select all matching" affordable on a
+// catalog the browser is deliberately never sent in full.
+func (h *handlers) evidenceFileIDs(w http.ResponseWriter, r *http.Request) {
+	ids, err := h.svc.EvidenceFileIDs(
+		r.PathValue("id"), r.PathValue("collectionID"), parseEvidenceFilter(r))
+	if err != nil {
+		h.fail(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ids": ids, "total": len(ids)})
+}
+
 func (h *handlers) startImport(w http.ResponseWriter, r *http.Request) {
 	id, collectionID := r.PathValue("id"), r.PathValue("collectionID")
 	var req struct {

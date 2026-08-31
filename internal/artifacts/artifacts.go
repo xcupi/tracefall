@@ -161,7 +161,13 @@ var supportedTypeInfo = map[string]typeInfo{
 		label: "Scheduled Task XML", family: FamilyScheduledTask, priority: PriorityHigh,
 	},
 	model.ArtifactPrefetch: {
-		label: "Prefetch (PECmd export)", family: FamilyPrefetch, priority: PriorityHigh,
+		label: "Prefetch", family: FamilyPrefetch, priority: PriorityHigh,
+	},
+	model.ArtifactPowerShellHistory: {
+		label: "PowerShell console history", family: FamilyPowerShell, priority: PriorityHigh,
+	},
+	model.ArtifactBrowserHistory: {
+		label: "Browser history (Chromium / Firefox)", family: FamilyBrowser, priority: PriorityMedium,
 	},
 }
 
@@ -213,11 +219,6 @@ func pathContains(fragments ...string) func(string, string) bool {
 // precede general ones.
 var unsupportedRules = []unsupportedRule{
 	{
-		label: "Prefetch (raw .pf)", family: FamilyPrefetch, priority: PriorityHigh,
-		reason: "Tracefall has no raw Prefetch (.pf) parser. Run PECmd against these files and add its CSV output, which Tracefall does parse.",
-		match:  hasExt(".pf"),
-	},
-	{
 		label: "Amcache hive", family: FamilyExecution, priority: PriorityHigh,
 		reason: "Amcache records program execution and installation. Tracefall reads the hive format but has no Amcache-specific extraction yet, so no events are produced from it.",
 		match:  baseIs("amcache.hve"),
@@ -238,17 +239,16 @@ var unsupportedRules = []unsupportedRule{
 		match:  baseIs("$mft", "$logfile", "$usnjrnl", "$j"),
 	},
 	{
-		label: "Browser history", family: FamilyBrowser, priority: PriorityMedium,
-		reason: "Tracefall has no browser history parser (SQLite/ESE formats).",
+		// Chromium "History" and Firefox "places.sqlite" ARE parsed (see
+		// internal/parsers/browserhistory). This rule covers the browser
+		// data that is not: Internet Explorer/Edge Legacy's ESE database,
+		// cookie stores, and cache.
+		label: "Browser data (unsupported format)", family: FamilyBrowser, priority: PriorityMedium,
+		reason: "Tracefall parses Chromium History and Firefox places.sqlite only. Internet Explorer/Edge Legacy WebCacheV01.dat is an ESE database, and cookie/cache stores are not parsed.",
 		match: func(p, base string) bool {
-			return baseIs("places.sqlite", "history", "webcachev01.dat", "cookies.sqlite")(p, base) ||
-				pathContains("/chrome/user data/", "/edge/user data/", "/mozilla/firefox/")(p, base)
+			return baseIs("webcachev01.dat", "cookies.sqlite", "cookies", "index.dat")(p, base) ||
+				pathContains("/cache/", "/code cache/")(p, base)
 		},
-	},
-	{
-		label: "PowerShell console history", family: FamilyPowerShell, priority: PriorityHigh,
-		reason: "Tracefall has no ConsoleHost_history parser. PowerShell script-block events from an EVTX log ARE parsed.",
-		match:  baseIs("consolehost_history.txt"),
 	},
 	{
 		label: "Memory image", family: FamilyMemory, priority: PriorityHigh,

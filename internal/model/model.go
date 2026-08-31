@@ -106,19 +106,31 @@ const (
 // correlations always operate across every Collection in the case, never
 // just the most recent one. See docs/data-model.md.
 type Collection struct {
-	ID                   string    `json:"collection_id"`
-	CaseID               string    `json:"case_id"`
-	CreatedAt            time.Time `json:"created_at"`
-	SourceType           string    `json:"source_type"`
-	OriginalFilename     string    `json:"original_filename,omitempty"` // uploaded ZIP's filename, or the given local path
-	ArchiveHash          string    `json:"archive_hash,omitempty"`      // SHA-256 of the uploaded archive, or a deterministic content fingerprint for local-path ingest; used to reject duplicate evidence within a case
-	EvidenceDirectory    string    `json:"evidence_directory"`          // where this collection's extracted evidence lives on disk
-	IngestionStatus      string    `json:"ingestion_status"`
-	FileCount            int       `json:"file_count"`             // active (non-deleted) files discovered, supported + unsupported
-	SupportedFileCount   int       `json:"supported_file_count"`   // of those, how many a parser recognizes (available to import, whether or not yet imported)
-	UnsupportedFileCount int       `json:"unsupported_file_count"` // of those, how many no parser recognizes
-	ImportedFileCount    int       `json:"imported_file_count"`    // of the supported files, how many have actually been imported
-	ParsedEventCount     int       `json:"parsed_event_count"`     // total events produced by imported files
+	ID               string    `json:"collection_id"`
+	CaseID           string    `json:"case_id"`
+	CreatedAt        time.Time `json:"created_at"`
+	SourceType       string    `json:"source_type"`
+	OriginalFilename string    `json:"original_filename,omitempty"` // uploaded ZIP's filename, or the given local path
+	ArchiveHash      string    `json:"archive_hash,omitempty"`      // SHA-256 of the uploaded archive, or a deterministic content fingerprint for local-path ingest; used to reject duplicate evidence within a case
+	// IntegritySHA512 is the SHA-512 of the ORIGINAL evidence object, for
+	// forensic integrity rather than for deduplication: the exact
+	// uploaded bytes for a ZIP or AD1, or the deterministic content
+	// fingerprint defined in docs/evidence-integrity.md for a local
+	// directory. It is computed before anything is extracted or
+	// transformed, and is immutable once the collection exists.
+	//
+	// Deliberately SEPARATE from ArchiveHash: that one is load-bearing
+	// for duplicate detection (see idx_collections_case_archive_hash) and
+	// changing its algorithm would change which evidence counts as a
+	// duplicate. This field adds integrity evidence without touching that.
+	IntegritySHA512      string `json:"integrity_sha512,omitempty"`
+	EvidenceDirectory    string `json:"evidence_directory"` // where this collection's extracted evidence lives on disk
+	IngestionStatus      string `json:"ingestion_status"`
+	FileCount            int    `json:"file_count"`             // active (non-deleted) files discovered, supported + unsupported
+	SupportedFileCount   int    `json:"supported_file_count"`   // of those, how many a parser recognizes (available to import, whether or not yet imported)
+	UnsupportedFileCount int    `json:"unsupported_file_count"` // of those, how many no parser recognizes
+	ImportedFileCount    int    `json:"imported_file_count"`    // of the supported files, how many have actually been imported
+	ParsedEventCount     int    `json:"parsed_event_count"`     // total events produced by imported files
 }
 
 // Collection source types.
@@ -217,8 +229,17 @@ const (
 	// identity (see Event.ComputeDedupHash), so a hive snapshot and a
 	// RECmd CSV export of that same hive stay separately attributable
 	// rather than silently collapsing into one another.
-	ArtifactRegistryHive  = "registry_hive"
-	ArtifactScheduledTask = "scheduled_task" // raw Task Scheduler XML
+	ArtifactRegistryHive = "registry_hive"
+	// ArtifactPowerShellHistory is a PowerShell ConsoleHost_history.txt
+	// file. It records commands in order but NO timestamps, which is why
+	// events from it carry a zero Timestamp -- see
+	// docs/evidence-triage.md and Event.ComputeDedupHash's zero-time rule.
+	ArtifactPowerShellHistory = "powershell_history"
+	// ArtifactBrowserHistory is a browser history database. The exact
+	// formats supported are listed in docs/evidence-triage.md; the
+	// artifact type does not imply every browser is readable.
+	ArtifactBrowserHistory = "browser_history"
+	ArtifactScheduledTask  = "scheduled_task" // raw Task Scheduler XML
 )
 
 // Event types recognized in Phase 1. EventType is the normalized,
@@ -280,6 +301,16 @@ const (
 	// type is named for exactly what the evidence supports. No detection
 	// rule consumes it: it exists for timeline visibility and provenance.
 	EventRegistryKeyLastWrite = "registry_key_last_write"
+	// EventPowerShellHistoryCommand is one command recovered from a
+	// PowerShell console history file. Deliberately distinct from
+	// EventPowerShellScript (script-block logging), because that artifact
+	// carries an execution timestamp and this one does not: a history
+	// entry proves a command was TYPED, not when it ran, or whether it
+	// ran at all.
+	EventPowerShellHistoryCommand = "powershell_history_command"
+	// EventBrowserVisit is one recorded page visit from a browser history
+	// database.
+	EventBrowserVisit = "browser_visit"
 	// EventDNSQuery is Sysmon Event ID 22 (DNSEvent) -- a process resolved
 	// a domain name.
 	EventDNSQuery = "dns_query"
