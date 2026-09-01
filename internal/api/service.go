@@ -571,7 +571,9 @@ type DiscoverResult struct {
 // collection already in this case, in which case it's rejected with
 // *DuplicateEvidenceError before anything is cataloged.
 func (s *Service) DiscoverEvidenceFromPath(caseID, path string) (DiscoverResult, error) {
-	if _, err := s.GetCase(caseID); err != nil {
+	// Phase 13: refuse before touching the filesystem, so a locked case
+	// leaves no staged file, no collection row and no partial catalog.
+	if _, err := s.requireEvidenceMutable(caseID); err != nil {
 		return DiscoverResult{}, err
 	}
 
@@ -653,7 +655,9 @@ func (s *Service) DiscoverEvidenceFromPath(caseID, path string) (DiscoverResult,
 // itself is never left corrupted and the caller can simply try adding
 // evidence again. Nothing is parsed here -- see ImportEvidence.
 func (s *Service) DiscoverEvidenceFromUpload(caseID string, zipData io.Reader, filename string) (DiscoverResult, error) {
-	if _, err := s.GetCase(caseID); err != nil {
+	// Checked BEFORE stageUpload, so a locked case never writes the
+	// uploaded bytes to disk at all.
+	if _, err := s.requireEvidenceMutable(caseID); err != nil {
 		return DiscoverResult{}, err
 	}
 
@@ -867,6 +871,34 @@ type ImportSkip struct {
 	Reason       string `json:"reason"`
 }
 
+// skipReasonFor explains, in the analyst's vocabulary, why a file that
+// was asked for could not be imported.
+//
+// Concatenating "already " with the raw status produced "already
+// unsupported" and "already duplicate", which read as though the file
+// had been unsupported on some earlier attempt rather than describing
+// what it IS. That was tolerable while the dashboard collapsed every
+// skip into one count; now that the reasons are shown individually,
+// they have to stand on their own.
+//
+// These strings are analyst-facing prose, not identifiers -- the
+// machine-readable fact is the source file's ImportStatus, which is
+// unchanged.
+func skipReasonFor(importStatus string) string {
+	switch importStatus {
+	case model.SourceFileUnsupported:
+		return "no parser available for this file type"
+	case model.SourceFileDuplicate:
+		return "duplicate content already imported in this collection"
+	case model.SourceFileImported:
+		return "already imported"
+	case model.SourceFileFailed:
+		return "a previous import attempt failed to parse it"
+	default:
+		return "not available for import (" + importStatus + ")"
+	}
+}
+
 // ImportResult is returned from selecting specific discovered files and
 // importing them -- the point at which they actually become evidence.
 type ImportResult struct {
@@ -883,6 +915,28 @@ type ImportResult struct {
 	// existing consumers keep working. ParseFailures carries the same
 	// failures structured, which is what the dashboard renders.
 	Errors []string `json:"errors,omitempty"`
+	// Cancelled reports that an analyst stopped this import before it
+	// worked through the whole selection. The other counts remain exactly
+	// what they always were -- what actually happened -- so a cancelled
+	// result is read the same way as a complete one.
+	Cancelled bool `json:"cancelled"`
+	// Unprocessed is how many selected files did NOT become evidence
+	// because the import was cancelled.
+	//
+	// It covers both files never opened and files parsed into memory but
+	// never written, because those two end in exactly the same state:
+	// still "discovered", still selectable, nothing persisted about
+	// them. The distinction matters inside the import and not at all to
+	// the analyst, whose question is "what can I still import?".
+	//
+	// The invariant is therefore len(Imported) + Unprocessed equals the
+	// selection size, which is what makes the cancelled summary add up.
+	//
+	// These are NOT parse failures and are deliberately counted apart
+	// from them: a file that was never written has not failed at
+	// anything, and folding the two together would invent failures the
+	// evidence does not support.
+	Unprocessed int `json:"unprocessed,omitempty"`
 	// ParseFailures describes each file that was SELECTED and SUPPORTED
 	// but could not be parsed. This is deliberately distinct from
 	// Skipped (files that were never eligible: unsupported, duplicate,
@@ -950,6 +1004,37 @@ func (s *Service) ImportEvidence(caseID, collectionID string, sourceFileIDs []st
 	return s.importEvidence(caseID, collectionID, sourceFileIDs, nil)
 }
 
+// caseHasAnalyzableHistory reports whether a case has ever held evidence
+// or produced analysis output.
+//
+// It is what separates "never ingested anything" (refuse to analyse)
+// from "had evidence, which has since been deleted" (analyse, and let
+// the empty result replace the orphaned one). Stored findings and
+// correlations count as history in their own right: if a collection is
+// removed entirely, its derived results must still be clearable by a
+// re-analysis rather than outliving every trace of their source.
+func (s *Service) caseHasAnalyzableHistory(caseID string) (bool, error) {
+	collections, err := s.store.ListCollections(caseID)
+	if err != nil {
+		return false, err
+	}
+	if len(collections) > 0 {
+		return true, nil
+	}
+	findings, err := s.store.ListFindings(caseID)
+	if err != nil {
+		return false, err
+	}
+	if len(findings) > 0 {
+		return true, nil
+	}
+	correlations, err := s.store.ListCorrelations(caseID)
+	if err != nil {
+		return false, err
+	}
+	return len(correlations) > 0, nil
+}
+
 // dedupeIDs removes repeated IDs while preserving first-seen order.
 func dedupeIDs(ids []string) []string {
 	seen := make(map[string]bool, len(ids))
@@ -966,7 +1051,9 @@ func dedupeIDs(ids []string) []string {
 
 func (s *Service) importEvidence(caseID, collectionID string, sourceFileIDs []string, prog *progressSink) (ImportResult, error) {
 	prog.phase(PhasePreparing)
-	if _, err := s.GetCase(caseID); err != nil {
+	// Guards BOTH import entry points, since ImportEvidence and the
+	// background job both funnel through here.
+	if _, err := s.requireEvidenceMutable(caseID); err != nil {
 		return ImportResult{}, err
 	}
 	collection, err := s.store.GetCollection(collectionID)
@@ -1011,7 +1098,23 @@ func (s *Service) importEvidence(caseID, collectionID string, sourceFileIDs []st
 	pending := make([]pendingImport, 0, len(sourceFileIDs))
 	prog.phase(PhaseParsing)
 	prog.setTotal(len(sourceFileIDs))
-	for _, id := range sourceFileIDs {
+	// cancelled tracks whether the analyst stopped this import, and
+	// unprocessed counts what was consequently never reached. Both are
+	// reported; neither is inferred.
+	var cancelled bool
+	var unprocessed int
+	for i, id := range sourceFileIDs {
+		// SAFE POINT 1: between files, before this one is opened.
+		//
+		// Nothing has been written for the remaining files, so stopping
+		// here leaves them exactly as they were -- still "discovered",
+		// still importable. Checking at the TOP of the iteration (rather
+		// than part way through a file) is what makes that true.
+		if prog.cancelled() {
+			cancelled = true
+			unprocessed = len(sourceFileIDs) - i
+			break
+		}
 		sf, err := s.store.GetSourceFile(id)
 		if err != nil || sf.CaseID != caseID || sf.CollectionID != collectionID {
 			skipped = append(skipped, ImportSkip{SourceFileID: id, Reason: "not found in this collection"})
@@ -1024,7 +1127,7 @@ func (s *Service) importEvidence(caseID, collectionID string, sourceFileIDs []st
 			continue
 		}
 		if sf.ImportStatus != model.SourceFileDiscovered {
-			skipped = append(skipped, ImportSkip{SourceFileID: id, Reason: "already " + sf.ImportStatus})
+			skipped = append(skipped, ImportSkip{SourceFileID: id, Reason: skipReasonFor(sf.ImportStatus)})
 			prog.fileParsed(0, true)
 			continue
 		}
@@ -1080,7 +1183,22 @@ func (s *Service) importEvidence(caseID, collectionID string, sourceFileIDs []st
 	// everything already saved -- including earlier files from this same
 	// batch -- exactly as it always has.
 	prog.phase(PhasePersisting)
-	for _, pf := range pending {
+	for i, pf := range pending {
+		// SAFE POINT 2: between files, before this one is written.
+		//
+		// Every file already persisted is complete and valid evidence --
+		// its raw evidence, events, observations and imported status were
+		// all written before the loop came back here. A file not yet
+		// reached was parsed into memory only: nothing about it was
+		// written, so it stays "discovered" rather than half-imported.
+		//
+		// This is why cancellation needs no rollback: the existing
+		// per-file write order is already the transaction boundary.
+		if prog.cancelled() {
+			cancelled = true
+			unprocessed += len(pending) - i
+			break
+		}
 		sf := pf.sourceFile
 		id := sf.ID
 		prog.startFile(sf.Path)
@@ -1161,7 +1279,18 @@ func (s *Service) importEvidence(caseID, collectionID string, sourceFileIDs []st
 		return ImportResult{}, fmt.Errorf("reloading collection: %w", err)
 	}
 
-	if len(imported) > 0 {
+	// Counts, case status and the audit entry are all produced on the
+	// cancelled path too. A cancelled import that imported files changed
+	// the evidence set, so the collection counts must be recomputed and
+	// the prior analysis must go stale -- exactly as a complete import
+	// would. Skipping finalization on cancel is what would leave the
+	// case in an inconsistent state.
+	switch {
+	case cancelled:
+		s.audit(caseID, model.AuditEvidenceImportCancelled, model.TargetCollection, collectionID,
+			fmt.Sprintf("import cancelled by analyst: %d file(s) imported before stopping, %d new event(s), %d already-known, %d file(s) not imported and still available",
+				len(imported), totalNew, totalDup, unprocessed))
+	case len(imported) > 0:
 		s.audit(caseID, model.AuditEvidenceImported, model.TargetCollection, collectionID,
 			fmt.Sprintf("%d file(s) imported, %d new event(s), %d already-known", len(imported), totalNew, totalDup))
 	}
@@ -1170,6 +1299,7 @@ func (s *Service) importEvidence(caseID, collectionID string, sourceFileIDs []st
 		Collection: full, Imported: imported,
 		EventCount: totalNew + totalDup, NewEventCount: totalNew, DuplicateEventCount: totalDup,
 		Skipped: skipped, Errors: errs, ParseFailures: failures,
+		Cancelled: cancelled, Unprocessed: unprocessed,
 	}, nil
 }
 
@@ -1467,6 +1597,114 @@ type DeletedEvidenceResult struct {
 	Skipped            []ImportSkip `json:"skipped,omitempty"`
 }
 
+// DeletedCollectionResult summarizes a collection deletion.
+type DeletedCollectionResult struct {
+	CollectionID string `json:"collection_id"`
+	// Label is what the collection was called, captured before deletion
+	// so the response and the audit entry can name it once it is gone.
+	Label string `json:"label"`
+	// SourceFilesRemoved counts the catalog rows removed -- discovered
+	// files, not only imported ones.
+	SourceFilesRemoved int `json:"source_files_removed"`
+	EventsRemoved      int `json:"events_removed"`
+	// EventsRetained are events this collection observed that survive
+	// because another collection observed them too. Their provenance is
+	// re-pointed at that other collection rather than being deleted.
+	EventsRetained int `json:"events_retained"`
+	// AnalysisStale reports that derived results no longer describe the
+	// current evidence and the case needs re-analysis.
+	AnalysisStale bool `json:"analysis_stale"`
+}
+
+// DeleteCollection permanently removes an entire evidence collection.
+//
+// It deliberately REUSES DeleteSourceFiles for the collection's files
+// rather than reimplementing the cascade: that path already enforces the
+// case lifecycle lock, removes each file's event observations, deletes
+// events left with no observation at all, re-points events still
+// observed by another collection, recomputes collection counts, and
+// marks the case for re-analysis. Duplicating any of that here would
+// create a second cascade to keep in step with the first.
+//
+// What this adds on top is removing the collection itself: the catalog
+// rows that ordinary file deletion only soft-deletes, the collection
+// row, and the extracted evidence directory Tracefall owns.
+//
+// Authorization is the router's: every DELETE is admin-only (see
+// requiredRole in middleware.go), so this inherits that without a
+// second check that could drift from it.
+func (s *Service) DeleteCollection(caseID, collectionID string) (DeletedCollectionResult, error) {
+	// The lock check happens first and explicitly, so a locked case is
+	// refused before anything is read or removed -- and refused even when
+	// the collection holds no live files, where the delegated call below
+	// would have nothing to check on.
+	if _, err := s.requireEvidenceMutable(caseID); err != nil {
+		return DeletedCollectionResult{}, err
+	}
+
+	collection, err := s.store.GetCollection(collectionID)
+	if err != nil || collection.CaseID != caseID {
+		return DeletedCollectionResult{}, ErrCollectionNotFound
+	}
+
+	// Captured before deletion: afterwards there is nothing left to read
+	// these from, and the audit entry needs to name what went.
+	label := collection.OriginalFilename
+	if label == "" {
+		label = collectionLabelFor(collection)
+	}
+	discovered := collection.FileCount
+	imported := collection.ImportedFileCount
+
+	files, err := s.store.ListSourceFilesByCollection(collectionID)
+	if err != nil {
+		return DeletedCollectionResult{}, err
+	}
+	ids := make([]string, 0, len(files))
+	for _, f := range files {
+		ids = append(ids, f.ID)
+	}
+
+	res := DeletedCollectionResult{CollectionID: collectionID, Label: label}
+	if len(ids) > 0 {
+		deleted, err := s.DeleteSourceFiles(caseID, ids)
+		if err != nil {
+			return DeletedCollectionResult{}, err
+		}
+		res.SourceFilesRemoved = len(deleted.DeletedSourceFiles)
+		res.EventsRemoved = deleted.EventsRemoved
+		res.EventsRetained = deleted.EventsRetained
+	}
+
+	if err := s.store.DeleteCollection(collectionID); err != nil {
+		return DeletedCollectionResult{}, fmt.Errorf("removing collection records: %w", err)
+	}
+
+	// Best-effort, and deliberately last: the database is authoritative,
+	// and a directory that fails to delete must not leave the case
+	// pointing at a collection whose rows are already gone. Only evidence
+	// Tracefall extracted is removed -- a local-path collection points at
+	// the investigator's own files and is never touched.
+	if collection.SourceType != model.SourceTypeLocalPath {
+		_ = s.files.RemoveCollectionDir(caseID, collectionID)
+	}
+
+	res.AnalysisStale = true
+	s.audit(caseID, model.AuditEvidenceDeleted, model.TargetCollection, collectionID,
+		fmt.Sprintf("Collection %q deleted: %d discovered file(s), %d imported, %d event(s) removed, %d retained via another collection",
+			label, discovered, imported, res.EventsRemoved, res.EventsRetained))
+	return res, nil
+}
+
+// collectionLabelFor names a collection that has no original filename,
+// so an audit entry never reads as if the object were anonymous.
+func collectionLabelFor(c model.Collection) string {
+	if c.EvidenceDirectory != "" {
+		return c.EvidenceDirectory
+	}
+	return c.ID
+}
+
 // DeleteSourceFile removes exactly one evidence file from a case. See
 // DeleteSourceFiles.
 func (s *Service) DeleteSourceFile(caseID, sourceFileID string) (DeletedEvidenceResult, error) {
@@ -1493,7 +1731,9 @@ func (s *Service) DeleteSourceFile(caseID, sourceFileID string) (DeletedEvidence
 // time AnalyzeCase runs, because they've always operated on the case's
 // complete current event list, never a delta.
 func (s *Service) DeleteSourceFiles(caseID string, sourceFileIDs []string) (DeletedEvidenceResult, error) {
-	if _, err := s.GetCase(caseID); err != nil {
+	// Deleting evidence from a contained or closed case is the mutation
+	// this lock most exists to prevent.
+	if _, err := s.requireEvidenceMutable(caseID); err != nil {
 		return DeletedEvidenceResult{}, err
 	}
 
@@ -1693,8 +1933,31 @@ func (s *Service) AnalyzeCase(caseID string) (AnalyzeResultSummary, error) {
 	if err != nil {
 		return AnalyzeResultSummary{}, err
 	}
+	// Refuse only a case that has never held evidence.
+	//
+	// The guard used to be `Status == created`, which also matched a case
+	// whose evidence had all been DELETED -- deleting the last source
+	// file resets the status to "created". Re-analysis was therefore
+	// refused with 409 exactly when it was most needed, and the previous
+	// run's findings, correlations and ATT&CK techniques stayed in the
+	// database and kept being served as current results for evidence that
+	// no longer existed. Investigations, recomputed on read from those
+	// rows, were stale for the same reason.
+	//
+	// Analysing an empty evidence set is meaningful: it yields zero
+	// findings, which is the correct coherent snapshot. What is not
+	// meaningful is analysing a case that never had evidence at all, so
+	// that is still refused -- distinguished by whether any collection or
+	// any prior analysis output exists, rather than by a status that two
+	// different situations share.
 	if c.Status == model.CaseStatusCreated {
-		return AnalyzeResultSummary{}, ErrNotIngested
+		hadEvidence, err := s.caseHasAnalyzableHistory(caseID)
+		if err != nil {
+			return AnalyzeResultSummary{}, err
+		}
+		if !hadEvidence {
+			return AnalyzeResultSummary{}, ErrNotIngested
+		}
 	}
 
 	// Phase 11: record the run BEFORE any work, so an analysis that dies
@@ -2189,13 +2452,20 @@ func parseFailure(sf model.SourceFile, stage string, err error) ParseFailure {
 
 func classifyParseError(err error) (category, message string) {
 	switch {
-	case errors.Is(err, prefetch.ErrCompressed):
-		// Windows 10/11 Prefetch is LZXPRESS-Huffman compressed and
-		// Tracefall does not decompress it. Saying exactly that is far
-		// more useful than "could not be parsed": it tells an
-		// investigator the evidence is fine and the tool is the limit.
+	case errors.Is(err, prefetch.ErrUnsupportedCompression):
+		// Tracefall decompresses MAM/LZXPRESS-Huffman Prefetch natively,
+		// so reaching here means the container declared some OTHER
+		// compression method. Naming that is more useful than "could not
+		// be parsed", and it is a genuinely different situation from a
+		// corrupt stream.
 		return ParseFailureUnsupported,
-			"This is a Windows 10/11 MAM-compressed Prefetch file. Tracefall reads uncompressed Prefetch only and does not implement LZXPRESS Huffman decompression, so this file was not parsed. Decompress it first, or use PECmd and add its CSV output."
+			"This Prefetch file is in a MAM container that uses a compression method Tracefall does not implement. Tracefall reads uncompressed Prefetch and Windows 10/11 LZXPRESS Huffman (MAM) Prefetch."
+	case errors.Is(err, prefetch.ErrDecompress):
+		// The container is the right kind and decompression still
+		// failed, which means the compressed stream itself is damaged --
+		// a corruption finding about the evidence, not a capability gap.
+		return ParseFailureCorrupt,
+			"This Windows 10/11 MAM-compressed Prefetch file could not be decompressed: the LZXPRESS Huffman stream is truncated or corrupt."
 	case errors.Is(err, prefetch.ErrUnsupportedVersion):
 		return ParseFailureUnsupported, "This Prefetch file uses a format version Tracefall does not read."
 	case errors.Is(err, browserhistory.ErrUnknownSchema):

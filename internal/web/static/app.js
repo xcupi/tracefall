@@ -272,6 +272,94 @@ function renderPasswordChange(message) {
   });
 }
 
+// renderTimezoneControl puts the display-timezone setting in the top
+// bar, next to the session controls.
+//
+// In the top bar rather than behind a settings page because the value it
+// carries is CONTEXT for everything on screen: an analyst reading a
+// timeline needs to know which zone they are reading, and a setting they
+// have to go looking for is a setting they will forget they changed.
+//
+// The control shows the human-readable zone with its current
+// abbreviation and offset, and persists the canonical IANA identifier.
+function renderTimezoneControl() {
+  const host = document.getElementById("timezone-control");
+  if (!host) return;
+  const zones = timezoneOptions();
+  host.innerHTML = `
+    <label class="tz-label" for="tz-select">Timezone</label>
+    <select id="tz-select" class="tz-select" title="Timezone used to display every timestamp. Stored evidence timestamps are always UTC and are never changed by this.">
+      ${zones
+        .map((z) => `<option value="${esc(z)}" ${z === displayTimezone ? "selected" : ""}>${esc(timezoneOptionLabel(z))}</option>`)
+        .join("")}
+    </select>
+    <span class="tz-error small" id="tz-error"></span>`;
+
+  document.getElementById("tz-select").addEventListener("change", async (e) => {
+    const chosen = e.target.value;
+    const errBox = document.getElementById("tz-error");
+    errBox.textContent = "";
+    try {
+      const res = await api("/settings", { method: "PUT", body: JSON.stringify({ timezone: chosen }) });
+      applyDisplaySettings(res.display);
+      // Re-render the current view so every timestamp on screen converts
+      // at once. Nothing is re-fetched from the server and no analysis is
+      // re-run: the instants are unchanged, only their rendering is.
+      renderTimezoneControl();
+      // route() alone is not enough. When the same case is already on
+      // screen it takes the switchTab fast path, which swaps only the tab
+      // body -- leaving the case header, and the Created / Last analyzed
+      // timestamps in it, rendered in the PREVIOUS zone. Two timestamps
+      // on one screen disagreeing about which zone they are in is exactly
+      // the misreading this feature exists to prevent, so the fast path
+      // is deliberately given up here and the whole case view rebuilt.
+      renderedCaseId = null;
+      renderedTab = null;
+      route();
+    } catch (err) {
+      // Keep the previous zone selected rather than leaving the control
+      // showing a zone that was refused.
+      errBox.textContent = err.message || String(err);
+      renderTimezoneControl();
+    }
+  });
+}
+
+// timezoneOptions is the shortlist plus whatever is currently set, so a
+// zone chosen outside the shortlist still displays correctly rather than
+// silently reverting the control to UTC.
+function timezoneOptions() {
+  const list = [...COMMON_TIMEZONES];
+  if (displayTimezone && !list.includes(displayTimezone)) list.unshift(displayTimezone);
+  return list;
+}
+
+// timezoneOptionLabel shows the zone the way an analyst reads it. The
+// currently-active zone carries its live abbreviation and offset; the
+// others show only their identifier, because computing an offset for
+// every option would be both slow and, for a zone on the other side of a
+// DST boundary, misleading.
+function timezoneOptionLabel(z) {
+  // "UTC \u2014 UTC" is noise; the abbreviation only adds information
+  // when it differs from the identifier.
+  if (z === displayTimezone && displayTimezoneAbbr && displayTimezoneAbbr !== z) {
+    return `${z} \u2014 ${displayTimezoneAbbr}`;
+  }
+  return z;
+}
+
+// COMMON_TIMEZONES mirrors api.CommonTimezones. Populated from the
+// server at startup so the two cannot drift; the literal here is only
+// the fallback used if that request fails.
+let COMMON_TIMEZONES = [
+  "UTC",
+  "Asia/Jakarta",
+  "Asia/Singapore",
+  "Asia/Tokyo",
+  "Europe/London",
+  "America/New_York",
+];
+
 // renderUserBar shows who is signed in and offers sign-out.
 function renderUserBar() {
   const bar = document.getElementById("user-bar");
@@ -329,6 +417,22 @@ function apiUpload(path, file, onProgress) {
 
     const xhr = new XMLHttpRequest();
     xhr.open("POST", "/api" + path, true);
+
+    // An upload is a state-changing POST and needs the same CSRF token
+    // every other write carries. api() sets this for fetch-based calls;
+    // this function predates authentication and bypassed it, so uploads
+    // were rejected by the middleware with 403 before the handler ever
+    // ran.
+    //
+    // The failure was invisible for a small file and looked like a
+    // network fault for a large one: the middleware rejects without
+    // reading the body, and Go's server refuses to drain more than
+    // maxPostHandlerReadBytes (256 KB) of an unread body, closing the
+    // connection instead. A browser still uploading then reports
+    // net::ERR_CONNECTION_RESET rather than the 403 that actually
+    // occurred.
+    const token = csrfToken();
+    if (token) xhr.setRequestHeader("X-Tracefall-CSRF", token);
 
     if (onProgress) {
       xhr.upload.addEventListener("progress", (e) => {
@@ -403,12 +507,102 @@ function isNoTimestamp(ts) {
 
 const NO_TIMESTAMP_LABEL = "No timestamp";
 
+// ---------------- display timezone ----------------
+//
+// Every timestamp Tracefall stores is an INSTANT in UTC, and stays that
+// way (see internal/normalize.Timestamp). The analyst can choose the
+// zone those instants are RENDERED in, and that choice lives here --
+// in the two formatters every view already calls -- rather than being
+// reimplemented per page. One conversion point is the only way the
+// Timeline, Findings, Investigations, Activity Chains and Audit History
+// can be guaranteed to agree about what a given event's time was.
+//
+// Conversion goes through Intl.DateTimeFormat with an IANA timeZone,
+// which uses the browser's own copy of the timezone database and is
+// therefore DST-correct. No offset arithmetic is performed anywhere in
+// this file; adding hours by hand is exactly how a timestamp ends up an
+// hour wrong for half the year.
+
+// displayTimezone is the IANA identifier currently in effect. UTC until
+// the settings load, so a slow settings request can never cause a
+// timestamp to render in an unexpected zone.
+let displayTimezone = "UTC";
+let displayTimezoneAbbr = "UTC";
+
+// tzFormatterCache avoids rebuilding an Intl.DateTimeFormat per row; on
+// a 10,000-row timeline that cost is real.
+const tzFormatterCache = new Map();
+
+function tzFormatter(zone, opts) {
+  const key = zone + "|" + JSON.stringify(opts);
+  let f = tzFormatterCache.get(key);
+  if (!f) {
+    try {
+      f = new Intl.DateTimeFormat("en-GB", { ...opts, timeZone: zone });
+    } catch {
+      // An unknown zone must never break rendering. Fall back to UTC and
+      // keep the label honest about what is actually being shown.
+      f = new Intl.DateTimeFormat("en-GB", { ...opts, timeZone: "UTC" });
+    }
+    tzFormatterCache.set(key, f);
+  }
+  return f;
+}
+
+// tzLabel is the suffix shown after every timestamp. It is never
+// omitted: a timestamp with no zone on it is the thing that gets
+// misread, which is the whole reason this feature exists.
+function tzLabel() {
+  return displayTimezoneAbbr || displayTimezone || "UTC";
+}
+
+// applyDisplaySettings sets the zone used by every formatter. The
+// formatter cache is not cleared because it is keyed by zone.
+function applyDisplaySettings(display) {
+  if (!display || !display.timezone) return;
+  displayTimezone = display.timezone;
+  displayTimezoneAbbr = display.abbreviation || display.timezone;
+}
+
+// loadDisplaySettings fetches the stored preference once at startup.
+// A failure leaves UTC in place rather than blocking the dashboard.
+async function loadDisplaySettings() {
+  try {
+    const s = await api("/settings");
+    applyDisplaySettings(s.display);
+    if (Array.isArray(s.common_timezones) && s.common_timezones.length) {
+      COMMON_TIMEZONES = s.common_timezones;
+    }
+    return s;
+  } catch {
+    return null;
+  }
+}
+
+const TZ_DATE_TIME_OPTS = {
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+  hour: "2-digit",
+  minute: "2-digit",
+  second: "2-digit",
+  hour12: false,
+};
+
+// tzParts renders one instant into the display zone as y/m/d h:m:s.
+function tzParts(d, opts) {
+  const parts = tzFormatter(displayTimezone, opts).formatToParts(d);
+  const get = (t) => (parts.find((p) => p.type === t) || {}).value || "";
+  return get;
+}
+
 function fmtTime(ts) {
   if (!ts) return "-";
   if (isNoTimestamp(ts)) return NO_TIMESTAMP_LABEL;
   const d = new Date(ts);
   if (isNaN(d.getTime())) return ts;
-  return d.toISOString().replace("T", " ").replace(/\.\d+Z$/, "").replace(/Z$/, "") + " UTC";
+  const g = tzParts(d, TZ_DATE_TIME_OPTS);
+  return `${g("year")}-${g("month")}-${g("day")} ${g("hour")}:${g("minute")}:${g("second")} ${tzLabel()}`;
 }
 
 function fmtDate(ts) {
@@ -416,7 +610,8 @@ function fmtDate(ts) {
   if (isNoTimestamp(ts)) return NO_TIMESTAMP_LABEL;
   const d = new Date(ts);
   if (isNaN(d.getTime())) return ts;
-  return d.toLocaleDateString(undefined, { day: "2-digit", month: "short", year: "numeric" }) + " " + d.toISOString().slice(11, 16) + " UTC";
+  const g = tzParts(d, { ...TZ_DATE_TIME_OPTS, month: "short" });
+  return `${g("day")} ${g("month")} ${g("year")} ${g("hour")}:${g("minute")} ${tzLabel()}`;
 }
 
 function severityBadge(sev) {
@@ -1075,8 +1270,8 @@ function renderDatePopover(prefix) {
         <span class="filter-pop-title">Date range</span>
       </div>
       <p class="filter-tz-note small muted">
-        Timezone: <strong>${esc(tz)}</strong>${browserIsUTC() ? "" : " (browser local)"}
-        ${browserIsUTC() ? "" : `<br/>Timeline timestamps are shown in UTC.`}
+        These inputs read in <strong>${esc(tz)}</strong>${browserIsUTC() ? "" : " (browser local)"}.
+        <br/>Timeline timestamps are displayed in <strong>${esc(displayTimezone)}</strong> (${esc(tzLabel())}).
       </p>
       <div class="filter-date-row">
         <label for="${prefix}-f-from-d">From</label>
@@ -1377,6 +1572,19 @@ function wireFilterBar(prefix, onChange) {
     state.q = "";
     const q = document.getElementById(`${prefix}-f-q`);
     if (q) q.value = "";
+
+    // Some screens own a search box OUTSIDE the filter bar -- the
+    // evidence triage screen's #ev-search sits next to the bar rather
+    // than inside it, because it drives a server-side query rather than
+    // the bar's own client-side matching.
+    //
+    // "Clear all" cleared only the in-bar input, so a search-only filter
+    // survived the button that says it clears everything: the chips
+    // disappeared while the result set stayed narrowed, with no visible
+    // cause. Clearing by the same prefix convention keeps one control
+    // responsible for the whole filter state.
+    const screenSearch = document.getElementById(`${prefix}-search`);
+    if (screenSearch) screenSearch.value = "";
     bar.querySelectorAll('input[type="checkbox"]').forEach((cb) => (cb.checked = false));
     bar.querySelectorAll('input[type="date"], input[type="time"]').forEach((el) => (el.value = ""));
     closeAll(null);
@@ -1518,7 +1726,38 @@ function eventDetailValue(e) {
 
 // ---------------- Router ----------------
 
-window.addEventListener("hashchange", route);
+// Navigation is guarded: an in-app move away from a case with unsaved
+// changes asks first. hashchange fires AFTER the hash has changed, so a
+// cancelled navigation has to restore the previous hash -- suppressing
+// the resulting second event with a flag, or it would re-ask forever.
+let lastHash = window.location.hash;
+let restoringHash = false;
+window.addEventListener("hashchange", async () => {
+  if (restoringHash) {
+    restoringHash = false;
+    return;
+  }
+  const target = window.location.hash;
+  if (caseGuard.check() && !sameCaseSection(lastHash, target)) {
+    const proceed = await confirmLeave();
+    if (!proceed) {
+      restoringHash = true;
+      window.location.hash = lastHash;
+      return;
+    }
+  }
+  lastHash = target;
+  route();
+});
+
+// sameCaseSection reports whether two hashes are the same case, so
+// moving BETWEEN sections of the case being edited does not prompt --
+// the pending change is still on screen and still saveable.
+function sameCaseSection(a, b) {
+  const caseOf = (h) => (h.match(/^#\/cases\/([^/]+)/) || [])[1] || "";
+  const ca = caseOf(a);
+  return ca !== "" && ca === caseOf(b);
+}
 window.addEventListener("DOMContentLoaded", async () => {
   checkHealth();
   // The session is resolved BEFORE the first route render, so an
@@ -1538,6 +1777,12 @@ window.addEventListener("DOMContentLoaded", async () => {
     renderPasswordChange();
     return;
   }
+  // Display settings load BEFORE the first render, so no timestamp is
+  // ever painted in UTC and then silently repainted in another zone --
+  // a flicker between two different readings of the same instant is
+  // exactly the kind of thing that gets a time written down wrong.
+  await loadDisplaySettings();
+  renderTimezoneControl();
   route();
 });
 
@@ -1582,7 +1827,146 @@ function route() {
   renderedCaseId = null;
   renderedTab = null;
   tabScroll.clear();
+  // No case on screen: a stale guard must not block navigation.
+  caseGuard.reset();
   renderCaseList();
+}
+
+// ---------------- Unsaved-changes guard (Phase 13) ----------------
+//
+// Case status and priority are pending until saved, so leaving the page
+// can lose them. Two mechanisms are needed, because they protect
+// different exits:
+//
+//   * In-app navigation (sidebar, All Cases, another case) is fully
+//     under our control, so it gets a real three-way choice:
+//     Save / Discard / Cancel.
+//   * A browser reload, a closed tab or the back button cannot be
+//     intercepted with a custom dialog -- browsers deliberately only
+//     allow the native beforeunload prompt, with wording they control.
+//     Pretending otherwise would be a guard that silently does nothing.
+const caseGuard = {
+  // check reports whether unsaved changes exist. Replaced by
+  // wireCaseMetadataControls while a case is on screen.
+  check: () => false,
+  save: async () => true,
+  discard: () => {},
+  // reset is called when leaving a case, so a stale guard from a
+  // previous case cannot block navigation in a new one.
+  reset() {
+    this.check = () => false;
+    this.save = async () => true;
+    this.discard = () => {};
+  },
+};
+
+// confirmLeave asks what to do about pending changes.
+//
+// Returns true if navigation may continue. window.confirm is used
+// rather than a bespoke modal because it is synchronous and cannot be
+// missed; the three-way choice is expressed as two sequential questions
+// so Cancel is always reachable.
+async function confirmLeave() {
+  if (!caseGuard.check()) return true;
+  const save = window.confirm(
+    "You have unsaved changes to this case's status or priority.\n\n" +
+      "OK  - save them now and continue\n" +
+      "Cancel - decide whether to discard them"
+  );
+  if (save) {
+    const ok = await caseGuard.save();
+    if (!ok) {
+      window.alert("The changes could not be saved. You are still on the case, and your changes are intact.");
+      return false;
+    }
+    return true;
+  }
+  const discard = window.confirm(
+    "Discard your unsaved changes and leave?\n\n" +
+      "OK  - discard them and continue\n" +
+      "Cancel - stay here and keep them"
+  );
+  if (discard) {
+    caseGuard.discard();
+    return true;
+  }
+  return false; // stay put, changes intact
+}
+
+// The browser-native guard for reload / close / back. Browsers require
+// preventDefault plus returnValue and show their OWN wording; no custom
+// message is possible, which is why this is not used for in-app links.
+window.addEventListener("beforeunload", (e) => {
+  if (!caseGuard.check()) return;
+  e.preventDefault();
+  e.returnValue = "";
+});
+
+// refreshLifecycleLocks re-reads the server's authoritative view of what
+// this case still permits, and applies it to the controls.
+//
+// Called after a save, because saving may have just contained or closed
+// the case. The server is asked rather than the rule re-derived here:
+// there must be exactly one source of truth for the locks, and it is the
+// server that enforces them.
+async function refreshLifecycleLocks(caseId) {
+  try {
+    const data = await api(`/cases/${caseId}`);
+    applyLifecycleLocks(data);
+  } catch (e) {
+    /* a failed refresh leaves the controls as they were; the server
+       still refuses anything it should refuse */
+  }
+}
+
+// applyLifecycleLocks disables the controls a locked case forbids.
+//
+// This is presentation only. Every one of these operations is re-checked
+// server-side (internal/api/lifecycle.go), so a user who re-enables a
+// control in devtools still gets a 409.
+function applyLifecycleLocks(data) {
+  if (!data || !data.case) return;
+  lifecycleState.evidenceMutable = data.evidence_mutable !== false;
+  lifecycleState.priorityEditable = data.priority_editable !== false;
+  lifecycleState.caseStatus = data.case.case_status;
+
+  const prioritySel = document.getElementById("case-priority-select");
+  if (prioritySel) {
+    prioritySel.disabled = !lifecycleState.priorityEditable;
+    prioritySel.title = lifecycleState.priorityEditable
+      ? ""
+      : "This case is closed. Reopen it to change its priority.";
+  }
+  const banner = document.getElementById("case-lock-banner");
+  if (banner) banner.innerHTML = renderLockBanner();
+
+  // The lock UI is split across the case chrome (this function) and the
+  // tab body (applyTabLifecycleLocks). Both must be refreshed whenever
+  // the lifecycle changes, or they disagree.
+  //
+  // They did: saving a status change called only this function, so the
+  // header updated while the Evidence Collections panel kept rendering
+  // the OLD banner -- a case saved from Contained to Investigating
+  // showed "Investigating" at the top and "This case is contained" below
+  // it. Driving both from one entry point is what makes that state
+  // unreachable, rather than relying on every future caller to remember
+  // the second one.
+  applyTabLifecycleLocks();
+}
+
+// lifecycleState mirrors the server's answer for the case on screen.
+const lifecycleState = { evidenceMutable: true, priorityEditable: true, caseStatus: "open" };
+
+// renderLockBanner states the lock in words wherever evidence would
+// otherwise appear editable.
+function renderLockBanner() {
+  if (lifecycleState.evidenceMutable) return "";
+  return `<div class="lock-banner" role="status">
+    <strong>Evidence is locked</strong>
+    <div class="small">This case is <strong>${esc(lifecycleState.caseStatus)}</strong>, so its evidence set cannot be added to, imported or deleted.
+    Reading, analysis, export and integrity verification all remain available.
+    Set the status back to Open or Investigating to make changes.</div>
+  </div>`;
 }
 
 // ---------------- Case list ----------------
@@ -1654,6 +2038,8 @@ async function renderCaseList() {
         <a class="case-card" href="#/cases/${c.id}">
           <div class="case-card-head">
             <span class="case-card-name">${esc(c.name)}</span>
+            ${lifecycleBadge(c.case_status)}
+            ${casePriorityBadge(c.priority)}
             ${statusBadge(c.status)}
           </div>
           ${c.description ? `<div class="muted small case-card-meta">${esc(c.description)}</div>` : ""}
@@ -1666,6 +2052,30 @@ async function renderCaseList() {
   } catch (e) {
     document.getElementById("case-list").innerHTML = errorBox(e);
   }
+}
+
+// lifecycleBadge shows the ANALYST lifecycle (open / investigating /
+// contained / closed).
+//
+// Added in Phase 13 because the list previously showed only
+// statusBadge(c.status) -- the ENGINE state (created/ingested/analyzed).
+// A closed case was therefore indistinguishable from an open one without
+// opening it, which is exactly what an analyst scanning the list needs
+// to see. Both are shown: they answer different questions.
+//
+// The state is carried by the WORD, never by colour alone; the colour
+// only reinforces it.
+function lifecycleBadge(caseStatus) {
+  const s = caseStatus || "open";
+  return `<span class="badge lifecycle lifecycle-${esc(s)}" title="Analyst workflow status">${esc(s)}</span>`;
+}
+
+// casePriorityBadge shows the case's triage priority. Deliberately
+// styled apart from finding severity and artifact priority: three
+// different judgements that must not be read as one.
+function casePriorityBadge(priority) {
+  if (!priority) return "";
+  return `<span class="badge case-prio case-prio-${esc(priority)}" title="Case priority">${esc(priority)}</span>`;
 }
 
 // wireCaseSelection powers the case list's checkbox selection and bulk
@@ -1792,6 +2202,9 @@ async function renderCaseDetail(caseId, tab) {
 
   wireSidebar(caseId);
   wireCaseMetadataControls(caseId);
+  // Apply the server's authoritative lock state to the controls as soon
+  // as the case renders, not only after a save.
+  applyLifecycleLocks(data);
   // Absent for a non-admin: the control is not rendered at all.
   document.getElementById("delete-case-btn")?.addEventListener("click", () =>
     confirmAndDeleteCases([caseId], () => {
@@ -1913,6 +2326,69 @@ document.addEventListener("keydown", (e) => {
   }
 });
 
+// renderCaseStateBadges is the case's state, at a glance, in the header.
+//
+// Three questions an analyst asks before anything else -- where is this
+// case in the workflow, how urgent is it, and can I trust what is on
+// screen -- previously required reading three separate places: a badge
+// for the engine status, and two dropdowns further down for workflow
+// status and priority. Answering them now takes one look.
+//
+// These badges are DISPLAY ONLY. Editing still happens through the
+// selects below, which remain the single place state is changed, so
+// there is exactly one control per piece of state and no ambiguity
+// about which one is authoritative.
+function renderCaseStateBadges(c, staleAnalysis) {
+  return `
+    <div class="case-state-badges" role="group" aria-label="Case state">
+      ${caseWorkflowBadge(c.case_status)}
+      ${casePriorityBadge(c.priority)}
+      ${analysisStateBadge(c, staleAnalysis)}
+    </div>`;
+}
+
+// caseWorkflowBadge shows the ANALYST workflow state (open /
+// investigating / contained / closed). Deliberately not the engine
+// status: the two are different axes and conflating them has been a
+// standing bug risk in this codebase -- see statusBadge's own note.
+function caseWorkflowBadge(caseStatus) {
+  const st = caseStatus || "open";
+  const locked = st === "contained" || st === "closed";
+  const title = locked
+    ? `Case is ${st}: its evidence set is locked and cannot be added to, imported or deleted.`
+    : `Case is ${st}: evidence can still be added, imported and deleted.`;
+  return `<span class="badge case-state case-state-${esc(st)}" title="${esc(title)}">${esc(st.toUpperCase())}</span>`;
+}
+
+// casePriorityBadge shows triage priority, styled with the SAME
+// vocabulary as artifact priority elsewhere and deliberately apart from
+// finding severity -- an analyst's urgency judgement is not a detection
+// verdict.
+function casePriorityBadge(priority) {
+  const p = priority || "medium";
+  return `<span class="badge prio prio-${esc(p)}" title="Analyst triage priority: ${esc(p)}">${esc(p.toUpperCase())}</span>`;
+}
+
+// analysisStateBadge answers "can I trust what is on screen?".
+//
+// Three distinct states, never collapsed: analysis has never been run,
+// analysis is current, or analysis exists but the evidence has changed
+// underneath it. The third is the dangerous one -- results that look
+// authoritative but describe evidence that is no longer what the case
+// holds -- so it is the one that gets the warning styling.
+function analysisStateBadge(c, staleAnalysis) {
+  if (staleAnalysis) {
+    return `<span class="badge analysis-state analysis-stale"
+                  title="Findings, correlations, investigations and ATT&amp;CK results were produced before the evidence last changed. Re-run analysis before treating them as current.">ANALYSIS STALE</span>`;
+  }
+  if (c.status === "analyzed") {
+    return `<span class="badge analysis-state analysis-current"
+                  title="Analysis is current for the evidence this case holds${c.analyzed_at ? ", last run " + esc(fmtTime(c.analyzed_at)) : ""}.">ANALYZED</span>`;
+  }
+  return `<span class="badge analysis-state analysis-never"
+                title="Analysis has never been run for this case.">NEVER ANALYZED</span>`;
+}
+
 // renderCaseHeader is the always-visible case identity band.
 //
 // Two rows by design (section 15): identity and actions on top,
@@ -1930,7 +2406,7 @@ function renderCaseHeader(caseId, c, summary, staleAnalysis) {
           <div class="muted small mono case-id">${esc(c.id)}</div>
         </div>
         <div class="case-header-actions">
-          ${statusBadge(c.status)}
+          ${renderCaseStateBadges(c, staleAnalysis)}
           <div class="dropdown">
             <button type="button" class="secondary small" id="export-case-btn"
                     aria-haspopup="true" aria-expanded="false" aria-controls="export-menu">Export &#9662;</button>
@@ -1945,6 +2421,7 @@ function renderCaseHeader(caseId, c, summary, staleAnalysis) {
       </div>
 
       <div class="case-meta">
+        <div class="case-meta-edit-label muted small">Edit case state</div>
         <div class="case-meta-item">
           <label class="muted small" for="case-status-select">Case status</label>
           <select id="case-status-select" class="filter-input">
@@ -1966,7 +2443,9 @@ function renderCaseHeader(caseId, c, summary, staleAnalysis) {
           <span class="small">${c.analyzed_at ? esc(fmtTime(c.analyzed_at)) : "Never analyzed"}</span>
         </div>
       </div>
+      <div id="case-save-bar" hidden></div>
       <div id="case-metadata-error"></div>
+      <div id="case-lock-banner"></div>
       ${
         staleAnalysis
           ? `<div class="stale-banner">
@@ -2034,6 +2513,7 @@ function renderOverviewTab(content, caseId) {
         <h2>Evidence Collections</h2>
         <button id="add-evidence-btn">+ Add Evidence</button>
       </div>
+      <div id="tab-lock-banner"></div>
       <div id="add-evidence-form" class="add-evidence-form hidden">
         <h3>Upload evidence</h3>
         <p class="muted small">Upload a ZIP archive of a KAPE triage collection, or a single AD1 forensic image (FTK Imager's logical/custom-content format, detected from the file's contents, not just its <code>.ad1</code> extension). Tracefall safely inspects it and catalogs every file inside (EvtxECmd/PECmd/RECmd CSV, Scheduled Task XML, and anything else, or the files inside the AD1) without extracting or parsing anything yet -- you choose which discovered files to import next.</p>
@@ -2104,6 +2584,35 @@ async function renderTabContent(caseId, tab, collections) {
   } catch (e) {
     content.innerHTML = errorBox(e);
   }
+  // Controls that live INSIDE the tab body -- "+ Add Evidence" is the
+  // one that matters -- are created after the case chrome, so the lock
+  // has to be re-applied once the body exists. Without this the button
+  // is offered on a locked case and can only fail with a 409.
+  applyTabLifecycleLocks();
+}
+
+// applyTabLifecycleLocks hides evidence-mutating controls inside the
+// current tab body. Presentation only: the server refuses these
+// operations regardless (internal/api/lifecycle.go).
+function applyTabLifecycleLocks() {
+  const locked = !lifecycleState.evidenceMutable;
+
+  const addBtn = document.getElementById("add-evidence-btn");
+  if (addBtn) addBtn.hidden = locked;
+
+  // Every branch below is SYMMETRIC -- it restores the control when the
+  // case is mutable, not only hides it when locked. The hiding used to
+  // be one-way, which was invisible while this only ever ran on a
+  // freshly rendered tab (whose controls start visible) but leaves a
+  // reopened case permanently stripped now that it also runs against an
+  // already-rendered one.
+  const form = document.getElementById("add-evidence-form");
+  if (form && locked) form.classList.add("hidden");
+
+  document.querySelectorAll(".evidence-file-delete-btn").forEach((b) => (b.hidden = locked));
+
+  const host = document.getElementById("tab-lock-banner");
+  if (host) host.innerHTML = renderLockBanner();
 }
 
 // switchTab handles a tab change within the case already on screen.
@@ -2267,8 +2776,18 @@ function renderPager(prefix, p, opts) {
 // onChange is called after the state has already been updated, so a
 // caller only ever has to re-render.
 function wirePager(prefix, container, onChange) {
-  if (!container || container.dataset[`pagerWired${prefix}`]) return;
-  container.dataset[`pagerWired${prefix}`] = "1";
+  // The "already wired" marker is keyed by a SANITIZED prefix.
+  //
+  // dataset property names become data-* attributes, and a name
+  // containing "-" followed by a lowercase letter is rejected with a
+  // SyntaxError. A prefix carrying a collection UUID therefore threw for
+  // some UUIDs and not others, depending purely on whether a hyphen in
+  // the id happened to be followed by a letter -- which made the failure
+  // look intermittent. Stripping non-alphanumerics removes the class of
+  // bug rather than the one id that exposed it.
+  const key = `pagerWired${String(prefix).replace(/[^A-Za-z0-9]/g, "")}`;
+  if (!container || container.dataset[key]) return;
+  container.dataset[key] = "1";
 
   container.addEventListener("click", (e) => {
     const b = e.target.closest(`.pager-btn[data-pager="${prefix}"]`);
@@ -2344,7 +2863,18 @@ function renderCollectionsList(caseId, collections) {
 // as "Unknown", never a guess.
 function wireCollectionIntegrity(caseId, root) {
   root.querySelectorAll(".collection-card").forEach((card) => {
-    card.addEventListener("click", async () => {
+    card.addEventListener("click", async (event) => {
+      // The whole card is the expand/collapse target, so any control
+      // INSIDE it -- pager buttons, the page-size and status selects, the
+      // integrity copy/expand controls -- would otherwise bubble up and
+      // collapse the panel the analyst is working in. Paging the file
+      // list closed the collection on every click.
+      //
+      // Ignoring clicks that originate from an interactive element covers
+      // the controls added since as well as those present today, rather
+      // than each new control having to remember to stop propagation.
+      if (event.target.closest("button, select, input, textarea, a, label, .pager")) return;
+
       const detail = card.querySelector(".collection-integrity-detail");
       const open = detail.classList.contains("open");
       if (open) {
@@ -2372,6 +2902,7 @@ function wireCollectionIntegrity(caseId, root) {
             <div><span class="muted small">Event time range</span><div class="small">${cd.earliest_event ? esc(fmtTime(cd.earliest_event)) + " &rarr; " + esc(fmtTime(cd.latest_event)) : "Unknown"}${cd.undated_events ? `<div class="muted small" title="These events are real observations, but their artifact records no time, so they fall outside the range above rather than being placed on it.">+ ${cd.undated_events} event(s) with no timestamp</div>` : ""}</div></div>
           </div>
           ${renderIntegrityVerifyPanel(caseId, cd)}
+          ${renderDeleteCollectionControl(cd)}
           <div class="muted small" style="margin-top:8px">Parser coverage</div>
           ${
             cd.parser_coverage && cd.parser_coverage.length
@@ -2381,36 +2912,21 @@ function wireCollectionIntegrity(caseId, root) {
               : `<p class="empty">Unknown -- no files imported from this collection yet.</p>`
           }
           <div class="muted small" style="margin-top:8px">Per-file integrity</div>
-          ${
+          <div id="${integrityTablePagerHost(cd.collection_id)}">${
             files.length
-              ? `<div class="table-wrap"><table class="data-table">
-            <thead><tr><th>Filename</th><th>SHA-256</th><th>Size</th><th>Discovered</th><th>Imported</th><th>Status</th><th>Events</th></tr></thead>
-            <tbody>
-              ${files
-                .map(
-                  (sf) => `<tr>
-                <td class="mono small">${esc(sf.original_filename)}</td>
-                <td class="mono small">${sha256Cell(sf, "Unknown")}</td>
-                <td class="small">${fmtBytes(sf.size_bytes)}</td>
-                <td class="small">${esc(fmtTime(sf.discovered_at))}</td>
-                <td class="small">${sf.imported_at ? esc(fmtTime(sf.imported_at)) : "-"}</td>
-                <td class="small">${esc(sf.import_status)}</td>
-                <td class="small">${sf.event_count || "-"}</td>
-              </tr>`
-                )
-                .join("")}
-            </tbody>
-          </table></div>`
+              ? ""
               : `<p class="empty">No files recorded in this collection.${
                   cd.ingestion_status === "failed"
                     ? " This collection was left behind by a discovery that failed before it finished cataloging (an older Tracefall version); it holds no evidence and cannot be imported."
                     : ""
                 }</p>`
-          }
+          }</div>
         `;
         detail.dataset.loaded = "1";
         wireIntegrityHash(detail);
+        mountIntegrityTable(detail, cd.collection_id, files);
         wireIntegrityVerify(caseId, card.dataset.collection, detail);
+        wireDeleteCollection(caseId, cd, detail);
       } catch (e) {
         detail.innerHTML = errorBox(e);
       }
@@ -2433,17 +2949,94 @@ function wireCaseMetadataControls(caseId) {
   const errBox = document.getElementById("case-metadata-error");
   const exportBtn = document.getElementById("export-case-btn");
   const exportMenu = document.getElementById("export-menu");
+  const saveBar = document.getElementById("case-save-bar");
 
-  const update = async (patch) => {
+  // Phase 13: changing a dropdown no longer saves.
+  //
+  // Previously each 'change' fired a PATCH immediately, so a mis-click
+  // closed a case -- and closing a case now freezes its evidence, which
+  // makes an accidental save a real problem rather than a cosmetic one.
+  // Changes accumulate as PENDING state until the analyst saves them.
+  const baseline = { case_status: statusSel.value, priority: prioritySel.value };
+
+  const pending = () => {
+    const p = {};
+    if (statusSel.value !== baseline.case_status) p.case_status = statusSel.value;
+    if (prioritySel.value !== baseline.priority) p.priority = prioritySel.value;
+    return p;
+  };
+  const hasPending = () => Object.keys(pending()).length > 0;
+
+  // Registered so the router and the browser can both ask whether it is
+  // safe to leave -- see caseGuard.
+  caseGuard.check = hasPending;
+  caseGuard.save = () => saveNow();
+  caseGuard.discard = () => {
+    statusSel.value = baseline.case_status;
+    prioritySel.value = baseline.priority;
+    render();
+  };
+
+  function render() {
+    const p = pending();
+    const dirty = Object.keys(p).length > 0;
+    saveBar.hidden = !dirty;
+    if (!dirty) {
+      saveBar.innerHTML = "";
+      return;
+    }
+    const parts = [];
+    if (p.case_status) parts.push(`status \u2192 <strong>${esc(p.case_status)}</strong>`);
+    if (p.priority) parts.push(`priority \u2192 <strong>${esc(p.priority)}</strong>`);
+    saveBar.innerHTML = `
+      <div class="save-bar" role="status">
+        <span class="small">Unsaved changes: ${parts.join(" &middot; ")}</span>
+        <span class="save-bar-actions">
+          <button type="button" class="secondary small" id="case-discard-btn">Discard</button>
+          <button type="button" class="small" id="case-save-btn">Save changes</button>
+        </span>
+      </div>`;
+    document.getElementById("case-save-btn").addEventListener("click", () => saveNow());
+    document.getElementById("case-discard-btn").addEventListener("click", () => caseGuard.discard());
+  }
+
+  // saveNow persists the whole pending update in ONE request, so status
+  // and priority land together or not at all. Returns true on success so
+  // the navigation guard can decide whether to proceed.
+  async function saveNow() {
+    const patch = pending();
+    if (Object.keys(patch).length === 0) return true;
     errBox.innerHTML = "";
+    const btn = document.getElementById("case-save-btn");
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = "Saving...";
+    }
     try {
       await api(`/cases/${caseId}`, { method: "PATCH", body: JSON.stringify(patch) });
+      // The saved values become the new baseline only on success.
+      baseline.case_status = statusSel.value;
+      baseline.priority = prioritySel.value;
+      render();
+      // The lifecycle locks may have just changed, so re-read the
+      // server's authoritative view rather than inferring it here.
+      await refreshLifecycleLocks(caseId);
+      return true;
     } catch (e) {
+      // On failure the pending values are KEPT: the analyst's unsaved
+      // work is not discarded because the server said no.
       errBox.innerHTML = errorBox(e);
+      if (btn) {
+        btn.disabled = false;
+        btn.textContent = "Save changes";
+      }
+      return false;
     }
-  };
-  statusSel.addEventListener("change", () => update({ case_status: statusSel.value }));
-  prioritySel.addEventListener("change", () => update({ priority: prioritySel.value }));
+  }
+
+  statusSel.addEventListener("change", render);
+  prioritySel.addEventListener("change", render);
+  render();
 
   // The menu is absolutely positioned (see .dropdown-menu), so opening it
   // overlays the page instead of growing it -- it previously sat in normal
@@ -2631,7 +3224,7 @@ async function renderAuditTab(content, caseId) {
     <h2>Audit History (${events.length})</h2>
     <p class="muted small">Actor is always "local-user" -- Tracefall has no authentication yet, so this is not an authoritative identity. See docs/analyst-workflow.md.</p>
     <div class="table-wrap"><table class="data-table">
-      <thead><tr><th>Time (UTC)</th><th>Action</th><th>Actor</th><th>Target</th><th>Summary</th></tr></thead>
+      <thead><tr><th>Time (${esc(tzLabel())})</th><th>Action</th><th>Actor</th><th>Target</th><th>Summary</th></tr></thead>
       <tbody>
         ${events
           .map(
@@ -2976,13 +3569,67 @@ function evidenceDetails(f) {
       ${row("Parser", f.parser)}
       ${row("Forensic priority", PRIORITY_LABELS[f.priority] || f.priority)}
       ${row("Status", EVIDENCE_STATUS_LABELS[evidenceStatusValue(f)] || f.import_status)}
+      ${row("Classification", capabilityClassification(f))}
       ${row("Size", fmtBytes(f.size_bytes))}
       ${row("SHA-256", f.sha256)}
       ${row("Embedded hash (from container)", f.embedded_hash)}
       ${row("Source collection", collectionLabel(f.collection_id))}
       ${row("Events imported", f.event_count ? String(f.event_count) : "")}
     </div>
-    ${f.unsupported_reason ? `<p class="muted small ev-detail-reason">${esc(f.unsupported_reason)}</p>` : ""}`;
+    ${renderCapabilityBoundary(f)}`;
+}
+
+// capabilityClassification names WHICH kind of "not supported" this is.
+//
+// "Known artifact, parser unavailable" and "unrecognized" are different
+// investigative facts: the first tells an analyst to reach for another
+// tool on a file they now have identified, the second tells them
+// Tracefall could not identify it at all. NTFS $MFT is the case that
+// matters -- it is recognized, high priority, and unparsed.
+function capabilityClassification(f) {
+  if (f.supported) return "Supported \u2014 a parser exists for this artifact";
+  if (f.recognized) return "Known artifact, parser unavailable";
+  return "Unrecognized \u2014 not identified as a known forensic artifact";
+}
+
+// renderCapabilityBoundary shows exactly what Tracefall can and cannot
+// read for this file's artifact family.
+//
+// A one-line reason ("Tracefall parses Chromium History and Firefox
+// places.sqlite only. Internet Explorer/Edge Legacy WebCacheV01.dat is
+// an ESE database, and cookie/cache stores are not parsed.") was
+// technically accurate and still left an analyst to work out, from a
+// sentence, whether their Chrome history was covered. The support
+// boundary is a boundary; showing it as two lists makes it readable at
+// a glance instead of parseable on a second reading.
+//
+// Nothing here asserts support -- both lists come from the capability
+// registry, which derives support from the live parser registry.
+function renderCapabilityBoundary(f) {
+  if (!f.unsupported_reason && !(f.not_parsed || []).length && !(f.parsed_instead || []).length) return "";
+  const list = (items) => `<ul class="capability-list">${items.map((i) => `<li>${esc(i)}</li>`).join("")}</ul>`;
+  const notParsed = f.not_parsed || [];
+  const parsed = f.parsed_instead || [];
+  return `
+    <div class="capability-boundary">
+      ${f.unsupported_reason ? `<p class="muted small ev-detail-reason">${esc(f.unsupported_reason)}</p>` : ""}
+      ${
+        notParsed.length
+          ? `<div class="capability-group">
+               <div class="capability-heading not-supported">Not currently supported</div>
+               ${list(notParsed)}
+             </div>`
+          : ""
+      }
+      ${
+        parsed.length
+          ? `<div class="capability-group">
+               <div class="capability-heading supported">Supported in this family</div>
+               ${list(parsed)}
+             </div>`
+          : ""
+      }
+    </div>`;
 }
 
 // EVIDENCE_STATUS_LABELS maps the status vocabulary the toolbar filters
@@ -3013,12 +3660,39 @@ function renderEvidenceCoverage(cov) {
   const buckets = cov.by_type || [];
   return `
     <div class="coverage">
+      <p class="muted small coverage-note">
+        <strong>Supported + Unsupported = ${fmtCount(cov.discovered)} discovered.</strong>
+        The second group breaks down the ${fmtCount(cov.supported)} <em>supported</em> files only &mdash; an unsupported
+        file is never a candidate for import, so it appears in the first group and not the second.
+        Adding across the two groups double-counts.
+      </p>
       <div class="coverage-totals">
-        <div class="coverage-stat"><div class="n">${fmtCount(cov.discovered)}</div><div class="l">Files discovered</div></div>
-        <div class="coverage-stat"><div class="n ok">${fmtCount(cov.supported)}</div><div class="l">Supported</div></div>
-        <div class="coverage-stat"><div class="n muted">${fmtCount(cov.unsupported)}</div><div class="l">Unsupported</div></div>
-        <div class="coverage-stat"><div class="n muted">${fmtCount(cov.duplicates)}</div><div class="l">Duplicates</div></div>
-        ${cov.parse_failed ? `<div class="coverage-stat"><div class="n bad">${fmtCount(cov.parse_failed)}</div><div class="l">Parse errors</div></div>` : ""}
+        <div class="coverage-stat coverage-total" title="Every file found inside this source or image. Both breakdowns beside it account for all of them, separately.">
+          <div class="n">${fmtCount(cov.discovered)}</div><div class="l">Discovered</div></div>
+
+        <div class="coverage-axis" role="group" aria-label="By capability">
+          <div class="coverage-axis-label">Can Tracefall parse it?</div>
+          <div class="coverage-axis-stats">
+            <div class="coverage-stat" title="Files whose format Tracefall has a parser for. Supported is NOT the same as imported -- a supported file still has to be selected and parsed.">
+              <div class="n ok">${fmtCount(cov.supported)}</div><div class="l">Supported</div></div>
+            <div class="coverage-stat" title="Files Tracefall has no parser for. They stay in the collection's inventory: evidence you may need to examine another way, not broken files.">
+              <div class="n muted">${fmtCount(cov.unsupported)}</div><div class="l">Unsupported</div></div>
+          </div>
+        </div>
+
+        <div class="coverage-axis" role="group" aria-label="By import state">
+          <div class="coverage-axis-label">What happened to the supported files?</div>
+          <div class="coverage-axis-stats">
+            <div class="coverage-stat" title="Supported files selected and successfully parsed into this case. Only these contribute events to the analysis.">
+              <div class="n ok">${fmtCount(cov.imported)}</div><div class="l">Imported</div></div>
+            <div class="coverage-stat" title="Supported files not yet selected for import. Unsupported files are not counted here -- they cannot be imported at all.">
+              <div class="n muted">${fmtCount(cov.not_imported)}</div><div class="l">Not imported</div></div>
+            <div class="coverage-stat" title="Files identical by SHA-256 to another file already in this collection, so they were not imported twice.">
+              <div class="n muted">${fmtCount(cov.duplicates)}</div><div class="l">Duplicates</div></div>
+            <div class="coverage-stat" title="Supported files that WERE selected for import but whose parser failed. Not the same as unsupported: Tracefall recognized the artifact and could not read this particular file.">
+              <div class="n ${cov.parse_failed ? "bad" : "muted"}">${fmtCount(cov.parse_failed)}</div><div class="l">Parse failed</div></div>
+          </div>
+        </div>
       </div>
       ${
         buckets.length
@@ -3102,7 +3776,7 @@ function wireDiscoverySelection(container, caseId, collectionId, disc) {
   const importBtn = container.querySelector("#import-selected-btn");
   const importCount = container.querySelector("#import-selected-count");
 
-  pagerFor(prefix, { scope: collectionId, sizes: [25, 50, 100, 250], defaultSize: 100 });
+  pagerFor(prefix, { scope: collectionId, sizes: [10, 25, 50, 100, 250], defaultSize: 10 });
 
   // filterSignature is the identity of "the current filter". Two
   // selections made under the same signature are comparable; a change
@@ -3154,6 +3828,7 @@ function wireDiscoverySelection(container, caseId, collectionId, disc) {
     listHost.removeAttribute("aria-busy");
     renderFiltersOnce(page);
     renderList(page);
+    updateRecommendedCount(page);
     renderSelectionNote(page);
     pagerHost.innerHTML = renderPager(prefix, {
       page: page.page, pageSize: page.page_size, total: page.total,
@@ -3197,6 +3872,17 @@ function wireDiscoverySelection(container, caseId, collectionId, disc) {
         <tbody>${page.items.map((f) => rowForDiscoveredFile(f, selected.has(f.id))).join("")}</tbody>
       </table></div>
       <div class="evidence-cards">${page.items.map((f) => cardForDiscoveredFile(f, selected.has(f.id))).join("")}</div>`;
+  }
+
+  // updateRecommendedCount keeps the button's number equal to the set it
+  // would actually select, as the filter changes.
+  function updateRecommendedCount(page) {
+    const el = container.querySelector("#ev-recommended-count");
+    if (el) el.textContent = fmtCount(page.recommended_total || 0);
+    const btn = container.querySelector("#ev-select-recommended");
+    // With nothing recommended under this filter the button could only
+    // clear the selection, which is not what it says it does.
+    if (btn) btn.disabled = (page.recommended_total || 0) === 0;
   }
 
   // renderSelectionNote is where the two selection modes are told apart
@@ -3335,8 +4021,20 @@ function wireDiscoverySelection(container, caseId, collectionId, disc) {
     btn.disabled = true;
     btn.textContent = "Selecting...";
     try {
-      const res = await api(`/cases/${caseId}/evidence/${collectionId}/files/ids?recommended=true`);
+      // Scoped to the CURRENT filter, and REPLACING the selection.
+      //
+      // It previously added to whatever was already selected, using an
+      // unfiltered query: with 242 files already selected, "Select
+      // recommended (240)" added 240 mostly-overlapping ids and left 242
+      // selected -- a number describing neither the action nor its
+      // result. "Recommended" is the recommended subset of the MATCHING
+      // files, so selecting it must yield exactly that set.
+      const q = queryParams();
+      q.set("recommended", "true");
+      const res = await api(`/cases/${caseId}/evidence/${collectionId}/files/ids?${q}`);
+      selected.clear();
       (res.ids || []).forEach((id) => selected.add(id));
+      bulk = { signature: filterSignature(), count: selected.size, mode: "recommended" };
       await load();
     } catch (e) {
       container.querySelector("#import-error").innerHTML = errorBox(e);
@@ -3395,24 +4093,64 @@ async function runImportWithProgress(caseId, collectionId, ids, progressHost, co
     body: JSON.stringify({ source_file_ids: ids }),
   });
 
-  progressHost.innerHTML = renderImportProgress({ phase: "preparing", files_total: ids.length, percent: 0 });
+  const jobId = started.job_id;
+
+  // Cancellation is requested at most once per click but is safe to
+  // request repeatedly -- the server treats a second cancel as a no-op
+  // (see Service.CancelImport). The local flag exists only to flip the
+  // button into "Cancelling..." immediately, so the analyst gets
+  // feedback in the same frame rather than waiting for the next poll.
+  let cancelRequested = false;
+  async function requestCancel(btn) {
+    cancelRequested = true;
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = "Cancelling...";
+    }
+    try {
+      await api(`/cases/${caseId}/import-jobs/${jobId}/cancel`, { method: "POST" });
+    } catch (e) {
+      // A failed cancel must not leave the UI claiming it worked. The
+      // import is still running, so re-enable the button and say so.
+      cancelRequested = false;
+      if (btn) {
+        btn.disabled = false;
+        btn.textContent = "Cancel import";
+      }
+      const err = progressHost.querySelector(".import-cancel-error");
+      if (err) err.textContent = "Could not cancel the import: " + (e.message || e);
+    }
+  }
+
+  // paint re-renders progress and re-attaches the Cancel handler, since
+  // the panel's markup is replaced on every poll.
+  function paint(p) {
+    progressHost.innerHTML = renderImportProgress(p, cancelRequested);
+    const btn = progressHost.querySelector("#import-cancel-btn");
+    if (btn) btn.addEventListener("click", () => requestCancel(btn));
+  }
+
+  paint({ phase: "preparing", files_total: ids.length, percent: 0 });
 
   // Poll at a human cadence: fast enough to feel live, slow enough not to
   // spend the browser's time on requests instead of rendering.
   for (;;) {
     await sleep(400);
-    const p = await api(`/cases/${caseId}/import-jobs/${started.job_id}`);
-    progressHost.innerHTML = renderImportProgress(p);
+    const p = await api(`/cases/${caseId}/import-jobs/${jobId}`);
+    paint(p);
     if (!p.done) continue;
 
     if (p.phase === "failed") {
       throw new Error(p.error || "the import failed");
     }
+    // Cancelled is a normal terminal state, not a failure: the files
+    // that were imported are valid evidence and the result describes
+    // exactly what happened.
     progressHost.innerHTML = "";
-    container.querySelector("#import-result").innerHTML = renderImportResults(p.result || {});
+    container.querySelector("#import-result").innerHTML = renderImportResults(p.result || {}, p.phase === "cancelled");
     const cont = container.querySelector("#import-continue-btn");
     if (cont) cont.addEventListener("click", () => window.location.reload());
-    wireParseFailureToggle(container);
+    wireParseFailureToggle(container, (p.result || {}).parse_failures);
     return;
   }
 }
@@ -3425,15 +4163,32 @@ const IMPORT_PHASE_LABELS = {
   finalizing: "Finalizing",
   complete: "Complete",
   failed: "Failed",
+  cancelled: "Cancelled",
 };
 
-function renderImportProgress(p) {
+function renderImportProgress(p, cancelRequested) {
   const pct = typeof p.percent === "number" ? p.percent : -1;
   const indeterminate = pct < 0;
   return `
     <div class="panel import-progress" style="background:var(--bg-panel); margin-top:var(--space-3); margin-bottom:0">
-      <h3>Importing evidence</h3>
+      <div class="row between">
+        <h3>Importing evidence</h3>
+        ${
+          p.done
+            ? ""
+            : `<button type="button" class="danger small" id="import-cancel-btn"
+                       ${cancelRequested || p.cancel_requested ? "disabled" : ""}>${
+                cancelRequested || p.cancel_requested ? "Cancelling..." : "Cancel import"
+              }</button>`
+        }
+      </div>
       <div class="small">${esc(IMPORT_PHASE_LABELS[p.phase] || p.phase || "Working")}</div>
+      ${
+        cancelRequested || p.cancel_requested
+          ? `<div class="small muted">Stopping at the next safe point. Files already imported stay imported; files not yet processed are left untouched.</div>`
+          : ""
+      }
+      <div class="small critical import-cancel-error"></div>
       <div class="progress-track${indeterminate ? " indeterminate" : ""}" role="progressbar"
            ${indeterminate ? 'aria-valuetext="in progress"' : `aria-valuenow="${pct}" aria-valuemin="0" aria-valuemax="100"`}>
         <div class="progress-fill" style="${indeterminate ? "" : `width:${pct}%`}"></div>
@@ -3466,15 +4221,125 @@ function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-// wireParseFailureToggle makes the parse-error list expandable in place.
-function wireParseFailureToggle(container) {
+// wireParseFailureToggle makes the parse-error list expandable, and
+// pages it.
+//
+// A large import can fail on hundreds of files (233 in the case that
+// prompted this). Rendering all of them put hundreds of rows into the
+// DOM at once and made the panel unreadable -- every one still has to be
+// INSPECTABLE, which is why they are paged rather than truncated.
+//
+// The rows are built on demand from the failures already in memory: the
+// import response carried them, so paging costs no request.
+function wireParseFailureToggle(container, failures) {
   const btn = container.querySelector("#view-parse-errors-btn");
   const panel = container.querySelector("#parse-errors-panel");
   if (!btn || !panel) return;
+
+  const all = failures || [];
+  pagerFor(PARSE_ERROR_PAGER, { scope: "parse-errors", sizes: [10, 25, 50, 100], defaultSize: 10 });
+
+  // Identical failures are summarized rather than repeated.
+  //
+  // A single unsupported format produces one row per file: 233
+  // MAM-compressed Prefetch files yield 233 rows of the same sentence,
+  // which buries the fact that there is really only ONE problem. The
+  // groups say what went wrong and how many files it affected; the
+  // per-file list stays available inside each group, so nothing is lost.
+  const groups = groupParseFailures(all);
+
+  const render = () => {
+    const page = paginate(PARSE_ERROR_PAGER, all);
+    panel.innerHTML = `
+      ${renderParseFailureGroups(groups)}
+      <div class="muted small" style="margin-top:var(--space-3)">Every affected file</div>
+      <div class="table-wrap"><table class="data-table">
+        <thead><tr><th>File</th><th>Artifact type</th><th>Stage</th><th>Problem</th><th>Events kept</th></tr></thead>
+        <tbody>${page.items.map(parseFailureRow).join("")}</tbody>
+      </table></div>
+      ${renderPager(PARSE_ERROR_PAGER, page, { noun: "parse errors", label: "Parse error pagination" })}`;
+  };
+
+  wirePager(PARSE_ERROR_PAGER, panel, render);
   btn.addEventListener("click", () => {
     panel.hidden = !panel.hidden;
     btn.textContent = panel.hidden ? "View parse errors" : "Hide parse errors";
+    // Rendered on first open rather than up front, so an import whose
+    // errors are never inspected never builds the rows at all.
+    if (!panel.hidden && !panel.dataset.rendered) {
+      panel.dataset.rendered = "1";
+      render();
+    }
   });
+}
+
+// groupParseFailures collapses identical failures into one entry each.
+//
+// Keyed on (artifact type, stage, message): two files that failed the
+// same way for the same reason are one problem reported twice, and an
+// analyst deciding what to do needs the problem, not the repetition.
+// Ordered most-affected-first so the biggest gap reads first.
+function groupParseFailures(failures) {
+  const byKey = new Map();
+  for (const f of failures) {
+    const key = `${f.artifact_type}\u0000${f.stage}\u0000${f.message}`;
+    const g = byKey.get(key);
+    if (g) {
+      g.count++;
+      g.files.push(f.filename || f.path);
+      continue;
+    }
+    byKey.set(key, {
+      artifactType: f.artifact_type,
+      stage: f.stage,
+      message: f.message,
+      category: f.category,
+      count: 1,
+      files: [f.filename || f.path],
+    });
+  }
+  return [...byKey.values()].sort((a, b) => b.count - a.count);
+}
+
+function renderParseFailureGroups(groups) {
+  if (!groups.length) return "";
+  // One group is not a summary of anything -- it would just restate the
+  // table below it.
+  if (groups.length === 1 && groups[0].count === 1) return "";
+
+  return `
+    <div class="muted small">What went wrong</div>
+    <div class="parse-error-groups">
+      ${groups
+        .map(
+          (g) => `<details class="parse-error-group">
+            <summary>
+              <strong>${fmtCount(g.count)} file(s)</strong>
+              <span class="small">${esc(artifactLabel(g.artifactType))}</span>
+              <span class="muted small">&middot; ${esc(PARSE_STAGE_LABELS[g.stage] || g.stage)}</span>
+            </summary>
+            <p class="small parse-error-message">${esc(g.message)}</p>
+            <div class="muted small parse-error-files">${g.files.slice(0, 200).map(esc).join(", ")}${
+              g.files.length > 200 ? ` and ${fmtCount(g.files.length - 200)} more` : ""
+            }</div>
+          </details>`
+        )
+        .join("")}
+    </div>`;
+}
+
+// PARSE_ERROR_PAGER is scoped to the parse-error panel, so paging it
+// never disturbs the evidence pager on the same screen.
+const PARSE_ERROR_PAGER = "pe";
+
+function parseFailureRow(f) {
+  return `<tr>
+    <td class="mono small" title="${esc(f.path)}">${esc(f.filename || f.path)}</td>
+    <td class="small">${esc(artifactLabel(f.artifact_type))}</td>
+    <td class="small">${esc(PARSE_STAGE_LABELS[f.stage] || f.stage)}</td>
+    <td class="small">${esc(f.message)}</td>
+    <td class="small">${f.partial_events ? "partial" : "none"}</td>
+  </tr>`;
 }
 
 // renderParseFailures lists the files that were selected and supported
@@ -3484,27 +4349,14 @@ function wireParseFailureToggle(container) {
 // and was not -- which is a finding about the evidence itself.
 function renderParseFailures(failures) {
   if (!failures || !failures.length) return "";
+  // The panel starts EMPTY: its rows are built by wireParseFailureToggle
+  // when it is first opened, one page at a time. The count is stated up
+  // front so the scale of the problem is visible without expanding.
   return `
     <div style="margin-top:var(--space-3)">
-      <button type="button" class="secondary small" id="view-parse-errors-btn">View parse errors</button>
-      <div id="parse-errors-panel" hidden style="margin-top:var(--space-2)">
-        <div class="table-wrap"><table class="data-table">
-          <thead><tr><th>File</th><th>Artifact type</th><th>Stage</th><th>Problem</th><th>Events kept</th></tr></thead>
-          <tbody>
-            ${failures
-              .map(
-                (f) => `<tr>
-                  <td class="mono small" title="${esc(f.path)}">${esc(f.filename || f.path)}</td>
-                  <td class="small">${esc(artifactLabel(f.artifact_type))}</td>
-                  <td class="small">${esc(PARSE_STAGE_LABELS[f.stage] || f.stage)}</td>
-                  <td class="small">${esc(f.message)}</td>
-                  <td class="small">${f.partial_events ? "partial" : "none"}</td>
-                </tr>`
-              )
-              .join("")}
-          </tbody>
-        </table></div>
-      </div>
+      <button type="button" class="secondary small" id="view-parse-errors-btn"
+              aria-expanded="false" aria-controls="parse-errors-panel">View parse errors</button>
+      <div id="parse-errors-panel" hidden style="margin-top:var(--space-2)"></div>
     </div>`;
 }
 
@@ -3513,17 +4365,61 @@ const PARSE_STAGE_LABELS = {
   parse: "Parsing",
 };
 
+// renderImportSkips breaks the skipped files down BY REASON.
+//
+// "N file(s) skipped (already imported/unsupported/duplicate)" told the
+// analyst a number and then three possible explanations for it, leaving
+// them to guess which applied. The reasons are genuinely different --
+// "no parser available" is a capability gap, "duplicate content" is a
+// deduplication decision, "already imported" is a no-op -- and the
+// server already reports which one applied per file, so there is no
+// reason to collapse them.
+function renderImportSkips(skips) {
+  const byReason = new Map();
+  for (const s of skips) {
+    const reason = s.reason || "skipped";
+    byReason.set(reason, (byReason.get(reason) || 0) + 1);
+  }
+  const rows = Array.from(byReason.entries())
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .map(([reason, n]) => `<li>${fmtCount(n)} &times; ${esc(reason)}</li>`)
+    .join("");
+  return `
+    <div class="small muted">
+      ${fmtCount(skips.length)} file(s) skipped &mdash; not imported, and not a parse failure:
+      <ul class="import-skip-reasons">${rows}</ul>
+    </div>`;
+}
+
 // renderImportResults shows what the import endpoint actually parsed --
 // how many files were imported, how many events (new vs. already known
 // from another collection), plus a button to continue into the case
 // dashboard.
-function renderImportResults(res) {
+function renderImportResults(res, cancelled) {
+  const wasCancelled = cancelled || res.cancelled;
   return `
     <div class="panel" style="background:var(--bg-panel); margin-top:12px; margin-bottom:0">
-      <h3>Import complete</h3>
+      <h3>${wasCancelled ? "Import cancelled" : "Import complete"}</h3>
+      ${
+        wasCancelled
+          ? `<p class="small muted import-cancel-note">
+               Stopped at the analyst's request. The files imported before the stop are
+               valid evidence. Nothing else was written, so the remaining files are exactly
+               as they were and can simply be imported again.
+             </p>`
+          : ""
+      }
       ${uploadStep(`${(res.imported || []).length} file(s) imported`, true)}
+      ${
+        wasCancelled
+          ? uploadStep(
+              `${fmtCount(res.unprocessed || 0)} file(s) not processed \u2014 still available to import, not a parse failure`,
+              true
+            )
+          : ""
+      }
       ${uploadStep(`${fmtCount(res.event_count)} event(s) parsed (${fmtCount(res.new_event_count)} new, ${fmtCount(res.duplicate_event_count)} already known from another collection)`, true)}
-      ${res.skipped && res.skipped.length ? `<div class="small muted">${res.skipped.length} file(s) skipped (already imported/unsupported/duplicate)</div>` : ""}
+      ${res.skipped && res.skipped.length ? renderImportSkips(res.skipped) : ""}
       ${
         res.parse_failures && res.parse_failures.length
           ? `<div class="small" style="color:var(--high)">${res.parse_failures.length} supported file(s) failed to parse -- this is not the same as unsupported evidence</div>
@@ -3657,7 +4553,7 @@ async function renderTimelineTab(content, caseId, collections) {
     <div id="timeline-body"></div>
   `;
 
-  pagerFor("tl", { scope: caseId, sizes: [25, 50, 100, 250], defaultSize: 50 });
+  pagerFor("tl", { scope: caseId, sizes: [10, 25, 50, 100, 250], defaultSize: 10 });
 
   const rerender = () => renderTimelineRows(caseId, events, eventFindingIdx, eventCorrIdx, readFilterBar("tl"));
   wireFilterBar("tl", () => {
@@ -3686,7 +4582,7 @@ function renderTimelineRows(caseId, events, eventFindingIdx, eventCorrIdx, filte
   body.innerHTML = `
     <div class="table-wrap"><table class="data-table wide">
       <thead><tr>
-        <th>Time (UTC)</th><th>Category</th><th>Type</th><th>Host</th><th>User</th>
+        <th>Time (${esc(tzLabel())})</th><th>Category</th><th>Type</th><th>Host</th><th>User</th>
         <th>Process</th><th>Parent</th><th>PID</th><th>PPID</th><th>Detail</th>
         <th>Finding</th><th>ATT&amp;CK</th><th>Source</th><th>Collection</th>
       </tr></thead>
@@ -3876,7 +4772,7 @@ async function renderFindingsTab(content, caseId) {
     })}
     <div id="finding-cards"></div>
   `;
-  pagerFor("fd", { scope: caseId, sizes: [25, 50, 100], defaultSize: 50 });
+  pagerFor("fd", { scope: caseId, sizes: [10, 25, 50, 100], defaultSize: 10 });
 
   const rerender = () => renderFindingCards(caseId, findings, eventsById, eventCorrIdx, readFilterBar("fd"), statusIdx);
   wireFilterBar("fd", () => {
@@ -3940,6 +4836,58 @@ function integrityHashCell(hash) {
             title="Copy the full SHA-512">Copy</button>
     <button type="button" class="secondary small expand-hash" title="Show the full value">Show full</button>
   </div>`;
+}
+
+// integrityTablePagerHost names the container the per-file integrity
+// table is paged into, scoped per collection so two expanded collections
+// page independently.
+function integrityTablePagerHost(collectionID) {
+  return `integrity-files-${collectionID}`;
+}
+
+// mountIntegrityTable pages the per-file integrity table.
+//
+// The table lists EVERY file in the collection -- discovered as well as
+// imported -- because its purpose is the recorded SHA-256 of each file,
+// which exists whether or not the file was parsed. On a logical image
+// that is thousands of rows, and it previously rendered all of them:
+// 1,240 files measured as 1,240 rows and ~10,000 DOM nodes, and a
+// 7,000-file image is proportionally worse.
+//
+// Paged in the browser rather than on the server because
+// CollectionDetail has already delivered the rows -- the cost being
+// removed here is DOM construction, not transfer, so paging the render
+// is the proportionate fix and costs no extra request.
+function mountIntegrityTable(root, collectionID, files) {
+  const host = root.querySelector(`#${CSS.escape(integrityTablePagerHost(collectionID))}`);
+  if (!host || !files || files.length === 0) return;
+
+  const prefix = `intg${collectionID}`;
+  pagerFor(prefix, { scope: collectionID, sizes: [10, 25, 50, 100, 250], defaultSize: 10 });
+
+  const render = () => {
+    const page = paginate(prefix, files);
+    host.innerHTML = `
+      <div class="table-wrap"><table class="data-table">
+        <thead><tr><th>Filename</th><th>SHA-256</th><th>Size</th><th>Discovered</th><th>Imported</th><th>Status</th><th>Events</th></tr></thead>
+        <tbody>${page.items.map(integrityFileRow).join("")}</tbody>
+      </table></div>
+      ${renderPager(prefix, page, { noun: "files", label: "Per-file integrity pagination" })}`;
+  };
+  wirePager(prefix, host, render);
+  render();
+}
+
+function integrityFileRow(sf) {
+  return `<tr>
+    <td class="mono small">${esc(sf.original_filename)}</td>
+    <td class="mono small">${sha256Cell(sf, "Unknown")}</td>
+    <td class="small">${fmtBytes(sf.size_bytes)}</td>
+    <td class="small">${esc(fmtTime(sf.discovered_at))}</td>
+    <td class="small">${sf.imported_at ? esc(fmtTime(sf.imported_at)) : "-"}</td>
+    <td class="small">${esc(sf.import_status)}</td>
+    <td class="small">${sf.event_count || "-"}</td>
+  </tr>`;
 }
 
 // wireIntegrityHash makes the copy and expand controls work. Copying
@@ -4194,6 +5142,74 @@ function renderSourceFileProvenance(p) {
 // predates the provenance being captured, so the distinction between
 // "unknown" and "absent" reads the same on every screen.
 const LEGACY_UNAVAILABLE = "Legacy - provenance unavailable";
+
+// renderDeleteCollectionControl offers collection-level deletion.
+//
+// Hidden entirely when the case's evidence is locked. That is a
+// convenience, not the control: the server refuses the request on a
+// contained or closed case regardless of what the page renders.
+function renderDeleteCollectionControl(cd) {
+  if (!lifecycleState.evidenceMutable) return "";
+  return `
+    <div class="collection-danger">
+      <button type="button" class="danger small delete-collection-btn"
+              data-collection="${esc(cd.collection_id)}">Delete collection</button>
+      <span class="muted small">Removes this collection and everything discovered inside it.</span>
+    </div>`;
+}
+
+// wireDeleteCollection confirms, then deletes.
+//
+// The confirmation states what will actually go -- the collection's
+// name, what it holds, and the consequence for the analysis -- because
+// this is the most destructive action in the application and a generic
+// "are you sure?" gives an analyst nothing to check their intent
+// against.
+function wireDeleteCollection(caseId, cd, root) {
+  const btn = root.querySelector(".delete-collection-btn");
+  if (!btn) return;
+
+  btn.addEventListener("click", async (e) => {
+    e.stopPropagation(); // never toggle the card open/closed
+
+    const name = cd.original_filename || collectionLabel(cd.collection_id);
+    const lines = [
+      `Delete the entire collection "${name}"?`,
+      "",
+      `Source type:        ${SOURCE_TYPE_LABELS[cd.source_type] || cd.source_type}`,
+      `Discovered files:   ${fmtCount(cd.file_count)}`,
+      `Imported files:     ${fmtCount(cd.imported_file_count)}`,
+      `Events parsed:      ${fmtCount(cd.parsed_event_count)}`,
+      "",
+      "This permanently removes the collection, its complete discovered inventory,",
+      "and the events imported from it. Events also observed in another collection",
+      "are kept and re-attributed to that collection.",
+      "",
+      "Findings, correlations, investigations and ATT&CK results will become stale",
+      "and must be recalculated by re-running analysis.",
+      "",
+      "This cannot be undone.",
+    ];
+    if (!window.confirm(lines.join("\n"))) return;
+
+    const original = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = "Deleting...";
+    try {
+      await api(`/cases/${caseId}/collections/${cd.collection_id}`, { method: "DELETE" });
+      // A full re-render is right here: the collection is gone, so its
+      // card, the case counters and the stale-analysis banner all have
+      // to be rebuilt from the server's new answer rather than patched.
+      renderedCaseId = null;
+      route();
+    } catch (err) {
+      btn.disabled = false;
+      btn.textContent = original;
+      const host = root.querySelector(".collection-danger");
+      if (host) host.insertAdjacentHTML("beforeend", errorBox(err));
+    }
+  });
+}
 
 // ---------------- Integrity verification (Phase 11) ----------------
 //
@@ -4533,7 +5549,7 @@ async function renderInvestigationsTab(content, caseId) {
     })}
     <div id="investigations-body"></div>
   `;
-  pagerFor("iv", { scope: caseId, sizes: [25, 50, 100], defaultSize: 50 });
+  pagerFor("iv", { scope: caseId, sizes: [10, 25, 50, 100], defaultSize: 10 });
 
   const rerender = () => {
     const filters = readFilterBar("iv");
@@ -4686,7 +5702,7 @@ async function renderInvestigationDetail(caseId, investigationId) {
   }
   if (others.length) {
     const container = document.getElementById("inv-other-correlations");
-    others.forEach((c) => container.appendChild(renderCorrelationCard(c, eventsById)));
+    others.forEach((c) => container.appendChild(renderCorrelationCard(c, eventsById, eventFindingIdx, caseId)));
   }
 
   // ATT&CK: Tactic -> Techniques -> Supporting Findings -> Supporting Events,
@@ -4857,23 +5873,146 @@ async function renderCorrelationsTab(content, caseId) {
   }
   if (others.length) {
     const container = document.getElementById("other-correlations");
-    others.forEach((c) => container.appendChild(renderCorrelationCard(c, eventsById)));
+    others.forEach((c) => container.appendChild(renderCorrelationCard(c, eventsById, eventFindingIdx, caseId)));
   }
 }
 
-function renderCorrelationCard(c, eventsById) {
+function renderCorrelationCard(c, eventsById, eventFindingIdx, caseId) {
   const collIds = new Set(c.event_ids.map((id) => eventsById[id] && eventsById[id].collection_id).filter(Boolean));
   const collectionsLine = collIds.size > 1 ? `<div class="muted small" style="margin-top:6px">Spans ${[...collIds].map(collectionLabel).join(", ")}</div>` : "";
-  return h(`
+  const card = h(`
     <div class="finding-card" style="cursor:default">
       <div class="row between">
         <span class="badge conf">${esc(CORR_LABELS[c.correlation_type] || c.correlation_type)}</span>
-        <span class="muted small">${c.event_ids.length} event(s)</span>
+        <span class="muted small" title="Underlying events in this reconstructed correlation">${fmtCount(c.event_ids.length)} underlying event(s)</span>
       </div>
       <div class="finding-title">${esc(c.title)}</div>
       <div class="finding-desc">${esc(c.description)}</div>
+      <div class="muted small correlation-span">${esc(fmtTime(c.first_seen))} &rarr; ${esc(fmtTime(c.last_seen))}</div>
       ${collectionsLine}
+      <div class="correlation-detail-host"></div>
     </div>`);
+  mountCorrelationEventDetail(card.querySelector(".correlation-detail-host"), c, eventsById, eventFindingIdx, caseId);
+  return card;
+}
+
+// ---------------- correlation event drill-down ----------------
+//
+// A correlation card used to state a number and stop: "Activity burst on
+// DESKTOP-0J3S8C2 (60 events)" with no way to see any of the 60. That is
+// not a finding an investigator can act on or defend -- the whole point
+// of a correlation is the events underneath it.
+//
+// The events are resolved from c.event_ids against the timeline already
+// fetched for this tab. Nothing is re-requested and no event data is
+// duplicated into the correlation: the correlation stores references,
+// and this follows them.
+
+// correlationEventsFor resolves a correlation's event IDs to events, in
+// a DETERMINISTIC order.
+//
+// Activity chains keep c.event_ids order exactly: that sequence IS the
+// reconstructed narrative, built and order-locked on the Go side (see
+// internal/correlate/activity_chain.go and
+// TestBuildActivityChains_FullNarrative). Re-sorting it here would
+// silently rewrite the story.
+//
+// Every other correlation type is ordered chronologically by the event's
+// own timestamp, with the event ID as a tiebreak so events sharing an
+// instant -- common in a burst -- still order identically on every
+// render.
+function correlationEventsFor(c, eventsById) {
+  const resolved = c.event_ids.map((id) => eventsById[id]).filter(Boolean);
+  const missing = c.event_ids.length - resolved.length;
+  if (isChainCorrelationType(c.correlation_type)) {
+    return { events: resolved, missing, ordering: "narrative" };
+  }
+  const ordered = [...resolved].sort((a, b) => {
+    const at = new Date(a.timestamp).getTime();
+    const bt = new Date(b.timestamp).getTime();
+    if (at !== bt) return at - bt;
+    return String(a.id).localeCompare(String(b.id));
+  });
+  return { events: ordered, missing, ordering: "chronological" };
+}
+
+// correlationPagerPrefix builds a pager key unique to one correlation.
+// Non-alphanumerics are stripped because the prefix is also used as a
+// dataset key, and a hyphenated UUID is not a valid one.
+function correlationPagerPrefix(correlationID) {
+  return "corr" + String(correlationID).replace(/[^A-Za-z0-9]/g, "");
+}
+
+// mountCorrelationEventDetail adds the expandable, paginated event list.
+//
+// Collapsed by default and paginated when open: 60 event rows unfurling
+// inside a card is the "unreadable wall of text" this is meant to
+// replace, and a case can hold correlations far larger than 60.
+function mountCorrelationEventDetail(host, c, eventsById, eventFindingIdx, caseId) {
+  if (!host) return;
+  const { events, missing, ordering } = correlationEventsFor(c, eventsById);
+  const total = c.event_ids.length;
+
+  if (total === 0) {
+    // A correlation with no events is not expandable, and says so rather
+    // than offering an empty panel.
+    host.innerHTML = `<p class="muted small">This correlation references no events.</p>`;
+    return;
+  }
+
+  const detailId = `corr-events-${esc(c.correlation_id)}`;
+  host.innerHTML = `
+    <button type="button" class="secondary small corr-toggle" aria-expanded="false" aria-controls="${detailId}">
+      View ${fmtCount(total)} underlying event${total === 1 ? "" : "s"}
+    </button>
+    <div class="correlation-events" id="${detailId}" hidden></div>`;
+
+  const panel = host.querySelector(".correlation-events");
+  const toggle = host.querySelector(".corr-toggle");
+  const prefix = correlationPagerPrefix(c.correlation_id);
+
+  function render() {
+    // Small correlations do not need a pager; large ones must have one.
+    const paged = events.length > 10 ? paginate(prefix, events) : null;
+    const shown = paged ? paged.items : events;
+    panel.innerHTML = `
+      <p class="muted small corr-ordering">
+        ${fmtCount(total)} event(s) in this ${isChainCorrelationType(c.correlation_type) ? "activity chain" : "correlation"},
+        shown in ${ordering === "narrative" ? "reconstructed sequence" : "chronological"} order.
+        ${missing ? `<strong>${fmtCount(missing)} event(s) could not be resolved and are not shown.</strong>` : ""}
+      </p>
+      <div class="table-wrap"><table class="data-table wide">
+        <thead><tr>
+          <th>Time (${esc(tzLabel())})</th><th>Category</th><th>Type</th><th>Host</th><th>User</th>
+          <th>Process</th><th>Parent</th><th>PID</th><th>PPID</th><th>Detail</th>
+          <th>Finding</th><th>ATT&amp;CK</th><th>Source</th><th>Collection</th>
+        </tr></thead>
+        <tbody>${shown.map((e) => rowForEvent(e, (eventFindingIdx || {})[e.id], [c])).join("")}</tbody>
+      </table></div>
+      ${paged ? renderPager(prefix, paged, { noun: "events", label: "Correlation event pagination" }) : ""}`;
+    wireDetailCells(panel);
+    if (caseId) wireTimelineRowClicks(caseId, panel);
+    if (paged) wirePager(prefix, panel, render);
+  }
+
+  toggle.addEventListener("click", () => {
+    const open = !panel.hidden;
+    if (open) {
+      panel.hidden = true;
+      toggle.setAttribute("aria-expanded", "false");
+      toggle.textContent = `View ${fmtCount(total)} underlying event${total === 1 ? "" : "s"}`;
+      return;
+    }
+    // The pager is created on first open, scoped to this correlation so
+    // paging one card never moves another.
+    if (events.length > 10) {
+      pagerFor(prefix, { sizes: [10, 25, 50, 100], defaultSize: 25, scope: c.correlation_id });
+    }
+    panel.hidden = false;
+    toggle.setAttribute("aria-expanded", "true");
+    toggle.textContent = "Hide events";
+    render();
+  });
 }
 
 // renderActivityChain builds the vertical step-by-step visualization
@@ -4901,12 +6040,39 @@ function renderActivityChain(caseId, c, eventsById, eventFindingIdx) {
   if (steps.length < c.event_ids.length) {
     flow.appendChild(h(`<p class="muted small">insufficient evidence to resolve ${c.event_ids.length - steps.length} step(s) of this chain</p>`));
   }
-  steps.forEach((e, i) => {
+
+  // A long chain is drawn as its first steps plus a paginated table of
+  // every event, rather than as sixty stacked nodes. The step flow is
+  // the readable summary; the table is where the chain is actually
+  // INSPECTED. Both show the same events in the same recorded order.
+  const shown = steps.length > CHAIN_INLINE_STEPS ? steps.slice(0, CHAIN_INLINE_STEPS) : steps;
+  shown.forEach((e, i) => {
     if (i > 0) flow.appendChild(h(`<div class="chain-connector">&darr;</div>`));
     flow.appendChild(renderChainNode(caseId, e, eventFindingIdx[e.id] || []));
   });
+  if (steps.length > CHAIN_INLINE_STEPS) {
+    flow.appendChild(
+      h(`<p class="muted small chain-truncation-note">
+           Showing the first ${CHAIN_INLINE_STEPS} of ${fmtCount(steps.length)} steps in sequence.
+           Every event in this chain is listed below, in the same order.
+         </p>`)
+    );
+  }
+
+  // The drill-down is present on every chain, not only long ones: the
+  // step flow names each step but does not carry the full forensic
+  // detail (PID, parent, command line, source evidence) that the table
+  // does.
+  const detailHost = h(`<div class="correlation-detail-host"></div>`);
+  wrap.appendChild(detailHost);
+  mountCorrelationEventDetail(detailHost, c, eventsById, eventFindingIdx, caseId);
   return wrap;
 }
+
+// CHAIN_INLINE_STEPS bounds how many chain nodes are drawn as the visual
+// flow. Beyond this the flow stops being a narrative anyone can read and
+// becomes the wall of text the drill-down exists to replace.
+const CHAIN_INLINE_STEPS = 12;
 
 // chainNodeLabel names a step by what it actually represents forensically
 // (User Logon, a process name, a persistence mechanism, a network
@@ -5038,7 +6204,7 @@ async function renderEvidenceTab(content, caseId, collections) {
 async function mountCollectionFileList(card, caseId, col, index) {
   // A pager per collection: two collections on screen page independently.
   const prefix = `evc${index}`;
-  pagerFor(prefix, { scope: col.collection_id, sizes: [25, 50, 100, 250], defaultSize: 50 });
+  pagerFor(prefix, { scope: col.collection_id, sizes: [10, 25, 50, 100, 250], defaultSize: 10 });
 
   // Imported files are the default view -- this screen is about evidence
   // actually in the case. Everything else stays one control away rather
@@ -5210,9 +6376,22 @@ function wireEvidenceFileSelection(caseId, container) {
 // requirement 13) and explains that derived analysis will need to be
 // recalculated, before permanently removing one or more evidence files.
 async function confirmAndDeleteEvidence(caseId, ids) {
-  const title = ids.length === 1 ? "Delete Evidence File?" : `Delete ${ids.length} Evidence Files?`;
-  const detail = "This will remove the selected evidence. Any events, findings, and correlations that depended only on it will be removed too; the case will be marked for re-analysis.";
-  if (!window.confirm(`${title}\n\n${detail}`)) return;
+  const title = ids.length === 1 ? "Delete 1 evidence file?" : `Delete ${fmtCount(ids.length)} evidence files?`;
+  const lines = [
+    title,
+    "",
+    `Files selected:  ${fmtCount(ids.length)}`,
+    "",
+    "This permanently removes the selected evidence. Events observed only in",
+    "these files are removed with them; events also observed elsewhere are kept",
+    "and re-attributed to the collection that still holds them.",
+    "",
+    "Findings, correlations, investigations and ATT&CK results will become stale",
+    "and must be recalculated by re-running analysis.",
+    "",
+    "This cannot be undone.",
+  ];
+  if (!window.confirm(lines.join("\n"))) return;
   try {
     if (ids.length === 1) {
       await api(`/cases/${caseId}/evidence/${ids[0]}`, { method: "DELETE" });

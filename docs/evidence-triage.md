@@ -292,13 +292,34 @@ Reads the SCCA format directly, so PECmd is no longer required.
 | 30 | 10 (early) | Yes — up to 8 retained run times |
 | 31 | 10 / 11 (later) | Yes — up to 8 retained run times |
 
-**MAM-compressed Prefetch is not decompressed.** Windows 10 and 11 store
-`.pf` files wrapped in a `MAM\x04` LZXPRESS Huffman container. Tracefall
-detects this and reports it as a specific, named condition
-(`prefetch.ErrCompressed`) rather than a generic parse failure — the UI
-says the file is compressed and names the format, instead of "the file
-could not be parsed". Decompression is not implemented; a compressed
-`.pf` produces no events.
+**MAM-compressed Prefetch is read natively.** Windows 10 and 11 store
+`.pf` files wrapped in a `MAM` LZXPRESS Huffman container. Tracefall
+decompresses these itself (`internal/lzxpress`) and hands the result to
+the same SCCA parser an uncompressed file uses, so identical content
+produces identical events either way. There is one parser and one
+normalization path, not two, and no external tool is involved: PECmd,
+PowerShell and .NET are not runtime dependencies.
+
+Decompression is an in-memory parser step. The evidence on disk is never
+modified or rewritten, and the file's SHA-256 and provenance continue to
+describe the bytes **as collected**, not the decompressed intermediate.
+Events carry `prefetch_container`, `prefetch_compressed_bytes` and
+`prefetch_uncompressed_bytes` so the container is visible as
+chain-of-custody detail — it is not a signal, and nothing in detection,
+correlation or scoring treats a compressed file differently from an
+uncompressed one.
+
+Two conditions still fail, and are distinguished from each other:
+
+| Condition | Sentinel | Meaning |
+|---|---|---|
+| Container declares a method other than LZXPRESS Huffman | `prefetch.ErrUnsupportedCompression` | A capability gap. |
+| Container is LZXPRESS Huffman but the stream will not decode | `prefetch.ErrDecompress` | The evidence is damaged. |
+
+The decompressor is validated against real Windows 10 evidence rather
+than only against its own fixtures — see `TestDecompress_RealWindowsCorpus`,
+which decodes an entire host's Prefetch directory and requires every
+result to carry a valid `SCCA` signature.
 
 One event is emitted **per recorded execution**, not per file. A
 Windows 8+ Prefetch file retains up to eight execution times, and each is
@@ -430,7 +451,8 @@ investigator whether the *evidence* or the *tool* is the limit:
 
 | Sentinel | Category | What the investigator is told |
 |---|---|---|
-| `prefetch.ErrCompressed` | `unsupported_format` | It is a MAM-compressed Win10/11 Prefetch file; Tracefall does not decompress it. Decompress first, or use PECmd output. |
+| `prefetch.ErrUnsupportedCompression` | `unsupported_format` | The MAM container uses a compression method Tracefall does not implement. |
+| `prefetch.ErrDecompress` | `corrupt_or_truncated` | The MAM container is LZXPRESS Huffman, but the compressed stream is truncated or corrupt. |
 | `prefetch.ErrUnsupportedVersion` | `unsupported_format` | The Prefetch format version is not read. |
 | `prefetch.ErrNotPrefetch` | `unsupported_format` | Cataloged as Prefetch, but is not a Prefetch file. |
 | `browserhistory.ErrUnknownSchema` | `unsupported_format` | It is SQLite, but not a browser history schema Tracefall reads. |

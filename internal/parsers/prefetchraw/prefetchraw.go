@@ -2,6 +2,12 @@
 // normalized events, reading the binary format directly via
 // internal/prefetch rather than depending on PECmd having been run.
 //
+// Both container forms are read: an uncompressed SCCA file and a Windows
+// 10/11 MAM (LZXPRESS Huffman) compressed one produce identical events
+// for identical content -- decompression happens inside
+// internal/prefetch and is invisible here, which is what keeps a single
+// normalization path.
+//
 // It normalizes to the SAME event type, artifact type and field shape
 // the PECmd CSV parser produces (internal/parsers/pecmd), so the same
 // execution reported by either source describes one event rather than
@@ -81,6 +87,16 @@ func (p Parser) Parse(absPath string) (parsers.ParseResult, error) {
 		}
 		if pf.ExecutablePath != "" {
 			extra["executable_path"] = pf.ExecutablePath
+		}
+		// How the evidence was STORED, recorded additively so existing
+		// consumers are unaffected. It is chain-of-custody detail, not a
+		// judgement: a Windows 10/11 host compresses every Prefetch file,
+		// so this says nothing whatsoever about the program that ran and
+		// nothing downstream treats it as a signal.
+		if pf.Compressed {
+			extra["prefetch_container"] = "MAM (LZXPRESS Huffman)"
+			extra["prefetch_compressed_bytes"] = strconv.Itoa(pf.CompressedSize)
+			extra["prefetch_uncompressed_bytes"] = strconv.Itoa(pf.UncompressedSize)
 		}
 		if len(pf.Filenames) > 0 {
 			// Extra is triage metadata, not a blob store: the count plus a

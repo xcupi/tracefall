@@ -582,3 +582,109 @@ func TestEvidenceIDs_RecommendedNarrowsTheSelectableSet(t *testing.T) {
 		}
 	}
 }
+
+// ---------------- Phase 13: page size 10 ----------------
+
+// 10 is the new smallest offered size and the new default. The dense
+// evidence rows are the reason: ten of them is about what fits on
+// screen, and scanning them is the task.
+func TestEvidencePage_SupportsPageSizeTenAsTheDefault(t *testing.T) {
+	const n = 120
+	mux, caseID, collID := bigCase(t, n)
+
+	// Default, with no page_size given.
+	def := getEvidencePage(t, mux, caseID, collID, nil)
+	if def.PageSize != 10 {
+		t.Errorf("default page_size = %d, want 10", def.PageSize)
+	}
+	if len(def.Items) != 10 {
+		t.Errorf("default page returned %d items, want 10", len(def.Items))
+	}
+	if def.TotalPages != 12 {
+		t.Errorf("total_pages = %d, want 12 for %d records at 10/page", def.TotalPages, n)
+	}
+
+	// Every offered size is honored.
+	for _, size := range []int{10, 25, 50, 100, 250} {
+		p := getEvidencePage(t, mux, caseID, collID, url.Values{"page_size": {fmt.Sprint(size)}})
+		if p.PageSize != size {
+			t.Errorf("page_size=%d was not honored (got %d)", size, p.PageSize)
+		}
+		want := size
+		if want > n {
+			want = n
+		}
+		if len(p.Items) != want {
+			t.Errorf("page_size=%d returned %d items, want %d", size, len(p.Items), want)
+		}
+	}
+}
+
+// Changing page size must land on a valid page, never an empty one.
+// Page 12 of 12 at size 10 has no equivalent at size 100.
+func TestEvidencePage_ChangingPageSizeNeverProducesAnEmptyPage(t *testing.T) {
+	const n = 120
+	mux, caseID, collID := bigCase(t, n)
+
+	last := getEvidencePage(t, mux, caseID, collID, url.Values{"page": {"12"}, "page_size": {"10"}})
+	if len(last.Items) == 0 {
+		t.Fatalf("page 12 at size 10 is empty; expected the final %d records", n%10)
+	}
+	// The UI resets to page 1 on a size change; the server must serve
+	// that correctly rather than honouring a now-out-of-range page.
+	resized := getEvidencePage(t, mux, caseID, collID, url.Values{"page": {"1"}, "page_size": {"100"}})
+	if len(resized.Items) != 100 {
+		t.Errorf("after resizing to 100, page 1 returned %d items, want 100", len(resized.Items))
+	}
+	if resized.TotalPages != 2 {
+		t.Errorf("total_pages = %d, want 2", resized.TotalPages)
+	}
+}
+
+// A filter that shrinks the result set must not leave the caller on a
+// page that no longer exists.
+func TestEvidencePage_FilteringRecomputesPageCountAtSizeTen(t *testing.T) {
+	mux, caseID, collID := bigCase(t, 200)
+
+	all := getEvidencePage(t, mux, caseID, collID, url.Values{"page_size": {"10"}})
+	filtered := getEvidencePage(t, mux, caseID, collID,
+		url.Values{"page_size": {"10"}, "priority": {"critical"}})
+
+	if filtered.Total >= all.Total {
+		t.Fatalf("filter did not narrow: %d of %d", filtered.Total, all.Total)
+	}
+	if filtered.TotalPages != (filtered.Total+9)/10 {
+		t.Errorf("total_pages = %d, inconsistent with total %d at 10/page", filtered.TotalPages, filtered.Total)
+	}
+	// A page beyond the filtered result is empty but still reports the
+	// true totals, so the client can correct itself to page 1.
+	beyond := getEvidencePage(t, mux, caseID, collID,
+		url.Values{"page_size": {"10"}, "priority": {"critical"}, "page": {fmt.Sprint(filtered.TotalPages + 5)}})
+	if len(beyond.Items) != 0 {
+		t.Errorf("a page beyond the filtered set returned %d items", len(beyond.Items))
+	}
+	if beyond.Total != filtered.Total || beyond.TotalPages != filtered.TotalPages {
+		t.Error("an out-of-range page lost the totals the client needs to recover")
+	}
+}
+
+// Selection must survive paging at the new default size, which is the
+// size an analyst will actually be on.
+func TestEvidencePage_SelectionSpansPagesAtSizeTen(t *testing.T) {
+	mux, caseID, collID := bigCase(t, 120)
+
+	ids := getEvidenceIDs(t, mux, caseID, collID, nil)
+	if len(ids) < 30 {
+		t.Fatalf("expected at least 30 selectable files, got %d", len(ids))
+	}
+	// Files drawn from across many pages of 10 import together.
+	chosen := []string{ids[0], ids[15], ids[29]}
+	jobID, code := startImport(t, mux, caseID, collID, chosen)
+	if code != http.StatusAccepted {
+		t.Fatalf("start import: %d", code)
+	}
+	_, final := pollJob(t, mux, caseID, jobID)
+	if final.FilesTotal != len(chosen) {
+		t.Errorf("files_total = %d, want %d", final.FilesTotal, len(chosen))
+	}
+}

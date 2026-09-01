@@ -1,6 +1,7 @@
 package artifacts_test
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 
@@ -77,7 +78,9 @@ func TestClassify_UnsupportedArtifactKeepsItsRealPriority(t *testing.T) {
 		{"C/$MFT", "NTFS $MFT", artifacts.PriorityHigh, artifacts.FamilyFileSystem},
 		{"Windows/appcompat/Programs/Amcache.hve", "Amcache hive", artifacts.PriorityHigh, artifacts.FamilyExecution},
 		{"Windows/System32/sru/SRUDB.dat", "SRUM database", artifacts.PriorityHigh, artifacts.FamilyExecution},
-		{"Users/j/AppData/Local/Microsoft/Windows/WebCache/WebCacheV01.dat", "Browser data (unsupported format)", artifacts.PriorityMedium, artifacts.FamilyBrowser},
+		{"Users/j/AppData/Local/Microsoft/Windows/WebCache/WebCacheV01.dat", "IE / Edge Legacy web cache (WebCacheV01.dat)", artifacts.PriorityMedium, artifacts.FamilyBrowser},
+		{"Users/j/AppData/Roaming/Mozilla/Firefox/Profiles/x/cookies.sqlite", "Browser cookie store", artifacts.PriorityMedium, artifacts.FamilyBrowser},
+		{"Users/j/AppData/Local/Google/Chrome/User Data/Default/Cache/data_1", "Browser cache", artifacts.PriorityMedium, artifacts.FamilyBrowser},
 		{"Windows/Logs/CBS/CBS.log", "Log file", artifacts.PriorityLow, artifacts.FamilyLog},
 	}
 	for _, tc := range cases {
@@ -244,8 +247,133 @@ func TestClassify_IsDeterministic(t *testing.T) {
 	for i := 0; i < 20; i++ {
 		a := r.Classify("Windows/Prefetch/X.pf", "")
 		b := r.Classify("Windows/Prefetch/X.pf", "")
-		if a != b {
+		if !reflect.DeepEqual(a, b) {
 			t.Fatalf("classification differed between calls: %+v vs %+v", a, b)
+		}
+	}
+}
+
+// Browser support is PARTIAL. An unsupported browser artifact must never
+// read as "Tracefall does not parse browser history" -- it does parse
+// Chromium History and Firefox places.sqlite, and every unsupported
+// browser classification has to say so on its own row.
+func TestClassify_UnsupportedBrowserArtifactNamesWhatIsParsed(t *testing.T) {
+	r := registry()
+
+	unsupported := []struct {
+		path      string
+		wantLabel string
+	}{
+		{"Users/j/AppData/Local/Microsoft/Windows/WebCache/WebCacheV01.dat", "IE / Edge Legacy web cache (WebCacheV01.dat)"},
+		{"Users/j/AppData/Roaming/Mozilla/Firefox/Profiles/x/cookies.sqlite", "Browser cookie store"},
+		{"Users/j/AppData/Local/Google/Chrome/User Data/Default/Cache/data_1", "Browser cache"},
+	}
+	for _, tc := range unsupported {
+		t.Run(tc.wantLabel, func(t *testing.T) {
+			c := r.Classify(tc.path, "")
+			if c.Supported {
+				t.Fatal("classified as supported; no browser cache/cookie/ESE parser exists")
+			}
+			if !c.Recognized {
+				t.Error("a known-but-unparsed browser artifact must stay recognized")
+			}
+			if c.Label != tc.wantLabel {
+				t.Errorf("label = %q, want %q", c.Label, tc.wantLabel)
+			}
+			// The label must be specific: the old catch-all told the
+			// analyst nothing about WHICH browser artifact this was.
+			if strings.Contains(c.Label, "unsupported format") {
+				t.Errorf("label %q is the old vague catch-all", c.Label)
+			}
+			if len(c.ParsedInstead) == 0 {
+				t.Fatal("no ParsedInstead list: the row implies all browser data is unsupported")
+			}
+			joined := strings.Join(c.ParsedInstead, " | ")
+			if !strings.Contains(joined, "Chromium History") {
+				t.Errorf("ParsedInstead does not mention Chromium History: %q", joined)
+			}
+			if !strings.Contains(joined, "places.sqlite") {
+				t.Errorf("ParsedInstead does not mention Firefox places.sqlite: %q", joined)
+			}
+			if len(c.NotParsed) == 0 {
+				t.Error("NotParsed does not enumerate what this classification covers")
+			}
+		})
+	}
+}
+
+// The browser artifacts Tracefall DOES parse must still classify as
+// supported -- the split above must not have widened the unsupported
+// rules over them.
+func TestClassify_SupportedBrowserHistoryStaysSupported(t *testing.T) {
+	r := registry()
+	for _, at := range []string{"browser_history"} {
+		c := r.Classify("Users/j/AppData/Local/Google/Chrome/User Data/Default/History", at)
+		if !c.Supported {
+			t.Errorf("artifact type %q classified unsupported; the browser parser still exists", at)
+		}
+		if !c.Recognized {
+			t.Errorf("artifact type %q classified unrecognized", at)
+		}
+	}
+	// And a bare Chromium History path with no artifact type must not be
+	// swallowed by the cache rule (it lives under .../Default/, not
+	// .../Default/Cache/).
+	c := r.Classify("Users/j/AppData/Local/Google/Chrome/User Data/Default/History", "")
+	if c.Label == "Browser cache" {
+		t.Error("Chromium History was misclassified as browser cache")
+	}
+}
+
+// "Known artifact, parser unavailable" and "genuinely unidentified" are
+// different answers and must stay distinguishable.
+func TestClassify_RecognizedButUnsupportedIsNotUnrecognized(t *testing.T) {
+	r := registry()
+
+	mft := r.Classify("C/$MFT", "")
+	if mft.Supported {
+		t.Fatal("$MFT reported as supported; Tracefall has no NTFS parser")
+	}
+	if !mft.Recognized {
+		t.Error("$MFT must be RECOGNIZED-but-unsupported, not unknown")
+	}
+	if mft.Label != "NTFS $MFT" {
+		t.Errorf("label = %q, want %q", mft.Label, "NTFS $MFT")
+	}
+	if !strings.Contains(mft.Reason, "no NTFS filesystem parser") ||
+		!strings.Contains(mft.Reason, "File-system timeline analysis is not available") {
+		t.Errorf("the $MFT explanation changed: %q", mft.Reason)
+	}
+	if mft.Priority != artifacts.PriorityHigh {
+		t.Errorf("$MFT priority = %q, want high", mft.Priority)
+	}
+
+	unknown := r.Classify("Windows/System32/some-random-thing.dll", "")
+	if unknown.Recognized {
+		t.Error("an unidentified file must not be marked recognized")
+	}
+	if unknown.Label != "Unrecognized" {
+		t.Errorf("unknown label = %q, want %q", unknown.Label, "Unrecognized")
+	}
+	if unknown.Priority != artifacts.PriorityUnknown {
+		t.Errorf("unknown priority = %q, want unknown", unknown.Priority)
+	}
+}
+
+// Nothing here may claim a parser that does not exist.
+func TestRegistry_NoFabricatedSupport(t *testing.T) {
+	r := registry()
+	for _, c := range r.Unsupported() {
+		if c.Supported {
+			t.Errorf("%q listed as unsupported but marked supported", c.Label)
+		}
+		if c.Parser != "" {
+			t.Errorf("%q names a parser %q while being unsupported", c.Label, c.Parser)
+		}
+	}
+	for _, c := range r.Supported() {
+		if !c.Supported || c.Parser == "" {
+			t.Errorf("%q is listed as supported but names no parser", c.Label)
 		}
 	}
 }

@@ -167,6 +167,12 @@ const (
 	// changes no evidence; this entry is the record of the ANALYST's
 	// action, which is chain-of-custody information in its own right.
 	AuditIntegrityVerified = "integrity_verified"
+	// AuditEvidenceImportCancelled records that an analyst stopped a
+	// running import. It is a separate action from evidence_imported
+	// because the two mean different things to anyone reading the chain
+	// of custody: one says a selection was taken in whole, the other
+	// says it was taken in part and names how much.
+	AuditEvidenceImportCancelled = "evidence_import_cancelled"
 )
 
 // ActorLocalUser is the only Actor value Tracefall currently produces --

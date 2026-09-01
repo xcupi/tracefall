@@ -121,6 +121,35 @@ type Capability struct {
 	// what Tracefall cannot do, and what it CAN read instead where an
 	// alternative exists. Empty for supported artifacts.
 	Reason string `json:"reason,omitempty"`
+
+	// Recognized separates two states that are both "not supported" but
+	// mean completely different things to an investigator:
+	//
+	//	Recognized && !Supported -- Tracefall KNOWS what this artifact is
+	//	                            and has no parser for it. NTFS $MFT is
+	//	                            the canonical example: identifying it
+	//	                            as $MFT and saying the parser does not
+	//	                            exist is far more useful than calling
+	//	                            it an unknown file.
+	//	!Recognized              -- genuinely unidentified. Tracefall has
+	//	                            no idea what it is.
+	//
+	// Collapsing these would tell an analyst that a $MFT and a random
+	// .dll are the same kind of gap. They are not.
+	Recognized bool `json:"recognized"`
+
+	// ParsedInstead names the artifacts in the SAME family that Tracefall
+	// does parse. It exists so an unsupported classification cannot be
+	// read as "this whole family is unsupported": a WebCacheV01.dat that
+	// Tracefall cannot read says nothing about Chromium History, which it
+	// reads fine.
+	ParsedInstead []string `json:"parsed_instead,omitempty"`
+
+	// NotParsed enumerates, specifically, what this classification covers
+	// -- the counterpart to ParsedInstead. Prose in Reason explains why;
+	// these two lists let the UI show the boundary as a boundary rather
+	// than asking the analyst to parse a sentence.
+	NotParsed []string `json:"not_parsed,omitempty"`
 }
 
 // Recommended reports whether this artifact class is worth an
@@ -182,11 +211,28 @@ var supportedTypeInfo = map[string]typeInfo{
 // stay cheap. Content sniffing is reserved for the parsers that actually
 // claim a file (see parsers.ContentDetector).
 
+// browserParsedInstead is the browser evidence Tracefall DOES parse,
+// attached to every unsupported browser classification so the gap is
+// never mistaken for the whole family. Kept as one variable because
+// these three rules must never drift apart from each other.
+//
+// This list describes internal/parsers/browserhistory and is not a
+// promise of future support; nothing here adds a parser.
+var browserParsedInstead = []string{
+	"Chromium History (Chrome, Edge, Brave, Opera, Vivaldi)",
+	"Firefox History (places.sqlite)",
+}
+
 type unsupportedRule struct {
 	label    string
 	family   Family
 	priority Priority
 	reason   string
+	// parsedInstead / notParsed populate the Capability fields of the
+	// same name. See Capability for why the boundary is expressed as two
+	// lists and not only as prose.
+	parsedInstead []string
+	notParsed     []string
 	// match reports whether a lower-cased forward-slash relative path is
 	// this artifact class.
 	match func(lowerPath, lowerBase string) bool
@@ -234,21 +280,52 @@ var unsupportedRules = []unsupportedRule{
 		match:  baseIs("usrclass.dat"),
 	},
 	{
+		// Deliberately RECOGNIZED-but-unsupported, not "Unrecognized":
+		// telling an investigator "this is the $MFT and Tracefall cannot
+		// parse it" is actionable (they can carve it with another tool);
+		// calling it an unknown file is not.
 		label: "NTFS $MFT", family: FamilyFileSystem, priority: PriorityHigh,
 		reason: "Tracefall has no NTFS filesystem parser. File-system timeline analysis is not available.",
-		match:  baseIs("$mft", "$logfile", "$usnjrnl", "$j"),
+		notParsed: []string{
+			"NTFS $MFT (master file table)",
+			"NTFS $LogFile",
+			"NTFS $UsnJrnl change journal",
+		},
+		match: baseIs("$mft", "$logfile", "$usnjrnl", "$j"),
+	},
+	// ---- browser artifacts ----
+	//
+	// Browser support is PARTIAL, and the old single rule ("Browser data
+	// (unsupported format)") described the gap so vaguely that a file
+	// landing in it read as "Tracefall does not do browsers". It does:
+	// Chromium History and Firefox places.sqlite are parsed (see
+	// internal/parsers/browserhistory).
+	//
+	// Split into one rule per artifact so each unsupported browser file
+	// is named for what it actually is, and each carries the list of
+	// browser artifacts that ARE parsed. An analyst looking at a
+	// WebCacheV01.dat row can then see, on that row, that their Chrome
+	// history is still covered.
+	{
+		label: "IE / Edge Legacy web cache (WebCacheV01.dat)", family: FamilyBrowser, priority: PriorityMedium,
+		reason:        "WebCacheV01.dat is an ESE (Extensible Storage Engine) database. Tracefall has no ESE parser, so Internet Explorer and Edge Legacy browsing history is not extracted.",
+		parsedInstead: browserParsedInstead,
+		notParsed:     []string{"Internet Explorer / Edge Legacy WebCacheV01.dat (ESE database)"},
+		match:         baseIs("webcachev01.dat", "index.dat"),
 	},
 	{
-		// Chromium "History" and Firefox "places.sqlite" ARE parsed (see
-		// internal/parsers/browserhistory). This rule covers the browser
-		// data that is not: Internet Explorer/Edge Legacy's ESE database,
-		// cookie stores, and cache.
-		label: "Browser data (unsupported format)", family: FamilyBrowser, priority: PriorityMedium,
-		reason: "Tracefall parses Chromium History and Firefox places.sqlite only. Internet Explorer/Edge Legacy WebCacheV01.dat is an ESE database, and cookie/cache stores are not parsed.",
-		match: func(p, base string) bool {
-			return baseIs("webcachev01.dat", "cookies.sqlite", "cookies", "index.dat")(p, base) ||
-				pathContains("/cache/", "/code cache/")(p, base)
-		},
+		label: "Browser cookie store", family: FamilyBrowser, priority: PriorityMedium,
+		reason:        "Tracefall has no cookie-store parser. Cookies are not extracted from any browser.",
+		parsedInstead: browserParsedInstead,
+		notParsed:     []string{"Browser cookie stores"},
+		match:         baseIs("cookies.sqlite", "cookies"),
+	},
+	{
+		label: "Browser cache", family: FamilyBrowser, priority: PriorityMedium,
+		reason:        "Tracefall has no browser-cache parser. Cached responses and their metadata are not extracted from any browser.",
+		parsedInstead: browserParsedInstead,
+		notParsed:     []string{"Browser cache stores"},
+		match:         pathContains("/cache/", "/code cache/"),
 	},
 	{
 		label: "Memory image", family: FamilyMemory, priority: PriorityHigh,
@@ -297,6 +374,7 @@ var unknownCapability = Capability{
 	FamilyLabel: FamilyLabels[FamilyOther],
 	Priority:    PriorityUnknown,
 	Supported:   false,
+	Recognized:  false,
 	Reason:      "Tracefall does not recognize this file as a known forensic artifact.",
 }
 
@@ -338,6 +416,7 @@ func NewRegistry(registered []parsers.ArtifactParser) *Registry {
 			FamilyLabel:  FamilyLabels[info.family],
 			Priority:     info.priority,
 			Supported:    true,
+			Recognized:   true,
 			Parser:       p.Name(),
 		}
 	}
@@ -368,12 +447,15 @@ func (r *Registry) Unsupported() []Capability {
 	out := make([]Capability, 0, len(unsupportedRules))
 	for _, rule := range unsupportedRules {
 		out = append(out, Capability{
-			Label:       rule.label,
-			Family:      rule.family,
-			FamilyLabel: FamilyLabels[rule.family],
-			Priority:    rule.priority,
-			Supported:   false,
-			Reason:      rule.reason,
+			Label:         rule.label,
+			Family:        rule.family,
+			FamilyLabel:   FamilyLabels[rule.family],
+			Priority:      rule.priority,
+			Supported:     false,
+			Recognized:    true,
+			Reason:        rule.reason,
+			ParsedInstead: rule.parsedInstead,
+			NotParsed:     rule.notParsed,
 		})
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].Priority.Rank() < out[j].Priority.Rank() })
@@ -404,6 +486,7 @@ func (r *Registry) Classify(relPath, artifactType string) Capability {
 			FamilyLabel:  FamilyLabels[FamilyOther],
 			Priority:     PriorityMedium,
 			Supported:    false,
+			Recognized:   true,
 			Reason:       "This evidence was cataloged by a version of Tracefall that had a parser for it; this build does not.",
 		}
 	}
@@ -413,12 +496,15 @@ func (r *Registry) Classify(relPath, artifactType string) Capability {
 	for _, rule := range unsupportedRules {
 		if rule.match(lower, base) {
 			return Capability{
-				Label:       rule.label,
-				Family:      rule.family,
-				FamilyLabel: FamilyLabels[rule.family],
-				Priority:    rule.priority,
-				Supported:   false,
-				Reason:      rule.reason,
+				Label:         rule.label,
+				Family:        rule.family,
+				FamilyLabel:   FamilyLabels[rule.family],
+				Priority:      rule.priority,
+				Supported:     false,
+				Recognized:    true,
+				Reason:        rule.reason,
+				ParsedInstead: rule.parsedInstead,
+				NotParsed:     rule.notParsed,
 			}
 		}
 	}

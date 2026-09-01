@@ -1281,3 +1281,49 @@ func (s *Store) ClearFindingRunIDsForTest(caseID string) error {
 	_, err := s.db.Exec(`UPDATE findings SET analysis_run_id = '' WHERE case_id = ?`, caseID)
 	return err
 }
+
+// DeleteCollection permanently removes one collection and every row that
+// belongs to it, in dependency order, inside a single transaction.
+//
+// It is the collection-scoped analogue of DeleteCase, and follows the
+// same rule: an explicit ordered delete rather than ON DELETE CASCADE,
+// because the order is then auditable and reviewable instead of implicit
+// in the schema.
+//
+// Ordinary evidence deletion SOFT-deletes a source file, so Phase 11
+// provenance can still report "this file existed and was removed".
+// Deleting the whole collection is different: the object that provenance
+// would point AT is going away, so leaving soft-deleted children behind
+// would leave rows referencing a collection that no longer exists. Those
+// rows are removed here.
+//
+// Callers are expected to have already run the normal evidence-deletion
+// path for the collection's live files, which is what removes their
+// events, re-points events still observed elsewhere, and marks the case
+// for re-analysis. The statements below are what remains afterwards, and
+// are written to be correct even if some of it is already gone.
+func (s *Store) DeleteCollection(collectionID string) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	stmts := []string{
+		`DELETE FROM event_observations WHERE collection_id = ?`,
+		// Only events still attributed to THIS collection. An event that
+		// survived because another collection observed it has already had
+		// its provenance re-pointed there (see RepointEventProvenance) and
+		// must not be removed.
+		`DELETE FROM events WHERE collection_id = ?`,
+		`DELETE FROM raw_evidence WHERE source_file_id IN (SELECT id FROM source_files WHERE collection_id = ?)`,
+		`DELETE FROM source_files WHERE collection_id = ?`,
+		`DELETE FROM collections WHERE id = ?`,
+	}
+	for _, stmt := range stmts {
+		if _, err := tx.Exec(stmt, collectionID); err != nil {
+			return fmt.Errorf("%s: %w", stmt, err)
+		}
+	}
+	return tx.Commit()
+}

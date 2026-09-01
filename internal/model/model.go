@@ -25,9 +25,15 @@ import "time"
 //
 // A case can be "analyzed" (engine ran successfully) while its
 // CaseStatus is "open" (analyst hasn't started working it yet), or
-// "ingested" (evidence changed, stale) while CaseStatus is "closed" (an
-// analyst added evidence to a closed case, which is allowed but doesn't
-// reopen it automatically). The two are never conflated.
+// "ingested" (evidence changed, stale) while CaseStatus is "closed".
+// The two are never conflated.
+//
+// Phase 13 gave CaseStatus teeth: it now governs whether the case's
+// EVIDENCE may still be changed. Adding evidence to a contained or
+// closed case used to be permitted; it no longer is (see
+// EvidenceMutable). Reading, analysing, exporting and investigating a
+// locked case all remain fully available -- immutability of the evidence
+// set and readability of the investigation are separate concerns.
 type Case struct {
 	ID          string    `json:"id"`
 	Name        string    `json:"name"`
@@ -76,6 +82,36 @@ const (
 	CaseStatusIngested = "ingested"
 	CaseStatusAnalyzed = "analyzed"
 )
+
+// EvidenceMutable reports whether a case's collected evidence may still
+// be added to, imported, or deleted.
+//
+// The lifecycle divides in two at CONTAINMENT, which is the point an
+// investigator declares the evidence set complete:
+//
+//	open, investigating -> evidence is still being gathered: mutable
+//	contained, closed   -> the evidence set is settled: immutable
+//
+// This is deliberately NOT a statement about the investigation. A
+// contained or closed case stays fully readable, analysable, exportable
+// and investigable; only the SET OF COLLECTED EVIDENCE is frozen. An
+// unknown status is treated as immutable, so a value this build does not
+// recognize fails closed rather than silently permitting a mutation.
+func EvidenceMutable(caseStatus string) bool {
+	return caseStatus == CaseWorkflowOpen || caseStatus == CaseWorkflowInvestigating
+}
+
+// PriorityEditable reports whether a case's analyst triage priority may
+// still be changed.
+//
+// Priority has a DIFFERENT lifecycle from evidence: it stays editable
+// through containment, because triage urgency is a judgement about the
+// investigation rather than a property of the evidence, and an
+// investigator may well re-rank a contained case while writing it up.
+// Only closing the case freezes it.
+func PriorityEditable(caseStatus string) bool {
+	return caseStatus != CaseWorkflowClosed
+}
 
 // CaseWorkflow* are Case.CaseStatus's values (Phase 6) -- the analyst's
 // own investigative-progress state, entirely independent of Status

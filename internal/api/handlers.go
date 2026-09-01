@@ -84,7 +84,10 @@ func NewRouterWithAuth(svc *Service, logger *slog.Logger, maxUploadBytes int64, 
 	// unchanged (scripted use, and every existing test), so this adds
 	// progress reporting without altering what already worked.
 	mux.HandleFunc("POST /api/cases/{id}/evidence/{collectionID}/import/start", h.startImport)
+	mux.HandleFunc("GET /api/settings", h.getSettings)
+	mux.HandleFunc("PUT /api/settings", h.updateSettings)
 	mux.HandleFunc("GET /api/cases/{id}/import-jobs/{jobID}", h.importJobStatus)
+	mux.HandleFunc("POST /api/cases/{id}/import-jobs/{jobID}/cancel", h.cancelImportJob)
 	mux.HandleFunc("GET /api/cases/{id}/evidence/{collectionID}", h.collectionDetail)
 	// Phase 10B: one page of a collection's catalog, filtered on the
 	// server. The dashboard renders exactly what this returns, so a
@@ -94,6 +97,10 @@ func NewRouterWithAuth(svc *Service, logger *slog.Logger, maxUploadBytes int64, 
 	// "select all matching" materializes its selection from.
 	mux.HandleFunc("GET /api/cases/{id}/evidence/{collectionID}/files/ids", h.evidenceFileIDs)
 	mux.HandleFunc("DELETE /api/cases/{id}/evidence/{sourceFileID}", h.deleteSourceFile)
+	// Collection-level deletion. Registered on a more specific pattern
+	// than the source-file route above so Go's ServeMux routes them
+	// unambiguously rather than by declaration order.
+	mux.HandleFunc("DELETE /api/cases/{id}/collections/{collectionID}", h.deleteCollection)
 	mux.HandleFunc("GET /api/cases/{id}/sources", h.sources)
 	mux.HandleFunc("GET /api/cases/{id}/events/{eventID}", h.eventProvenance)
 	// Phase 11: provenance and integrity. Read-only except
@@ -216,10 +223,17 @@ func (h *handlers) getCase(w http.ResponseWriter, r *http.Request) {
 	if h.fail(w, err) {
 		return
 	}
+	// Phase 13: the lifecycle locks are DERIVED from case_status and sent
+	// alongside it, so the dashboard renders one authoritative answer
+	// instead of each view re-deriving the rule and risking drift. They
+	// are a convenience for rendering only -- the server re-checks both
+	// on every mutating request (see internal/api/lifecycle.go).
 	writeJSON(w, http.StatusOK, struct {
-		Case    any `json:"case"`
-		Summary any `json:"summary"`
-	}{c, summary})
+		Case             any  `json:"case"`
+		Summary          any  `json:"summary"`
+		EvidenceMutable  bool `json:"evidence_mutable"`
+		PriorityEditable bool `json:"priority_editable"`
+	}{c, summary, model.EvidenceMutable(c.CaseStatus), model.PriorityEditable(c.CaseStatus)})
 }
 
 // deleteCase permanently deletes a case and everything associated with
@@ -315,6 +329,20 @@ func (h *handlers) discoverEvidenceUpload(w http.ResponseWriter, r *http.Request
 	defer file.Close()
 
 	res, err := h.as(r).DiscoverEvidenceFromUpload(id, file, header.Filename)
+	if h.fail(w, err) {
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
+// deleteCollection permanently removes an entire evidence collection.
+//
+// Admin-only and lifecycle-guarded through the same paths as every other
+// evidence mutation -- the router makes every DELETE admin-only, and the
+// service refuses a contained or closed case -- so this handler adds no
+// authorization logic of its own that could drift from them.
+func (h *handlers) deleteCollection(w http.ResponseWriter, r *http.Request) {
+	res, err := h.as(r).DeleteCollection(r.PathValue("id"), r.PathValue("collectionID"))
 	if h.fail(w, err) {
 		return
 	}
@@ -460,6 +488,72 @@ func (h *handlers) startImport(w http.ResponseWriter, r *http.Request) {
 func (h *handlers) importJobStatus(w http.ResponseWriter, r *http.Request) {
 	id, jobID := r.PathValue("id"), r.PathValue("jobID")
 	progress, err := h.as(r).ImportJob(id, jobID)
+	if err != nil {
+		if errors.Is(err, ErrJobNotFound) {
+			writeError(w, http.StatusNotFound, "import job not found")
+			return
+		}
+		h.fail(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, progress)
+}
+
+// getSettings returns the application-wide display preferences plus the
+// shortlist of timezones the UI offers.
+//
+// Unauthenticated-readable like the rest of the read API: it exposes no
+// evidence and no account information, only how timestamps are rendered.
+func (h *handlers) getSettings(w http.ResponseWriter, r *http.Request) {
+	settings, err := h.as(r).DisplaySettings()
+	if h.fail(w, err) {
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"display":          settings,
+		"common_timezones": CommonTimezones,
+		"default_timezone": DefaultDisplayTimezone,
+	})
+}
+
+// updateSettings changes the display timezone.
+//
+// An invalid identifier is a 400 with the reason, never a silent
+// fallback to UTC: an analyst who mistypes a zone must find out
+// immediately, not discover later that every timestamp they read was in
+// a different zone from the one they thought they had chosen.
+func (h *handlers) updateSettings(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Timezone string `json:"timezone"`
+	}
+	if !decodeJSON(w, r, &body) {
+		return
+	}
+	settings, err := h.as(r).SetDisplayTimezone(body.Timezone)
+	if err != nil {
+		if errors.Is(err, ErrInvalidTimezone) {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		h.fail(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"display": settings})
+}
+
+// cancelImportJob asks a running import to stop.
+//
+// POST, not DELETE: this does not delete the job, and every DELETE in
+// Tracefall is admin-only (see withSecurity). Cancelling an import you
+// started is ordinary analyst work, so it must not require admin -- it
+// is already guarded by the same case scoping as reading the job.
+//
+// Returns the progress snapshot rather than 204, so a client that
+// cancels never has to guess: it gets back whether the import had
+// already finished, and the counts as they stand.
+func (h *handlers) cancelImportJob(w http.ResponseWriter, r *http.Request) {
+	id, jobID := r.PathValue("id"), r.PathValue("jobID")
+	progress, err := h.as(r).CancelImport(id, jobID)
 	if err != nil {
 		if errors.Is(err, ErrJobNotFound) {
 			writeError(w, http.StatusNotFound, "import job not found")
@@ -644,6 +738,12 @@ func (h *handlers) fail(w http.ResponseWriter, err error) bool {
 	var dupErr *DuplicateEvidenceError
 	var dupCaseErr *DuplicateCaseError
 	switch {
+	case errors.Is(err, ErrEvidenceLocked), errors.Is(err, ErrPriorityLocked):
+		// 409 Conflict, not 403: the caller is permitted to act on this
+		// case, but the case's own STATE forbids this change. A 403 would
+		// suggest a permissions problem and send an analyst looking at
+		// their role instead of the case's status.
+		writeError(w, http.StatusConflict, err.Error())
 	case errors.Is(err, ErrCaseNotFound), errors.Is(err, ErrCollectionNotFound),
 		errors.Is(err, ErrFindingNotFound), errors.Is(err, ErrSourceFileNotFound),
 		errors.Is(err, store.ErrNoteNotFound):

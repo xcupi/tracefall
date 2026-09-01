@@ -151,6 +151,13 @@ type EvidenceFilePage struct {
 	// matching" will really select, and stating it separately stops
 	// "7,074 matching" being mistaken for "7,074 importable".
 	SelectableTotal int `json:"selectable_total"`
+	// RecommendedTotal is how many of the MATCHING files are recommended
+	// AND importable -- exactly what "Select recommended" will select.
+	//
+	// Scoped to the filter, not the whole catalog: the button's number
+	// and the set it selects have to be the same thing, or the count on
+	// screen describes an action other than the one the button performs.
+	RecommendedTotal int `json:"recommended_total"`
 	// Vocabularies are derived from the whole collection, never from the
 	// current page -- a dropdown that only offered the current page's
 	// values would shrink as you paged, which would be unusable.
@@ -213,7 +220,7 @@ func (s *Service) EvidenceFiles(caseID, collectionID string, filter EvidenceFilt
 	}
 
 	matching := make([]TriagedSourceFile, 0, len(catalog))
-	selectableCount := 0
+	selectableCount, recommendedCount := 0, 0
 	for _, sf := range catalog {
 		if !filter.Matches(sf) {
 			continue
@@ -221,16 +228,20 @@ func (s *Service) EvidenceFiles(caseID, collectionID string, filter EvidenceFilt
 		matching = append(matching, sf)
 		if selectable(sf) {
 			selectableCount++
+			if sf.Recommended {
+				recommendedCount++
+			}
 		}
 	}
 
 	return EvidenceFilePage{
-		Page:            paginate(matching, req),
-		CollectionTotal: len(catalog),
-		SelectableTotal: selectableCount,
-		Families:        vocabulary(catalog, func(sf TriagedSourceFile) string { return sf.FamilyLabel }, nil),
-		Priorities:      vocabulary(catalog, func(sf TriagedSourceFile) string { return sf.Priority }, priorityLabels),
-		Statuses:        vocabulary(catalog, evidenceStatusValue, evidenceStatusLabels),
+		Page:             paginate(matching, req),
+		CollectionTotal:  len(catalog),
+		SelectableTotal:  selectableCount,
+		RecommendedTotal: recommendedCount,
+		Families:         vocabulary(catalog, func(sf TriagedSourceFile) string { return sf.FamilyLabel }, nil),
+		Priorities:       vocabulary(catalog, func(sf TriagedSourceFile) string { return sf.Priority }, priorityLabels),
+		Statuses:         vocabulary(catalog, evidenceStatusValue, evidenceStatusLabels),
 	}, nil
 }
 

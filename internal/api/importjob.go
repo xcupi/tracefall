@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"errors"
 	"sync"
 	"time"
@@ -55,6 +56,10 @@ const (
 	PhaseFinalizing = "finalizing" // recompute counts, update case status, audit
 	PhaseComplete   = "complete"
 	PhaseFailed     = "failed"
+	// PhaseCancelled is a COMPLETED import that an analyst stopped part
+	// way. It is deliberately not PhaseFailed: nothing went wrong, and
+	// the files that were imported before the stop are valid evidence.
+	PhaseCancelled = "cancelled"
 )
 
 // ImportProgress is a point-in-time snapshot of a running import.
@@ -87,6 +92,14 @@ type ImportProgress struct {
 	EventsSkipped int `json:"events_skipped"`
 	ParseErrors   int `json:"parse_errors"`
 
+	// CancelRequested is set the moment cancellation is asked for, and
+	// stays set. Cancelled is set only once the import goroutine has
+	// actually stopped. The UI needs both: the first lets it show
+	// "Cancelling..." immediately instead of leaving the button looking
+	// inert, the second is the truth about whether work has ceased.
+	CancelRequested bool `json:"cancel_requested"`
+	Cancelled       bool `json:"cancelled"`
+
 	StartedAt      time.Time `json:"started_at"`
 	ElapsedSeconds int       `json:"elapsed_seconds"`
 	Done           bool      `json:"done"`
@@ -102,9 +115,51 @@ type ImportProgress struct {
 }
 
 // importJob is the mutable state behind an ImportProgress.
+//
+// Cancellation is a context, not a flag, because the import goroutine
+// already runs independently of the request that started it: the HTTP
+// request returns as soon as the job exists, so there is no request
+// context to inherit and nothing that would cancel this work implicitly.
+// A dedicated context gives the running import one thing to check and
+// gives cancel-twice the idempotency of context.CancelFunc for free.
 type importJob struct {
 	mu       sync.Mutex
 	progress ImportProgress
+	// cancel stops the running import at its next safe point. Calling it
+	// more than once is harmless (context.CancelFunc is idempotent), so
+	// a double-clicked Cancel button needs no extra guarding.
+	cancel context.CancelFunc
+	ctx    context.Context
+}
+
+// requestCancel asks the import to stop and records that it was asked.
+// Idempotent: the second and later calls report that cancellation was
+// already requested rather than erroring, because from the analyst's
+// point of view clicking Cancel twice should mean the same thing as
+// clicking it once.
+func (j *importJob) requestCancel() {
+	j.mu.Lock()
+	alreadyDone := j.progress.Done
+	j.progress.CancelRequested = true
+	j.mu.Unlock()
+	// Cancelling a finished job is a no-op rather than an error: the
+	// import may well have completed while the click was in flight.
+	if !alreadyDone {
+		j.cancel()
+	}
+}
+
+// cancelled reports whether this job has been asked to stop.
+func (j *importJob) cancelled() bool {
+	if j == nil || j.ctx == nil {
+		return false
+	}
+	select {
+	case <-j.ctx.Done():
+		return true
+	default:
+		return false
+	}
 }
 
 func (j *importJob) snapshot() ImportProgress {
@@ -156,6 +211,16 @@ func percentOf(p ImportProgress) int {
 // exactly as it was -- one implementation of the import, two ways to
 // call it.
 type progressSink struct{ job *importJob }
+
+// cancelled is how importEvidence asks whether it should stop. Nil-safe,
+// so the synchronous import path (which has no job) simply never
+// cancels.
+func (s *progressSink) cancelled() bool {
+	if s == nil || s.job == nil {
+		return false
+	}
+	return s.job.cancelled()
+}
 
 func (s *progressSink) phase(name string) {
 	if s == nil || s.job == nil {
@@ -230,7 +295,11 @@ func newImportJobs() *importJobs {
 func (s *Service) StartImport(caseID, collectionID string, sourceFileIDs []string) (string, error) {
 	// Validate before creating a job, so a bad request fails fast with a
 	// proper status instead of producing a job that immediately fails.
-	if _, err := s.GetCase(caseID); err != nil {
+	// The lock is checked here as well as inside importEvidence: without
+	// it a locked case would accept the request, create a job, and only
+	// then fail in the background, where the analyst would see it as a
+	// mysterious failed import rather than a clear refusal.
+	if _, err := s.requireEvidenceMutable(caseID); err != nil {
 		return "", err
 	}
 	collection, err := s.store.GetCollection(collectionID)
@@ -245,11 +314,19 @@ func (s *Service) StartImport(caseID, collectionID string, sourceFileIDs []strin
 		return "", ErrImportInProgress
 	}
 	jobID := uuid.NewString()
-	job := &importJob{progress: ImportProgress{
-		JobID: jobID, CaseID: caseID, CollectionID: collectionID,
-		Phase: PhasePreparing, FilesTotal: len(sourceFileIDs),
-		StartedAt: time.Now().UTC(), Percent: 0,
-	}}
+	// context.Background, not the request's context: the import
+	// deliberately outlives the HTTP request that started it, and
+	// inheriting that context would cancel every import the instant its
+	// starting request returned.
+	ctx, cancel := context.WithCancel(context.Background())
+	job := &importJob{
+		ctx:    ctx,
+		cancel: cancel,
+		progress: ImportProgress{
+			JobID: jobID, CaseID: caseID, CollectionID: collectionID,
+			Phase: PhasePreparing, FilesTotal: len(sourceFileIDs),
+			StartedAt: time.Now().UTC(), Percent: 0,
+		}}
 	s.jobs.byID[jobID] = job
 	s.jobs.active[collectionID] = jobID
 	s.jobs.mu.Unlock()
@@ -273,6 +350,9 @@ func (s *Service) StartImport(caseID, collectionID string, sourceFileIDs []strin
 		}()
 
 		res, err := s.importEvidence(caseID, collectionID, sourceFileIDs, &progressSink{job: job})
+		// The context is released whatever happens, so a completed
+		// import does not leak one.
+		defer cancel()
 		job.update(func(p *ImportProgress) {
 			p.Done = true
 			p.CurrentFile = ""
@@ -280,7 +360,16 @@ func (s *Service) StartImport(caseID, collectionID string, sourceFileIDs []strin
 				p.Phase, p.Error = PhaseFailed, safeImportError(err)
 				return
 			}
-			p.Phase = PhaseComplete
+			// A cancelled import still returns a real result: the files
+			// it did import are evidence, and the counts describe what
+			// actually happened. Reporting it as a failure would be a
+			// lie about valid evidence.
+			if res.Cancelled {
+				p.Phase = PhaseCancelled
+				p.Cancelled = true
+			} else {
+				p.Phase = PhaseComplete
+			}
 			p.Result = &res
 		})
 	}()
@@ -303,6 +392,34 @@ func (s *Service) ImportJob(caseID, jobID string) (ImportProgress, error) {
 		return ImportProgress{}, ErrJobNotFound
 	}
 	return p, nil
+}
+
+// CancelImport asks a running import to stop at its next safe point.
+//
+// IDEMPOTENT by construction, which matters because every realistic way
+// this gets called twice is normal user behaviour: a double click, a
+// retried request, a second browser tab. All of these return the current
+// progress rather than an error.
+//
+// Cancelling an import that has already finished is likewise not an
+// error -- the import may have completed while the click was in flight,
+// which is a race the analyst cannot see and should not be punished for.
+// The caller gets the final progress and can see for itself that the
+// import completed.
+func (s *Service) CancelImport(caseID, jobID string) (ImportProgress, error) {
+	s.jobs.mu.Lock()
+	job, ok := s.jobs.byID[jobID]
+	s.jobs.mu.Unlock()
+	if !ok {
+		return ImportProgress{}, ErrJobNotFound
+	}
+	// Scope to the case, exactly as ImportJob does: a job ID from one
+	// case must never be controllable through another.
+	if job.snapshot().CaseID != caseID {
+		return ImportProgress{}, ErrJobNotFound
+	}
+	job.requestCancel()
+	return job.snapshot(), nil
 }
 
 // safeImportError renders a whole-import failure for the browser without

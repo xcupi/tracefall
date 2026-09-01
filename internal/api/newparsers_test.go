@@ -196,45 +196,95 @@ func TestPhase10A_PowerShellHistoryKeepsTimeUnknownAndDistinct(t *testing.T) {
 	}
 }
 
-// A MAM-compressed Prefetch is recognized but not decompressed. It must
-// produce a structured parse failure that names the reason, never
-// silence and never a fabricated parse.
-func TestPhase10A_CompressedPrefetchIsAStructuredFailure(t *testing.T) {
+// Windows 10/11 MAM-compressed Prefetch is read NATIVELY.
+//
+// This previously asserted the opposite: that a compressed file produced
+// a structured parse failure telling the analyst to decompress it with
+// another tool. That was the honest report of a real limitation at the
+// time. The limitation is gone, so the assertion is inverted rather than
+// deleted -- the behaviour it guarded (never silence, never a fabricated
+// parse) still matters, and now includes never a spurious FAILURE.
+func TestMAMCompressedPrefetchIsParsedNatively(t *testing.T) {
 	mux := newTestRouter(t)
-	c := mustCreateCase(t, mux, "Compressed prefetch")
+	c := mustCreateCase(t, mux, "MAM prefetch")
+
+	plain := samplePrefetch()
 	disc := discoverBinaryDir(t, mux, c.ID, map[string][]byte{
-		"Windows/Prefetch/EDGE.EXE-11111111.pf": prefetchgen.Compressed(8192),
+		"Windows/Prefetch/EDGE.EXE-11111111.pf": prefetchgen.CompressMAM(plain),
 	})
 	sf, ok := sourceFileByPath(disc.SourceFiles, "Windows/Prefetch/EDGE.EXE-11111111.pf")
 	if !ok {
 		t.Fatal("the compressed Prefetch was not discovered")
 	}
 	if !sf.Supported {
-		t.Error("a compressed Prefetch should still be RECOGNIZED as Prefetch")
+		t.Error("a compressed Prefetch must be classified as supported Prefetch")
+	}
+	if sf.ArtifactType != model.ArtifactPrefetch {
+		t.Errorf("artifact type = %q, want %q -- compression is not a separate artifact type",
+			sf.ArtifactType, model.ArtifactPrefetch)
 	}
 
 	imp := importAllFrom(t, mux, c.ID, disc)
-	if len(imp.ParseFailures) != 1 {
-		t.Fatalf("parse failures = %d, want 1: %+v", len(imp.ParseFailures), imp.ParseFailures)
+	if len(imp.ParseFailures) != 0 {
+		t.Fatalf("a valid MAM Prefetch was reported as a parse failure: %+v", imp.ParseFailures)
 	}
-	f := imp.ParseFailures[0]
-	if f.Message == "" {
-		t.Error("the failure carries no message")
+	if imp.EventCount == 0 {
+		t.Fatal("no events from a valid MAM-compressed Prefetch")
 	}
-	// The message must name the actual limitation. "Could not be parsed"
-	// would leave an investigator unable to tell whether the evidence is
-	// damaged or Tracefall simply cannot read it.
-	if !strings.Contains(strings.ToLower(f.Message), "compressed") {
-		t.Errorf("the failure does not explain that the file is compressed: %q", f.Message)
+	if len(imp.Imported) != 1 {
+		t.Errorf("imported %d files, want 1", len(imp.Imported))
 	}
-	if f.Category != ParseFailureUnsupported {
-		t.Errorf("category = %q, want %q -- the evidence is intact, the tool is the limit", f.Category, ParseFailureUnsupported)
+}
+
+// A MAM container Tracefall genuinely cannot decompress must still fail
+// cleanly, with a reason that distinguishes a damaged stream from an
+// unimplemented compression method.
+func TestMAMCompressedPrefetchFailuresAreDistinguished(t *testing.T) {
+	cases := []struct {
+		name         string
+		body         []byte
+		wantCategory string
+		wantWord     string
+	}{
+		{"undecodable stream", prefetchgen.Compressed(8192), ParseFailureCorrupt, "decompress"},
+		{"unknown method", prefetchgen.CompressedMethod(8192, 0x03), ParseFailureUnsupported, "compression method"},
 	}
-	if f.PartialEvents {
-		t.Error("a failed parse must not claim partial events")
-	}
-	if imp.EventCount != 0 {
-		t.Errorf("event count = %d, want 0", imp.EventCount)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			mux := newTestRouter(t)
+			c := mustCreateCase(t, mux, "MAM failure "+tc.name)
+			disc := discoverBinaryDir(t, mux, c.ID, map[string][]byte{
+				"Windows/Prefetch/BAD.EXE-11111111.pf": tc.body,
+			})
+			sf, ok := sourceFileByPath(disc.SourceFiles, "Windows/Prefetch/BAD.EXE-11111111.pf")
+			if !ok {
+				t.Fatal("not discovered")
+			}
+			if !sf.Supported {
+				t.Error("a MAM container is still RECOGNIZED as Prefetch")
+			}
+			imp := importAllFrom(t, mux, c.ID, disc)
+			if len(imp.ParseFailures) != 1 {
+				t.Fatalf("parse failures = %d, want 1: %+v", len(imp.ParseFailures), imp.ParseFailures)
+			}
+			f := imp.ParseFailures[0]
+			if f.Category != tc.wantCategory {
+				t.Errorf("category = %q, want %q", f.Category, tc.wantCategory)
+			}
+			if !strings.Contains(strings.ToLower(f.Message), tc.wantWord) {
+				t.Errorf("message does not mention %q: %q", tc.wantWord, f.Message)
+			}
+			if f.PartialEvents {
+				t.Error("a failed parse must not claim partial events")
+			}
+			if imp.EventCount != 0 {
+				t.Errorf("event count = %d, want 0", imp.EventCount)
+			}
+			// The old advice must be gone.
+			if strings.Contains(f.Message, "PECmd") {
+				t.Errorf("the failure still tells the analyst to run PECmd: %q", f.Message)
+			}
+		})
 	}
 }
 

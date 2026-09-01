@@ -63,6 +63,39 @@ func (s *Service) UpdateCaseMetadata(caseID string, u CaseMetadataUpdate) (model
 		return model.Case{}, fmt.Errorf("invalid priority %q", *u.Priority)
 	}
 
+	// Phase 13: priority is frozen once a case is closed.
+	//
+	// The check is made against the case's CURRENT status and against the
+	// status this same request is setting, because both matter:
+	//
+	//   - changing priority on an already-closed case is refused;
+	//   - closing a case AND changing its priority in one request is
+	//     refused as a combination, rather than silently applying one and
+	//     dropping the other. Discarding half of what an analyst asked
+	//     for without telling them is worse than refusing.
+	//
+	// Setting priority to the value it already has is not a change, so it
+	// never trips this -- which is what lets a plain "close this case"
+	// save succeed even when the UI submits the unchanged priority.
+	if u.Priority != nil {
+		current, err := s.GetCase(caseID)
+		if err != nil {
+			return model.Case{}, err
+		}
+		changingPriority := *u.Priority != current.Priority
+		closingNow := u.CaseStatus != nil && *u.CaseStatus == model.CaseWorkflowClosed
+		alreadyClosed := !model.PriorityEditable(current.CaseStatus)
+
+		if changingPriority && alreadyClosed {
+			return model.Case{}, ErrPriorityLocked
+		}
+		if changingPriority && closingNow {
+			return model.Case{}, fmt.Errorf(
+				"%w: closing a case and changing its priority cannot be done in one step. "+
+					"Change the priority first, then close the case", ErrPriorityLocked)
+		}
+	}
+
 	storeUpdate := store.CaseMetadataUpdate{Name: u.Name, Description: u.Description, CaseStatus: u.CaseStatus, Priority: u.Priority}
 	err := s.store.UpdateCaseMetadata(caseID, storeUpdate)
 	if err != nil {
@@ -81,7 +114,19 @@ func (s *Service) UpdateCaseMetadata(caseID string, u CaseMetadataUpdate) (model
 	if err != nil {
 		return model.Case{}, err
 	}
-	s.audit(caseID, model.AuditCaseMetadataUpdated, model.TargetCase, caseID, "Case metadata updated")
+	// Name the lifecycle changes explicitly: "status changed to closed"
+	// is chain-of-custody information, and "Case metadata updated" hides
+	// it among description edits.
+	summary := "Case metadata updated"
+	switch {
+	case u.CaseStatus != nil && u.Priority != nil:
+		summary = fmt.Sprintf("Case status changed to %q and priority to %q", *u.CaseStatus, *u.Priority)
+	case u.CaseStatus != nil:
+		summary = fmt.Sprintf("Case status changed to %q", *u.CaseStatus)
+	case u.Priority != nil:
+		summary = fmt.Sprintf("Case priority changed to %q", *u.Priority)
+	}
+	s.audit(caseID, model.AuditCaseMetadataUpdated, model.TargetCase, caseID, summary)
 	return c, nil
 }
 

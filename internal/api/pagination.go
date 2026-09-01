@@ -44,14 +44,23 @@ type PageRequest struct {
 // materialize an unbounded response, which is exactly what pagination
 // exists to prevent.
 var (
-	evidencePageSizes = []int{25, 50, 100, 250}
-	recordPageSizes   = []int{25, 50, 100}
-	timelinePageSizes = []int{25, 50, 100, 250}
+	// 10 is the smallest offered size (Phase 13). A dense evidence or
+	// error row carries a filename, a path, a type, a status and a
+	// reason; ten of those is about what fits on screen without
+	// scrolling, and scanning them is the actual task. The larger sizes
+	// remain for anyone who would rather scroll than page.
+	evidencePageSizes = []int{10, 25, 50, 100, 250}
+	recordPageSizes   = []int{10, 25, 50, 100}
+	timelinePageSizes = []int{10, 25, 50, 100, 250}
 )
 
 const (
-	defaultEvidencePageSize = 100
-	defaultRecordPageSize   = 50
+	// Defaults are 10 (Phase 13, down from 100/50). The previous
+	// defaults were chosen to reduce paging; in practice they produced a
+	// wall of rows that had to be scrolled past before the pager was even
+	// visible.
+	defaultEvidencePageSize = 10
+	defaultRecordPageSize   = 10
 )
 
 // parsePageRequest reads page/page_size from the query string.

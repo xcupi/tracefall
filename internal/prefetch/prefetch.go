@@ -16,15 +16,23 @@
 //	30  Windows 10   (both file-information variants)
 //	31  Windows 11
 //
-// # The MAM limitation, stated plainly
+// # Compression
 //
 // Windows 10 and 11 store Prefetch files LZXPRESS-Huffman compressed
-// behind a "MAM\x04" header. This package does NOT implement that
-// decompression, so such a file is detected and reported as a structured
-// parse failure naming the reason -- never silently skipped, and never
-// pretended to be parsed. In practice that means raw .pf collected from
-// a modern Windows host will usually need decompressing before Tracefall
-// can read it. See docs/evidence-triage.md.
+// behind a "MAM\x04" header. Both forms are read natively: a compressed
+// file is decompressed in memory (see internal/lzxpress) and the result
+// is handed to the same SCCA parser the uncompressed form uses, so the
+// two produce identical events for identical content. There is one
+// parser, not two.
+//
+// Decompression is an in-memory parser step. The evidence on disk is
+// never modified, never rewritten, and never replaced by its
+// decompressed form -- the file's hash and provenance continue to
+// describe the bytes as collected.
+//
+// A MAM container using some other compression method (the algorithm
+// byte is not 0x04) is reported as a structured parse failure naming the
+// reason, rather than guessed at.
 //
 // # Hostile input
 //
@@ -43,14 +51,20 @@ import (
 	"strings"
 	"time"
 	"unicode/utf16"
+
+	"tracefall/internal/lzxpress"
 )
 
 var (
 	// ErrNotPrefetch means the file carries no SCCA signature.
 	ErrNotPrefetch = errors.New("prefetch: not a Windows Prefetch file (bad signature)")
-	// ErrCompressed means the file is a MAM-compressed Prefetch, which
-	// this package deliberately does not decompress.
-	ErrCompressed = errors.New("prefetch: file is MAM (LZXPRESS Huffman) compressed, which Tracefall does not decompress")
+	// ErrUnsupportedCompression means the MAM container declares a
+	// compression method this package does not implement. Only LZXPRESS
+	// Huffman (algorithm 0x04) is defined for Prefetch.
+	ErrUnsupportedCompression = errors.New("prefetch: MAM container uses an unsupported compression method")
+	// ErrDecompress means the MAM container is LZXPRESS Huffman but the
+	// compressed stream could not be decompressed.
+	ErrDecompress = errors.New("prefetch: MAM decompression failed")
 	// ErrUnsupportedVersion means the SCCA signature is present but the
 	// format version is one this package has no layout for.
 	ErrUnsupportedVersion = errors.New("prefetch: unsupported Prefetch format version")
@@ -62,9 +76,16 @@ var (
 )
 
 const (
-	headerSize   = 84
-	signature    = "SCCA"
-	mamSignature = "MAM\x04"
+	headerSize = 84
+	signature  = "SCCA"
+	// mamMagic is the three-byte container tag; the fourth header byte
+	// is the compression method, not part of the tag.
+	mamMagic = "MAM"
+	// mamXpressHuffman is the only compression method Windows uses for
+	// Prefetch.
+	mamXpressHuffman = 0x04
+	// mamHeaderSize is the tag, method byte, and uncompressed size.
+	mamHeaderSize = 8
 )
 
 // Limits bounds what one Prefetch file may consume.
@@ -134,6 +155,18 @@ type Prefetch struct {
 	// executable itself, when one can be identified from the referenced
 	// file list. Empty when it cannot -- never guessed.
 	ExecutablePath string
+
+	// Compressed records that the evidence was a MAM container that this
+	// package decompressed. It describes HOW the file was stored, not
+	// what it means: a compressed Prefetch file is neither more nor less
+	// suspicious than an uncompressed one, and nothing downstream treats
+	// it differently.
+	Compressed bool
+	// CompressedSize is the size of the original container, zero when the
+	// file was not compressed. UncompressedSize is the size of the SCCA
+	// data actually parsed.
+	CompressedSize   int
+	UncompressedSize int
 }
 
 // Sniff reports whether header looks like a Prefetch file. It matches
@@ -141,7 +174,7 @@ type Prefetch struct {
 // compressed file is still RECOGNIZED as Prefetch (and then reported as
 // unreadable) rather than being mistaken for an unknown artifact.
 func Sniff(header []byte) bool {
-	if len(header) >= 4 && string(header[:4]) == mamSignature {
+	if IsCompressed(header) {
 		return true
 	}
 	// The signature sits at offset 4, after the version.
@@ -149,8 +182,38 @@ func Sniff(header []byte) bool {
 }
 
 // IsCompressed reports whether header is the MAM-compressed variant.
+//
+// Matched on the three-byte tag alone, deliberately: a container using
+// an unexpected compression method is still a compressed Prefetch file
+// and must be reported as one, not mistaken for an unknown artifact.
 func IsCompressed(header []byte) bool {
-	return len(header) >= 4 && string(header[:4]) == mamSignature
+	return len(header) >= 4 && string(header[:3]) == mamMagic
+}
+
+// decompressMAM unwraps a MAM container into the SCCA bytes inside it.
+//
+// The declared uncompressed size in the header is attacker-controlled,
+// so it is bounded by the same ceiling that bounds the file itself
+// before a single byte is allocated.
+func decompressMAM(data []byte, lim Limits) ([]byte, error) {
+	if len(data) < mamHeaderSize {
+		return nil, fmt.Errorf("%w: MAM header is %d bytes, need %d", ErrCorrupt, len(data), mamHeaderSize)
+	}
+	if method := data[3]; method != mamXpressHuffman {
+		return nil, fmt.Errorf("%w: method 0x%02x", ErrUnsupportedCompression, method)
+	}
+	declared := int(binary.LittleEndian.Uint32(data[4:8]))
+	if int64(declared) > lim.MaxFileBytes {
+		return nil, fmt.Errorf("%w: MAM header declares %d decompressed bytes", ErrLimitExceeded, declared)
+	}
+	out, err := lzxpress.HuffmanDecompress(data[mamHeaderSize:], declared, int(lim.MaxFileBytes))
+	if err != nil {
+		if errors.Is(err, lzxpress.ErrLimitExceeded) {
+			return nil, fmt.Errorf("%w: %v", ErrLimitExceeded, err)
+		}
+		return nil, fmt.Errorf("%w: %v", ErrDecompress, err)
+	}
+	return out, nil
 }
 
 // Parse reads one Prefetch file.
@@ -187,9 +250,21 @@ func Parse(path string, lim Limits) (p Prefetch, err error) {
 func ParseBytes(data []byte, lim Limits) (Prefetch, error) {
 	lim = lim.withDefaults()
 
+	// One parser, two containers. A MAM file is unwrapped here and the
+	// SCCA bytes fall through to exactly the code an uncompressed file
+	// takes, so compressed and uncompressed Prefetch cannot diverge.
+	var compressed bool
+	var compressedSize int
 	if IsCompressed(data) {
-		return Prefetch{}, ErrCompressed
+		compressedSize = len(data)
+		plain, err := decompressMAM(data, lim)
+		if err != nil {
+			return Prefetch{}, err
+		}
+		data = plain
+		compressed = true
 	}
+
 	if len(data) < headerSize {
 		return Prefetch{}, fmt.Errorf("%w: file is %d bytes, smaller than the 84-byte header", ErrCorrupt, len(data))
 	}
@@ -198,9 +273,12 @@ func ParseBytes(data []byte, lim Limits) (Prefetch, error) {
 	}
 
 	p := Prefetch{
-		Version:        binary.LittleEndian.Uint32(data[0:4]),
-		ExecutableName: decodeUTF16(data[16:76]),
-		PrefetchHash:   binary.LittleEndian.Uint32(data[76:80]),
+		Version:          binary.LittleEndian.Uint32(data[0:4]),
+		ExecutableName:   decodeUTF16(data[16:76]),
+		PrefetchHash:     binary.LittleEndian.Uint32(data[76:80]),
+		Compressed:       compressed,
+		CompressedSize:   compressedSize,
+		UncompressedSize: len(data),
 	}
 
 	layout, ok := layoutFor(p.Version)

@@ -66,6 +66,11 @@ code, .mono { font-family: var(--mono); }
   padding: 12px 24px;
   border-bottom: 1px solid var(--border);
   background: var(--bg-panel);
+  /* Wrap rather than push the page wider. Adding the timezone control
+     to this bar made its right-hand group wide enough to overflow a
+     phone viewport, which put a horizontal scrollbar on every screen. */
+  flex-wrap: wrap;
+  gap: var(--space-2);
 }
 .brand { font-size: 18px; font-weight: 700; color: var(--text); }
 .brand-sub { font-size: 12px; font-weight: 400; color: var(--text-dim); margin-left: 8px; }
@@ -109,6 +114,22 @@ h3 { font-size: 14px; line-height: 1.4; margin: 0 0 var(--space-2); }
 .row { display: flex; gap: var(--space-3); align-items: center; flex-wrap: wrap; min-width: 0; }
 .row.between { justify-content: space-between; }
 .stack { display: flex; flex-direction: column; gap: var(--space-1); min-width: 0; }
+
+/* The `hidden` attribute must win over every display rule below.
+ *
+ * `button, .btn { display: inline-flex }` is more specific than the user
+ * agent's `[hidden] { display: none }`, so every button the lifecycle
+ * code hid with `el.hidden = true` -- Add Evidence, Delete collection,
+ * the whole evidence-mutation set on a contained or closed case -- kept
+ * rendering at full size. The server still refused those actions, so
+ * nothing unsafe was possible, but the UI contradicted the lock it was
+ * supposed to be showing.
+ *
+ * Declared before the component rules and marked !important so no later
+ * display rule can reintroduce the same bug. */
+[hidden] {
+  display: none !important;
+}
 
 button, .btn {
   background: var(--accent);
@@ -1262,11 +1283,21 @@ tr:hover td { background: rgba(255,255,255,0.02); }
 .case-identity { min-width: 0; }
 .case-identity h1 { margin: 0; overflow-wrap: anywhere; }
 .case-id { margin-top: 4px; overflow-wrap: anywhere; }
+/* The right-hand action group: state badges, Export and Delete on ONE
+   row, in that order, vertically centred against each other.
+   justify-content keeps them against the right edge when they wrap, so a
+   second row lines up under the first rather than drifting left. */
 .case-header-actions {
   display: flex;
+  flex-direction: row;
   align-items: center;
+  justify-content: flex-end;
   gap: var(--space-2);
   flex-wrap: wrap;
+  /* Never let the group squeeze the case name to nothing, and never let
+     it grow past its content. */
+  flex: 0 1 auto;
+  min-width: 0;
 }
 
 /* Metadata wraps into as many columns as fit. Nothing is hidden at any
@@ -1546,7 +1577,14 @@ tr:hover td { background: rgba(255,255,255,0.02); }
 
 /* ---------------- Authentication UI (Phase 12) ---------------- */
 
-.topbar-right { display: flex; align-items: center; gap: var(--space-3); }
+.topbar-right {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  min-width: 0;
+}
 .user-bar { display: flex; align-items: center; gap: var(--space-2); }
 .user-chip { display: inline-flex; align-items: center; gap: var(--space-2); }
 .user-name { font-size: 13px; font-weight: 600; color: var(--text); }
@@ -1573,4 +1611,329 @@ tr:hover td { background: rgba(255,255,255,0.02); }
 @media (max-width: 700px) {
   .topbar-right { gap: var(--space-2); }
   .user-name { max-width: 40vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+}
+
+/* ---------------- Case lifecycle (Phase 13) ---------------- */
+
+/* The analyst lifecycle, shown alongside the engine status in the case
+   list. Distinct from .badge.status (engine state), .badge.prio
+   (artifact triage priority) and severity badges -- four different
+   judgements that must never be mistaken for one another.
+
+   Every state is carried by its WORD; colour only reinforces it, and a
+   closed case additionally gets a muted, dashed treatment so it reads as
+   finished even in monochrome. */
+.badge.lifecycle {
+  border: 1px solid var(--border);
+  background: transparent;
+}
+.badge.lifecycle-open { color: var(--low); border-color: rgba(111,179,255,0.5); }
+.badge.lifecycle-investigating { color: var(--medium); border-color: rgba(255,210,77,0.5); }
+.badge.lifecycle-contained { color: var(--ok); border-color: rgba(77,219,155,0.5); }
+.badge.lifecycle-closed {
+  color: var(--text-dim);
+  border-style: dashed;
+  border-color: var(--text-dim);
+}
+
+.badge.case-prio { border: 1px solid var(--border); background: transparent; color: var(--text-dim); }
+.badge.case-prio-critical { color: var(--critical); border-color: rgba(255,92,122,0.5); }
+.badge.case-prio-high     { color: var(--high); border-color: rgba(255,154,77,0.5); }
+.badge.case-prio-medium   { color: var(--medium); border-color: rgba(255,210,77,0.45); }
+.badge.case-prio-low      { color: var(--low); border-color: rgba(111,179,255,0.4); }
+
+/* A closed case is dimmed in the list so it recedes without becoming
+   unreadable -- it is still fully navigable. */
+.case-card-row:has(.lifecycle-closed) .case-card-name { color: var(--text-dim); }
+
+/* ---- unsaved-changes save bar ---- */
+
+.save-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+  margin-top: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--accent);
+  border-left-width: 3px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-panel-2);
+}
+.save-bar-actions { display: flex; gap: var(--space-2); flex-wrap: wrap; }
+
+/* ---- evidence lock banner ---- */
+
+.lock-banner {
+  margin-top: var(--space-3);
+  padding: var(--space-3);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--medium);
+  border-radius: var(--radius-sm);
+  background: var(--bg-panel-2);
+}
+.lock-banner strong { color: var(--medium); }
+
+/* A disabled lifecycle control must look disabled, not merely be
+   disabled -- otherwise a closed case's priority dropdown invites a
+   click that can only fail. */
+select:disabled, .filter-input:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+@media (max-width: 700px) {
+  .save-bar { flex-direction: column; align-items: stretch; }
+  .save-bar-actions { justify-content: flex-end; }
+}
+
+/* ---------------- Parse-error grouping ---------------- */
+
+.parse-error-groups { display: flex; flex-direction: column; gap: var(--space-2); margin-top: var(--space-2); }
+.parse-error-group {
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--high);
+  border-radius: var(--radius-sm);
+  background: var(--bg-panel-2);
+  padding: var(--space-2) var(--space-3);
+}
+.parse-error-group > summary {
+  cursor: pointer;
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+.parse-error-message { margin: var(--space-2) 0 0; }
+/* The affected-file list can be long; it scrolls inside the group rather
+   than making the group itself unbounded. */
+.parse-error-files {
+  margin-top: var(--space-2);
+  max-height: 140px;
+  overflow-y: auto;
+  overflow-wrap: anywhere;
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+/* ---------------- Evidence coverage: two axes ---------------- */
+
+/* Discovered is the whole set; the two groups beside it are separate
+   partitions OF that set, not further slices of one list. Grouping them
+   visually is what stops the five numbers reading as if they should sum. */
+.coverage-note { margin: 0 0 var(--space-2); }
+.coverage-total { padding-right: var(--space-4); border-right: 1px solid var(--border); }
+
+.coverage-axis { display: flex; flex-direction: column; gap: 2px; }
+.coverage-axis-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-dim);
+  font-weight: 700;
+}
+.coverage-axis-stats { display: flex; gap: var(--space-4); flex-wrap: wrap; }
+.coverage-stat[title] { cursor: help; }
+
+@media (max-width: 700px) {
+  .coverage-total { padding-right: 0; border-right: none; }
+  .coverage-axis-stats { gap: var(--space-3); }
+}
+
+.collection-danger {
+  margin-top: var(--space-3);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+}
+
+/* Skipped-import reasons: a compact breakdown, not a wall of list. */
+.import-skip-reasons {
+  margin: 4px 0 0;
+  padding-left: 18px;
+  list-style: disc;
+}
+.import-skip-reasons li { margin: 1px 0; }
+
+/* Capability boundary: what Tracefall can and cannot read for an
+   artifact family, shown as two lists rather than one sentence. */
+.capability-boundary { margin-top: var(--space-2); }
+.capability-group { margin-top: var(--space-2); }
+.capability-heading {
+  font-size: 0.78rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+.capability-heading.supported { color: var(--ok, #2e7d5b); }
+.capability-heading.not-supported { color: var(--muted); }
+.capability-list {
+  margin: 2px 0 0;
+  padding-left: 18px;
+  list-style: disc;
+  font-size: 0.85rem;
+  color: var(--text-muted, var(--muted));
+}
+.capability-list li { margin: 1px 0; }
+
+/* Import cancellation: a normal terminal state, styled as information
+   rather than as an error -- the evidence imported before the stop is
+   valid. */
+.import-cancel-error:empty { display: none; }
+.import-cancel-error { margin-top: var(--space-1); color: var(--critical, #b3261e); }
+.import-cancel-note { margin: var(--space-1) 0 var(--space-2); }
+
+/* Display-timezone control in the top bar. Present on every screen
+   because the zone is context for every timestamp shown. */
+.timezone-control {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+.tz-label {
+  font-size: 0.75rem;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+.tz-select {
+  font-size: 0.8rem;
+  padding: 2px 6px;
+  max-width: 15rem;
+}
+.tz-error:empty { display: none; }
+.tz-error { color: var(--critical, #b3261e); max-width: 18rem; }
+@media (max-width: 720px) {
+  .tz-label { display: none; }
+  .tz-select { max-width: 9rem; }
+}
+
+/* Correlation / activity-chain event drill-down. Collapsed by default:
+   the card stays compact, the events stay reachable. */
+.correlation-detail-host { margin-top: var(--space-2); }
+.correlation-span { margin-top: 4px; }
+.corr-toggle { margin-top: var(--space-1); }
+.correlation-events { margin-top: var(--space-2); }
+.corr-ordering { margin: 0 0 var(--space-2); }
+.chain-truncation-note { margin-top: var(--space-2); }
+
+/* Case state badges: the case's workflow status, priority and analysis
+   freshness, top-right in the header, answerable at a glance. */
+/* A ROW, matching the gap of the action group it sits in.
+   It was previously a COLUMN, which made the three badges one tall flex
+   item: they stacked vertically and Export/Delete centred against the
+   full height of that stack, so the two halves of the group appeared to
+   sit on different rows. The group element is kept (rather than
+   flattened with display:contents) because it carries
+   role="group"/aria-label, and its gap is matched to the parent's so the
+   five controls read as one evenly spaced row. */
+.case-state-badges {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  min-width: 0;
+}
+.case-state-badges .badge {
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+}
+/* Case status: tinted fill plus a matching border, the treatment
+   .badge.status.ok-badge already uses. Filled-ish reads as "this is the
+   state the case IS in", which is deliberately different from the
+   outline-only priority badges beside it -- the two answer different
+   questions and must not look interchangeable.
+   Colours come from the palette tokens, never from literal hex. The
+   previous values were Material light-theme hexes and a var(--bg-muted)
+   that does not exist in this theme, so OPEN fell back to near-white
+   #e8eaed and read as a disabled chip on the dark panel. */
+.badge.case-state {
+  border: 1px solid transparent;
+}
+/* OPEN is an ACTIVE state and must look like one. */
+.badge.case-state-open {
+  background: rgba(91, 157, 255, 0.18);
+  border-color: rgba(91, 157, 255, 0.5);
+  color: var(--accent);
+}
+.badge.case-state-investigating {
+  background: rgba(255, 154, 77, 0.18);
+  border-color: rgba(255, 154, 77, 0.5);
+  color: var(--high);
+}
+.badge.case-state-contained {
+  background: rgba(77, 219, 155, 0.18);
+  border-color: rgba(77, 219, 155, 0.5);
+  color: var(--ok);
+}
+/* CLOSED is the one status that SHOULD recede: the case is done.
+   Receding is not the same as unreadable, though -- badge text is 11px,
+   which is too small to qualify as "large text", so it has to clear the
+   4.5:1 contrast floor like any other body text. --text-dim over the
+   tint measured 4.25:1, so the text is lifted slightly while the muted
+   fill keeps it the quietest badge in the row. */
+.badge.case-state-closed {
+  background: rgba(136, 146, 171, 0.14);
+  border-color: rgba(136, 146, 171, 0.4);
+  color: #a6afc4;
+}
+/* Analysis freshness is CONTEXT, not a state of the case itself, so it
+   is deliberately quieter than the status and priority badges beside it:
+   outlined rather than filled, lighter weight, with a small dot carrying
+   the colour. It stays legible without competing with the two badges an
+   analyst reads first.
+   Stale keeps a filled treatment -- it is the one value that means
+   "what you are looking at may be wrong", and under-stating that would
+   be worse than a little visual weight. */
+.badge.analysis-state {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.badge.analysis-state::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  flex: none;
+}
+.badge.analysis-current { border-color: rgba(77, 219, 155, 0.45); color: var(--ok); }
+.badge.analysis-never { border-color: var(--border); color: var(--text-dim); }
+/* Stale is a WARNING -- amber, not red. Red is reserved for critical
+   priority and severity, and borrowing it here would make a case whose
+   analysis simply needs re-running look like a critical finding. */
+.badge.analysis-stale {
+  border-color: rgba(255, 154, 77, 0.6);
+  background: rgba(255, 154, 77, 0.14);
+  color: var(--high);
+}
+.case-meta-edit-label {
+  width: 100%;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-size: 0.7rem;
+  margin-bottom: 2px;
+}
+/* Narrow viewports: the action group drops onto its own full-width row
+   BELOW the case identity rather than competing with it for horizontal
+   space. It wraps within itself as needed; nothing is positioned
+   absolutely, so nothing can overlap or collide with the case name.
+   The header's divider and metadata still follow the whole block. */
+@media (max-width: 720px) {
+  .case-header-actions {
+    justify-content: flex-start;
+    width: 100%;
+  }
 }

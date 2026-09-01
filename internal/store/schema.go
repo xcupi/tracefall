@@ -311,6 +311,23 @@ CREATE INDEX IF NOT EXISTS idx_analyst_status_case ON analyst_status(case_id);
 --
 -- case_id is present but unconstrained, so an event that does concern a
 -- case (a denied request against one) can still say which.
+-- app_settings holds APPLICATION-WIDE display preferences (Phase 14).
+--
+-- Deliberately a tiny key/value table rather than a typed one: the only
+-- thing stored here so far is a display timezone, and inventing a schema
+-- for a single row would be more structure than the problem has.
+--
+-- Nothing forensic lives here. These are PRESENTATION choices, and no
+-- value in this table is allowed to influence stored timestamps,
+-- hashes, evidence, ordering, or any analysis result. A case export
+-- does not carry it, and changing it never invalidates an analysis --
+-- which is exactly why it is not stored on a case or an evidence row.
+CREATE TABLE IF NOT EXISTS app_settings (
+	key        TEXT PRIMARY KEY,
+	value      TEXT NOT NULL,
+	updated_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS security_log (
 	id          TEXT PRIMARY KEY,
 	timestamp   TEXT NOT NULL,

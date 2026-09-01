@@ -161,7 +161,11 @@ func TestParse_MalformedIsAStructuredError(t *testing.T) {
 		{"truncated header", prefetchgen.Truncate(valid, 40), prefetch.ErrCorrupt},
 		{"truncated file information", prefetchgen.Truncate(valid, 120), prefetch.ErrCorrupt},
 		{"unsupported version", prefetchgen.SetVersion(valid, 99), prefetch.ErrUnsupportedVersion},
-		{"MAM compressed", prefetchgen.Compressed(4096), prefetch.ErrCompressed},
+		// A MAM container announcing LZXPRESS Huffman whose stream is
+		// not decodable. Compression is supported now, so this is a
+		// CORRUPT stream rather than a capability gap.
+		{"MAM with undecodable stream", prefetchgen.Compressed(4096), prefetch.ErrDecompress},
+		{"MAM with unknown compression method", prefetchgen.CompressedMethod(4096, 0x03), prefetch.ErrUnsupportedCompression},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

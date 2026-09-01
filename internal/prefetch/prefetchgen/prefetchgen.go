@@ -160,15 +160,6 @@ func CorruptFilenameOffset(pf []byte) []byte {
 	return out
 }
 
-// Compressed wraps arbitrary bytes in a MAM header, producing the
-// Windows 10/11 compressed form this reader deliberately refuses.
-func Compressed(uncompressedSize uint32) []byte {
-	out := make([]byte, 8, 64)
-	copy(out[0:4], "MAM\x04")
-	binary.LittleEndian.PutUint32(out[4:8], uncompressedSize)
-	return append(out, make([]byte, 32)...)
-}
-
 // ---------- helpers ----------
 
 func encodeUTF16(s string) []byte {

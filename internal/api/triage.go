@@ -42,6 +42,15 @@ type TriagedSourceFile struct {
 	// UnsupportedReason explains, in plain language, why Tracefall cannot
 	// parse this file. Empty for supported files.
 	UnsupportedReason string `json:"unsupported_reason,omitempty"`
+	// Recognized distinguishes "Tracefall knows what this is and has no
+	// parser for it" (NTFS $MFT) from "Tracefall has no idea what this
+	// is". Both are unsupported; only one is actionable.
+	Recognized bool `json:"recognized"`
+	// ParsedInstead / NotParsed carry the capability boundary for this
+	// file's family, so an unsupported row can say what IS covered
+	// instead of implying the whole family is a gap.
+	ParsedInstead []string `json:"parsed_instead,omitempty"`
+	NotParsed     []string `json:"not_parsed,omitempty"`
 	// Recommended marks high-value evidence that can actually be
 	// imported -- what "Select recommended" acts on.
 	Recommended bool `json:"recommended"`
@@ -57,6 +66,9 @@ func triage(sf model.SourceFile) TriagedSourceFile {
 		FamilyLabel:       cap.FamilyLabel,
 		Priority:          string(cap.Priority),
 		UnsupportedReason: cap.Reason,
+		Recognized:        cap.Recognized,
+		ParsedInstead:     cap.ParsedInstead,
+		NotParsed:         cap.NotParsed,
 		// Only a file that is still selectable can be recommended:
 		// recommending something already imported, duplicated or failed
 		// would put entries in "Select recommended" that do nothing.

@@ -12,6 +12,14 @@ import (
 	"net/http"
 	"os"
 
+	// tzdata is embedded so timezone conversion works identically on
+	// every host, including a container or a Windows machine with no
+	// system timezone database. Without it, time.LoadLocation would fail
+	// on such hosts and every analyst-facing timestamp would silently
+	// fall back to UTC -- the exact class of quiet wrongness the display
+	// timezone feature exists to prevent. Stdlib; no new dependency.
+	_ "time/tzdata"
+
 	"tracefall/internal/api"
 	"tracefall/internal/casefiles"
 	"tracefall/internal/config"
