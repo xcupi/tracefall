@@ -75,12 +75,19 @@ func TestClassify_UnsupportedArtifactKeepsItsRealPriority(t *testing.T) {
 		wantPriority artifacts.Priority
 		wantFamily   artifacts.Family
 	}{
-		{"C/$MFT", "NTFS $MFT", artifacts.PriorityHigh, artifacts.FamilyFileSystem},
+		// $MFT, $UsnJrnl and $LogFile are all parsed now; $Secure is the
+		// NTFS metafile still without a reader.
+		{"C/$Secure", "NTFS volume metadata (other metafiles)", artifacts.PriorityMedium, artifacts.FamilyFileSystem},
 		{"Windows/appcompat/Programs/Amcache.hve", "Amcache hive", artifacts.PriorityHigh, artifacts.FamilyExecution},
 		{"Windows/System32/sru/SRUDB.dat", "SRUM database", artifacts.PriorityHigh, artifacts.FamilyExecution},
 		{"Users/j/AppData/Local/Microsoft/Windows/WebCache/WebCacheV01.dat", "IE / Edge Legacy web cache (WebCacheV01.dat)", artifacts.PriorityMedium, artifacts.FamilyBrowser},
 		{"Users/j/AppData/Roaming/Mozilla/Firefox/Profiles/x/cookies.sqlite", "Browser cookie store", artifacts.PriorityMedium, artifacts.FamilyBrowser},
-		{"Users/j/AppData/Local/Google/Chrome/User Data/Default/Cache/data_1", "Browser cache", artifacts.PriorityMedium, artifacts.FamilyBrowser},
+		// Classified from the path alone, with no bytes to read: an
+		// unidentified file in a cache directory. LOW deliberately --
+		// see recognizedTypeInfo. When discovery HAS read the bytes this
+		// same file is recognized as blockfile rankings instead; that
+		// path is covered in browsercache_classification_test.go.
+		{"Users/j/AppData/Local/Google/Chrome/User Data/Default/Cache/data_0", "Browser cache unknown", artifacts.PriorityLow, artifacts.FamilyBrowser},
 		{"Windows/Logs/CBS/CBS.log", "Log file", artifacts.PriorityLow, artifacts.FamilyLog},
 	}
 	for _, tc := range cases {
@@ -266,7 +273,9 @@ func TestClassify_UnsupportedBrowserArtifactNamesWhatIsParsed(t *testing.T) {
 	}{
 		{"Users/j/AppData/Local/Microsoft/Windows/WebCache/WebCacheV01.dat", "IE / Edge Legacy web cache (WebCacheV01.dat)"},
 		{"Users/j/AppData/Roaming/Mozilla/Firefox/Profiles/x/cookies.sqlite", "Browser cookie store"},
-		{"Users/j/AppData/Local/Google/Chrome/User Data/Default/Cache/data_1", "Browser cache"},
+		{"Users/j/AppData/Local/Google/Chrome/User Data/Default/Cache/data_0", "Browser cache unknown"},
+		{"Users/j/AppData/Local/Google/Chrome/User Data/Default/Cache/f_0000a5", "Browser cache auxiliary file"},
+		{"Users/j/AppData/Local/Google/Chrome/User Data/Default/Cache/journal", "Browser cache journal/state"},
 	}
 	for _, tc := range unsupported {
 		t.Run(tc.wantLabel, func(t *testing.T) {
@@ -280,10 +289,20 @@ func TestClassify_UnsupportedBrowserArtifactNamesWhatIsParsed(t *testing.T) {
 			if c.Label != tc.wantLabel {
 				t.Errorf("label = %q, want %q", c.Label, tc.wantLabel)
 			}
-			// The label must be specific: the old catch-all told the
+			// The label must be specific: the old catch-alls told the
 			// analyst nothing about WHICH browser artifact this was.
-			if strings.Contains(c.Label, "unsupported format") {
-				t.Errorf("label %q is the old vague catch-all", c.Label)
+			for _, vague := range []string{
+				"Browser data (unsupported format)",
+				"unrecognized format or container file",
+			} {
+				if strings.Contains(c.Label, vague) {
+					t.Errorf("label %q is an old vague catch-all", c.Label)
+				}
+			}
+			// And short enough to read in a table cell.
+			if len(c.Reason) > 200 {
+				t.Errorf("reason is %d chars; the Notes column needs one line, not a paragraph: %q",
+					len(c.Reason), c.Reason)
 			}
 			if len(c.ParsedInstead) == 0 {
 				t.Fatal("no ParsedInstead list: the row implies all browser data is unsupported")
@@ -330,22 +349,26 @@ func TestClassify_SupportedBrowserHistoryStaysSupported(t *testing.T) {
 func TestClassify_RecognizedButUnsupportedIsNotUnrecognized(t *testing.T) {
 	r := registry()
 
-	mft := r.Classify("C/$MFT", "")
-	if mft.Supported {
-		t.Fatal("$MFT reported as supported; Tracefall has no NTFS parser")
+	// $Secure is the recognized-but-unsupported case now: $MFT,
+	// $UsnJrnl and $LogFile are all parsed. This test's subject is the
+	// distinction between the two kinds of "no", and the security
+	// descriptor store is what still sits on the unsupported side.
+	logfile := r.Classify("C/$Secure", "")
+	if logfile.Supported {
+		t.Fatal("$Secure reported as supported; Tracefall has no security-descriptor parser")
 	}
-	if !mft.Recognized {
-		t.Error("$MFT must be RECOGNIZED-but-unsupported, not unknown")
+	if !logfile.Recognized {
+		t.Error("$Secure must be RECOGNIZED-but-unsupported, not unknown")
 	}
-	if mft.Label != "NTFS $MFT" {
-		t.Errorf("label = %q, want %q", mft.Label, "NTFS $MFT")
+	if !strings.Contains(logfile.Reason, "$Secure") {
+		t.Errorf("the explanation does not name the artifact: %q", logfile.Reason)
 	}
-	if !strings.Contains(mft.Reason, "no NTFS filesystem parser") ||
-		!strings.Contains(mft.Reason, "File-system timeline analysis is not available") {
-		t.Errorf("the $MFT explanation changed: %q", mft.Reason)
+	if logfile.Priority != artifacts.PriorityMedium {
+		t.Errorf("$Secure priority = %q, want medium", logfile.Priority)
 	}
-	if mft.Priority != artifacts.PriorityHigh {
-		t.Errorf("$MFT priority = %q, want high", mft.Priority)
+	// It must say what IS parsed, so "no NTFS support" is not implied.
+	if len(logfile.ParsedInstead) == 0 {
+		t.Error("the NTFS gap does not name the $MFT support that does exist")
 	}
 
 	unknown := r.Classify("Windows/System32/some-random-thing.dll", "")
@@ -374,6 +397,57 @@ func TestRegistry_NoFabricatedSupport(t *testing.T) {
 	for _, c := range r.Supported() {
 		if !c.Supported || c.Parser == "" {
 			t.Errorf("%q is listed as supported but names no parser", c.Label)
+		}
+	}
+}
+
+// The NTFS $MFT is a SUPPORTED artifact now: a parser exists, so the
+// capability registry must report it as parseable rather than as a gap.
+func TestClassify_MFTIsSupported(t *testing.T) {
+	r := registry()
+
+	c := r.Classify("C/$MFT", "ntfs_mft")
+	if !c.Supported {
+		t.Fatal("$MFT is not reported as supported despite a parser existing")
+	}
+	if !c.Recognized {
+		t.Error("$MFT is not recognized")
+	}
+	if c.Label != "NTFS $MFT" {
+		t.Errorf("label = %q, want %q", c.Label, "NTFS $MFT")
+	}
+	if c.Family != artifacts.FamilyFileSystem {
+		t.Errorf("family = %q, want filesystem", c.Family)
+	}
+	if c.Priority != artifacts.PriorityHigh {
+		t.Errorf("priority = %q, want high", c.Priority)
+	}
+	if c.Parser == "" {
+		t.Error("a supported artifact names no parser")
+	}
+	// High-value AND parseable, so it is worth recommending.
+	if !c.Recommended() {
+		t.Error("$MFT should be recommended: it is high priority and parseable")
+	}
+	// The old "no NTFS parser" wording must be gone.
+	if strings.Contains(c.Reason, "no NTFS filesystem parser") {
+		t.Errorf("the supported $MFT still carries the unsupported explanation: %q", c.Reason)
+	}
+
+	// The registry must list it among supported capabilities.
+	var listed bool
+	for _, s := range r.Supported() {
+		if s.ArtifactType == "ntfs_mft" {
+			listed = true
+		}
+	}
+	if !listed {
+		t.Error("$MFT is absent from the supported capability list")
+	}
+	// And must NOT still appear as an unsupported class.
+	for _, u := range r.Unsupported() {
+		if u.Label == "NTFS $MFT" {
+			t.Error("$MFT is still listed as an unsupported artifact class")
 		}
 	}
 }

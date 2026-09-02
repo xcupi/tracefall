@@ -239,7 +239,24 @@ type SourceFileProvenance struct {
 	// or re-analysis; a count taken from the rows cannot.
 	EventCount   int `json:"event_count"`
 	FindingCount int `json:"finding_count"`
+
+	// RawEvidence is what this file actually parsed to, for files that
+	// produced records with no event.
+	//
+	// A record attached to an event is already reachable through that
+	// event. A record with no event -- an NTFS $LogFile's transaction
+	// metadata, a browser-cache container, a Recycle Bin $R file's
+	// recovered content and hash -- had no route out of the database at
+	// all. Bounded, because a parser may legitimately produce many.
+	RawEvidence []model.RawEvidence `json:"raw_evidence,omitempty"`
+	// RawEvidenceTruncated reports that more records exist than are
+	// listed, so an empty tail is never read as "that was all of it".
+	RawEvidenceTruncated bool `json:"raw_evidence_truncated,omitempty"`
 }
+
+// maxProvenanceRawRecords bounds the records one source file's
+// provenance view returns.
+const maxProvenanceRawRecords = 25
 
 // SourceFileProvenanceFor assembles one source file's provenance.
 func (s *Service) SourceFileProvenanceFor(caseID, sourceFileID string) (SourceFileProvenance, error) {
@@ -253,6 +270,18 @@ func (s *Service) SourceFileProvenanceFor(caseID, sourceFileID string) (SourceFi
 		pc := provenanceCollection(c)
 		out.Collection = &pc
 	}
+
+	// One extra is requested so "there are more" can be reported without
+	// a second count query.
+	raws, err := s.store.ListRawEvidenceBySourceFile(sourceFileID, maxProvenanceRawRecords+1)
+	if err != nil {
+		return SourceFileProvenance{}, err
+	}
+	if len(raws) > maxProvenanceRawRecords {
+		out.RawEvidenceTruncated = true
+		raws = raws[:maxProvenanceRawRecords]
+	}
+	out.RawEvidence = raws
 
 	events, err := s.store.ListEvents(caseID)
 	if err != nil {

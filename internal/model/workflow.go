@@ -147,12 +147,17 @@ type AuditEvent struct {
 // queryable/filterable and every call site is self-documenting about
 // which action it's recording.
 const (
-	AuditCaseCreated                = "case_created"
-	AuditCaseMetadataUpdated        = "case_metadata_updated"
-	AuditCaseDeleted                = "case_deleted"
-	AuditEvidenceDiscovered         = "evidence_discovered"
-	AuditEvidenceImported           = "evidence_imported"
-	AuditEvidenceDeleted            = "evidence_deleted"
+	AuditCaseCreated         = "case_created"
+	AuditCaseMetadataUpdated = "case_metadata_updated"
+	AuditCaseDeleted         = "case_deleted"
+	AuditEvidenceDiscovered  = "evidence_discovered"
+	AuditEvidenceImported    = "evidence_imported"
+	AuditEvidenceDeleted     = "evidence_deleted"
+	// AuditAnalysisInvalidated records that a completed analysis stopped
+	// describing the case because the evidence it was derived from was
+	// deleted. Kept distinct from evidence_deleted: an analyst auditing
+	// a case needs to see the consequence, not only the cause.
+	AuditAnalysisInvalidated        = "analysis_invalidated"
 	AuditAnalysisStarted            = "analysis_started"
 	AuditAnalysisCompleted          = "analysis_completed"
 	AuditAnalysisFailed             = "analysis_failed"

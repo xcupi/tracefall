@@ -275,7 +275,131 @@ const (
 	// formats supported are listed in docs/evidence-triage.md; the
 	// artifact type does not imply every browser is readable.
 	ArtifactBrowserHistory = "browser_history"
-	ArtifactScheduledTask  = "scheduled_task" // raw Task Scheduler XML
+	// ArtifactMFT is the NTFS Master File Table. One artifact type for
+	// the table, not one per filesystem object: the $MFT is the evidence
+	// file, and its records are that file's contents.
+	ArtifactMFT = "ntfs_mft"
+	// ArtifactUsnJournal is the NTFS USN change journal ($UsnJrnl:$J).
+	ArtifactUsnJournal = "ntfs_usnjrnl"
+	// ArtifactLogFile is the NTFS transaction log ($LogFile).
+	ArtifactLogFile = "ntfs_logfile"
+	// ArtifactBrowserCache is a browser HTTP cache entry.
+	//
+	// Deliberately SEPARATE from ArtifactBrowserHistory. History is
+	// navigation evidence -- the user went somewhere. Cache is response
+	// evidence -- the browser received and stored something, usually a
+	// subresource nobody chose to load. Sharing one artifact type would
+	// let the two be read as the same claim.
+	ArtifactBrowserCache = "browser_cache"
+	// ArtifactBrowserCacheIndex is a browser cache CONTAINER file: a
+	// Chromium blockfile "index" or a Firefox cache1 "_CACHE_MAP_".
+	//
+	// Separate from ArtifactBrowserCache because it is a different kind
+	// of evidence, not a different format of the same kind. A container
+	// holds addresses and hashes -- how many entries the cache has, how
+	// big it is, when it was created -- and no cache keys, so it yields
+	// no URLs and no timeline events. Labelling one "browser cache
+	// entry" would promise an analyst URLs that are not in the file.
+	ArtifactBrowserCacheIndex = "browser_cache_index"
+
+	// Recognition-only browser-cache classes.
+	//
+	// These are NOT parser outputs and no parser produces them. They are
+	// what discovery concluded a file IS, structurally, when no parser
+	// claimed it -- so triage can say "auxiliary payload file, its
+	// metadata is in data_1" instead of filing every unclaimed file in a
+	// cache directory under one message.
+	//
+	// A file carrying one of these types is never Supported: recognizing
+	// something is not the same as being able to parse it, and the
+	// supported count must keep meaning "Tracefall can turn this into
+	// forensic records".
+	//
+	// The auxiliary classes. Three, not one: an analyst told "auxiliary
+	// file" learns nothing actionable, while "rankings, and the times in
+	// it cannot be attributed to a URL" and "payload blocks, the
+	// metadata is in data_1" each say where to look next.
+	//
+	// ArtifactBrowserCacheRankings is a blockfile rankings file (data_0):
+	// LRU nodes carrying use times but no cache key.
+	ArtifactBrowserCacheRankings = "browser_cache_rankings"
+	// ArtifactBrowserCachePayload is a blockfile payload block file
+	// (data_2 / data_3): stream content whose describing metadata is in
+	// the data_1 entry record that addresses it.
+	ArtifactBrowserCachePayload = "browser_cache_payload"
+	// ArtifactBrowserCacheBody is a cached response body written to its
+	// own file (f_######), likewise described by a data_1 entry record.
+	ArtifactBrowserCacheBody = "browser_cache_body"
+	// ArtifactBrowserCacheAuxiliary is the generic auxiliary class, used
+	// where the specific kind is not established.
+	ArtifactBrowserCacheAuxiliary = "browser_cache_auxiliary"
+	// ArtifactBrowserCacheState covers a cache's bookkeeping: journals,
+	// lock files, temporary indexes. Not evidence of a cached resource
+	// and not a parse failure -- a cache simply has housekeeping files.
+	ArtifactBrowserCacheState = "browser_cache_state"
+	// ArtifactBrowserCacheVariant is a browser-cache structure Tracefall
+	// DOES read, in a version or state this build does not decode. It is
+	// the one recognition class that may still hold recoverable forensic
+	// data, and it is triaged accordingly.
+	ArtifactBrowserCacheVariant = "browser_cache_variant"
+	// ArtifactBrowserCacheUnknown is the honest fallback: the file is in
+	// a browser cache directory and its bytes settled nothing.
+	ArtifactBrowserCacheUnknown = "browser_cache_unknown"
+
+	// ArtifactLNK is a Windows shortcut (.lnk).
+	//
+	// A shortcut is REFERENCE evidence: it records where a target was,
+	// how big it was, and the target's own timestamps as they stood when
+	// the shortcut was last written -- often the only surviving
+	// description of a file that has since been deleted.
+	//
+	// It is not execution evidence. Windows writes shortcuts for files
+	// that were merely opened, saved or listed in a dialog. Nothing that
+	// consumes this artifact type may treat it as a run.
+	ArtifactLNK = "windows_lnk"
+	// ArtifactRecycleBin is a Windows Recycle Bin $I metadata record: the
+	// original path, original size and deletion time of a deleted file.
+	//
+	// Deliberately distinct from the paired $R file, which holds the
+	// content and which Tracefall does not read. An $I record proves a
+	// file was sent to the Recycle Bin at a recorded time; it says
+	// nothing about the content's current availability.
+	ArtifactRecycleBin = "recycle_bin_metadata"
+	// ArtifactRecycleBinContent is the $R half of a Recycle Bin pair: the
+	// CONTENT of a deleted file.
+	//
+	// Deliberately distinct from ArtifactRecycleBin. The two halves are
+	// different evidence answering different questions -- the $I says
+	// WHAT was deleted and WHEN, the $R holds WHAT IT WAS -- and an
+	// analyst has to be able to tell a metadata record from recovered
+	// content at a glance. Sharing one artifact type would also make a
+	// pair look like two copies of the same thing.
+	//
+	// A $R file carries no metadata of its own. Every identifying fact
+	// on a record of this type is attributed to the paired $I record it
+	// came from; see internal/parsers/recyclebincontent.
+	ArtifactRecycleBinContent = "recycle_bin_content"
+	// ArtifactJumpListAutomatic is a *.automaticDestinations-ms Jump
+	// List: an OLE compound file whose numbered streams hold embedded
+	// shortcuts, beside a DestList recording the most-recently-used
+	// order, an access count and a last-recorded access time per entry.
+	//
+	// A Jump List entry proves that an application HOLDS A REFERENCE to
+	// a target. It is not proof of execution: Windows records items
+	// opened, saved, previewed or merely reached through a dialog.
+	ArtifactJumpListAutomatic = "jumplist_automatic"
+	// ArtifactJumpListCustom is a *.customDestinations-ms Jump List: a
+	// different container entirely -- embedded shortcuts written back to
+	// back, supplied by the application for its own task and pinned
+	// categories.
+	//
+	// Kept distinct from the automatic list because the two carry
+	// different evidence: a custom list has no DestList, so it records
+	// no access times or ordering, and an analyst must not read one as
+	// though it did.
+	ArtifactJumpListCustom = "jumplist_custom"
+
+	ArtifactScheduledTask = "scheduled_task" // raw Task Scheduler XML
 )
 
 // Event types recognized in Phase 1. EventType is the normalized,
@@ -350,6 +474,93 @@ const (
 	// EventDNSQuery is Sysmon Event ID 22 (DNSEvent) -- a process resolved
 	// a domain name.
 	EventDNSQuery = "dns_query"
+
+	// Filesystem events, from NTFS $MFT records (Phase 15).
+	//
+	// FOUR SEPARATE TYPES, not one "filesystem" event with a timestamp
+	// field. NTFS records four independent times per file and they mean
+	// different things: when it came into existence, when its contents
+	// were last written, when its MFT record last changed, and when it
+	// was last read. Collapsing them would make "created" and "accessed"
+	// indistinguishable on a timeline, which is precisely the
+	// distinction an examiner is looking for.
+	//
+	// These describe the FILESYSTEM's own record of a file. They assert
+	// nothing about who acted or what ran -- NTFS records neither -- and
+	// nothing downstream may infer a user or a process from them.
+	EventFilesystemCreated  = "filesystem_created"
+	EventFilesystemModified = "filesystem_modified"
+	EventFilesystemChanged  = "filesystem_changed"
+	EventFilesystemAccessed = "filesystem_accessed"
+
+	// USN change journal events (Phase 16).
+	//
+	// Separate from the filesystem_* types above because they come from
+	// a DIFFERENT SOURCE with different guarantees. An $MFT event is the
+	// current state of a file's metadata; a USN event is a historical
+	// record that the volume observed a change -- including for files
+	// that no longer exist. An examiner must be able to tell which they
+	// are reading, so the two vocabularies never merge.
+	//
+	// One event per USN record, typed by the most significant reason bit
+	// present. The complete raw reason mask travels with every event, so
+	// the translation can always be checked against what the journal
+	// actually said.
+	EventUsnCreate         = "usnjrnl_create"
+	EventUsnDelete         = "usnjrnl_delete"
+	EventUsnModify         = "usnjrnl_modify"
+	EventUsnRename         = "usnjrnl_rename"
+	EventUsnMetadataChange = "usnjrnl_metadata_change"
+
+	// EventBrowserCacheEntry is a resource the browser cached (Phase 14).
+	//
+	// ONE event type, not several. The cache formats Tracefall reads
+	// record a single meaningful time per entry -- when it was last
+	// fetched -- so a second event type would either duplicate that
+	// observation or need a timestamp the cache does not store.
+	//
+	// This event asserts that the browser HELD a cached copy of a
+	// resource at a recorded time. It asserts nothing about the user:
+	// not that they navigated to it, saw it, clicked it, downloaded it
+	// or ran it. Most cache entries are subresources fetched
+	// automatically by a page.
+	EventBrowserCacheEntry = "browser_cache_entry"
+
+	// LNK target metadata (Phase 17). THREE event types, one per
+	// timestamp the shortcut records, mirroring how the $MFT's four
+	// timestamps are handled: each is a distinct observation about the
+	// TARGET FILE, and collapsing them would discard two of the three.
+	//
+	// Every one of these describes the target's own MACE time as it
+	// stood when the shortcut was last written. None of them is a launch
+	// of the target, and none may be read as one -- see ArtifactLNK.
+	EventLnkTargetCreated  = "lnk_target_created"
+	EventLnkTargetModified = "lnk_target_modified"
+	EventLnkTargetAccessed = "lnk_target_accessed"
+
+	// Jump List entries (phase 21). TWO event types, because the two
+	// timestamps a Jump List can supply mean different things and must
+	// never be collapsed:
+	//
+	// EventJumpListEntryAccess is the Jump List's OWN timestamp -- when
+	// the application last recorded reaching the item, from the DestList.
+	// It is the closest thing the artifact has to a moment of use, and it
+	// is still not proof of execution: an item is recorded when opened,
+	// saved, previewed, or reached through a dialog.
+	EventJumpListEntryAccess = "jumplist_entry_access"
+	// EventJumpListTargetMetadata is a TARGET FILE timestamp carried by
+	// the embedded shortcut -- the target's own creation, write or access
+	// time as it stood when the shortcut was written. It describes the
+	// file, not any use of it, exactly as the standalone LNK events do.
+	EventJumpListTargetMetadata = "jumplist_target_metadata"
+
+	// EventRecycleBinDeletion is the moment a file was moved to the
+	// Recycle Bin, from an $I metadata record.
+	//
+	// It is NOT the file's last-write time, not its creation time, and
+	// not evidence that anything ran. One event type, because an $I
+	// record carries exactly one timestamp.
+	EventRecycleBinDeletion = "recyclebin_deletion"
 )
 
 // Event is Tracefall's normalized evidence record. Every parser emits
@@ -514,6 +725,13 @@ const (
 	// the service process actually starting, and onward to any network
 	// connection that process made. See internal/correlate/service_chain.go.
 	CorrelationServiceChain = "service_chain"
+	// CorrelationWebResource (Phase 14) links the SAME web host as it
+	// appears in independent browser artifacts -- a recorded visit in
+	// browser history and a stored response in the browser cache. It is
+	// corroboration between sources, not a verdict: see
+	// internal/correlate/web_resource.go for what it does and does not
+	// claim.
+	CorrelationWebResource = "web_resource"
 )
 
 // Correlation is a deterministic relationship between two or more events,
@@ -530,4 +748,15 @@ type Correlation struct {
 	EventIDs    []string  `json:"event_ids"` // ordered where sequence is meaningful
 	FirstSeen   time.Time `json:"first_seen"`
 	LastSeen    time.Time `json:"last_seen"`
+
+	// AnalysisRunID attributes this correlation to the AnalysisRun that
+	// produced it, exactly as Finding.AnalysisRunID does.
+	//
+	// It exists so a correlation can be excluded from current results
+	// when its run is invalidated -- a correlation is derived from a set
+	// of events, and when those events are deleted it describes evidence
+	// the case no longer holds. Empty for rows written before the field
+	// existed; such rows are reported as legacy, never retrofitted to an
+	// invented run.
+	AnalysisRunID string `json:"analysis_run_id,omitempty"`
 }

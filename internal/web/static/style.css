@@ -29,13 +29,26 @@
   --space-4: 16px;
   --space-5: 20px;
   --space-6: 24px;
+  --space-8: 32px;
 
   --radius-sm: 6px;
   --radius-md: 8px;
 
-  --content-max: 1100px;   /* the single max content width */
+  /* The application shell is WIDE: a forensic triage tool is read on a
+     desktop, and its tables, timelines and evidence lists all want
+     horizontal room. 1100px left roughly a third of a 1920 display empty
+     on either side while the timeline scrolled inside its own box.
+     The cap still exists -- an unbounded line length is unreadable, and
+     on an ultrawide display the eye should not have to travel the whole
+     panel -- but it is set where the content stops benefiting rather
+     than where a text column would. */
+  --content-max: 1760px;   /* the single max content width */
   --page-pad: var(--space-6); /* the single horizontal page padding */
-  --sidebar-w: 208px;
+  /* Wide enough for the longest nav label ("Activity Chains") plus its
+     icon without wrapping, and no wider: the sidebar is navigation, not
+     content. */
+  --sidebar-w: 248px;
+  --shell-gap: var(--space-6);
   --control-h: 34px;       /* buttons/inputs/selects share one height */
   --control-h-sm: 28px;
   /* Height reserved for a bulk-selection toolbar, whether or not one is
@@ -85,11 +98,23 @@ code, .mono { font-family: var(--mono); }
   text-align: center;
 }
 
-.app { max-width: var(--content-max); margin: 0 auto; padding: var(--page-pad); }
+.app { width: 100%; max-width: var(--content-max); margin: 0 auto; padding: var(--page-pad); }
 /* The topbar/LAN banner run full-bleed but their contents align to the
    same column as .app, so there is one consistent left and right edge
    down the whole page. */
-.topbar, .lan-warning { padding-left: var(--page-pad); padding-right: var(--page-pad); }
+/* The top bar and the LAN warning span the full viewport so their
+   background and border reach the edges, but their CONTENT is inset to
+   the same column as .app -- otherwise the brand would sit flush left
+   while the sidebar beneath it started 80px further in.
+   100% (the element's own width) rather than 100vw: 100vw includes the
+   scrollbar, which would push the page into horizontal overflow on every
+   scrollable screen. max() collapses the extra inset to plain padding
+   once the viewport is narrower than the cap. */
+.topbar,
+.lan-warning {
+  padding-left: max(var(--page-pad), calc((100% - var(--content-max)) / 2 + var(--page-pad)));
+  padding-right: max(var(--page-pad), calc((100% - var(--content-max)) / 2 + var(--page-pad)));
+}
 
 .panel {
   background: var(--bg-panel);
@@ -244,6 +269,20 @@ input.input-error { border-color: var(--critical); }
   font-size: 12px;
 }
 
+/* Informational helper text, deliberately NOT boxed.
+   The bordered .field-info-box treatment made a sentence of guidance
+   read as a third input sitting under Name and Description. Plain
+   subdued text says the same thing without pretending to be a control.
+   The bordered treatment is kept above for genuine warnings, and errors
+   keep their own distinct .field-error-box -- this only softens the
+   informational case. */
+.field-info-note {
+  margin: var(--space-2) 0 var(--space-3);
+  color: var(--text-dim);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
 table { border-collapse: collapse; width: 100%; font-size: 13px; }
 td {
   text-align: left;
@@ -293,6 +332,14 @@ tr:hover td { background: rgba(255,255,255,0.02); }
    bounded -- a long value wraps and truncates inside the cell (see
    .detail-cell) instead of forcing the table, and the page, wider. */
 .detail-td { max-width: 320px; min-width: 220px; }
+
+/* The coverage table's Notes column carries a sentence, not a value.
+   Bounded so a long explanation wraps inside its own cell rather than
+   widening the table -- the table's min-width is unchanged, so this can
+   never introduce a horizontal scroll the table did not already have.
+   `break-word`, not `anywhere`: prose split mid-word as "auxil/iary" is
+   harder to read than the line it saves. */
+.ev-note { max-width: 380px; min-width: 200px; overflow-wrap: break-word; }
 
 .badge {
   display: inline-block;
@@ -359,11 +406,11 @@ tr:hover td { background: rgba(255,255,255,0.02); }
   width: 100%;
   min-width: 0;
 }
-.case-card-row > input[type="checkbox"] { margin-top: var(--space-4); }
+.case-card-row { align-items: center; }
+.case-card-row > input[type="checkbox"] { margin-top: 0; }
 .case-card-row > .case-card { margin-bottom: 0; }
 
 .case-card {
-  display: block;
   width: 100%;
   min-width: 0;
   padding: var(--space-3) var(--space-4);
@@ -371,11 +418,27 @@ tr:hover td { background: rgba(255,255,255,0.02); }
   border-radius: var(--radius-md);
   background: var(--bg-panel-2);
   color: var(--text);
+  display: grid;
+  grid-template-columns: minmax(280px, 1fr) 140px 140px 180px;
+  gap: var(--space-3);
+  align-items: center;
 }
 .case-card:hover { border-color: var(--accent); text-decoration: none; }
-/* Case name and its status badge on one line, badge never squeezed and
-   never wrapped onto its own line by a long name. */
-.case-card-head { display: flex; align-items: start; justify-content: space-between; gap: var(--space-3); min-width: 0; }
+/* The card IS the grid.
+   The badges were previously flex siblings of the case name, so their
+   position depended on how long that name happened to be and no two
+   rows lined up. As grid items in fixed tracks they occupy the same
+   columns on every row, which is what makes the list scannable
+   vertically -- an analyst reads down the status column, not across one
+   card at a time.
+   The name column is minmax(280px, 1fr): it absorbs all the slack and
+   min-width:0 lets a long name wrap inside it, so nothing a case is
+   called can shift the badge columns. */
+.case-card-info { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+/* Badges sit at the START of their column, not centred in it: a centred
+   badge moves as its own text length changes, which reintroduces
+   exactly the raggedness the grid removes. */
+.case-card-col { min-width: 0; display: flex; justify-content: flex-start; }
 .case-card-name { font-weight: 600; min-width: 0; overflow-wrap: anywhere; }
 .case-card-head > .badge { flex: 0 0 auto; }
 .case-card-meta { overflow-wrap: anywhere; }
@@ -975,6 +1038,55 @@ tr:hover td { background: rgba(255,255,255,0.02); }
 .badge.prio-high     { border-color: rgba(255,154,77,0.55); color: var(--high); }
 .badge.prio-medium   { border-color: rgba(255,210,77,0.45); color: var(--medium); }
 .badge.prio-low      { border-color: rgba(111,179,255,0.4); color: var(--low); }
+/* UNKNOWN is not a level in the scale -- it is the absence of a
+   classification -- so it is styled neutrally rather than as a fifth,
+   lowest rank. It had no rule at all before, which rendered it as an
+   unstyled badge that looked like a bug. */
+.badge.prio-unknown  { border-color: var(--border); color: var(--text-dim); }
+
+/* The priority rationale sits under the classification note in the same
+   cell, one step quieter: an explanation of the badge, not a second
+   finding. */
+.ev-note-why { margin-top: 3px; opacity: 0.75; font-style: italic; }
+
+/* Parsed records shown for a file that produced no events. Collapsed by
+   default: this is the detail behind a row, not the row itself. The
+   record body reuses .evidence-box, so a raw record looks the same here
+   as it does when opened from a timeline row. */
+.prov-records { margin-top: var(--space-3); }
+.prov-record { margin-top: var(--space-2); }
+
+/* Confirmation modal for destructive actions.
+   A native <dialog>, so focus trapping, Escape and the backdrop are the
+   browser's job rather than ours. Sized in ch so the message wraps at a
+   readable measure instead of stretching across a wide desktop. */
+.confirm-modal {
+  max-width: 62ch;
+  width: calc(100vw - 2 * var(--space-5));
+  padding: var(--space-5);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-panel);
+  color: var(--text);
+  box-shadow: 0 18px 48px rgba(0,0,0,0.45);
+}
+.confirm-modal::backdrop { background: rgba(0,0,0,0.55); }
+.confirm-modal h2 { margin: 0 0 var(--space-3); font-size: 17px; }
+.confirm-modal-message { margin: 0; line-height: 1.55; }
+.confirm-modal-details {
+  margin-top: var(--space-3);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--border);
+  color: var(--text-dim);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.confirm-modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-2);
+  margin-top: var(--space-5);
+}
 .badge.status.ok-badge { background: rgba(77,219,155,0.15); color: var(--ok); }
 
 /* Import progress. The fill is driven only by a server-reported
@@ -1170,7 +1282,7 @@ tr:hover td { background: rgba(255,255,255,0.02); }
 .app-shell {
   display: grid;
   grid-template-columns: var(--sidebar-w) minmax(0, 1fr);
-  gap: var(--space-5);
+  gap: var(--shell-gap);
   align-items: start;
 }
 
@@ -1302,15 +1414,91 @@ tr:hover td { background: rgba(255,255,255,0.02); }
 
 /* Metadata wraps into as many columns as fit. Nothing is hidden at any
    width -- case status and priority are forensic context. */
+/* Two groups, not one flat grid: the editable case-state controls on the
+   left, the read-only timestamps on the right.
+   It was previously a single repeat(auto-fit, minmax(150px, 1fr)) grid
+   holding all four fields as siblings. About three columns fit, so
+   "Created" landed in the third and "Last analyzed" wrapped to the first
+   column of a new row -- stranded on the far left, under the status
+   dropdown, with a column of empty space beside it. Grouping the fields
+   by what they ARE keeps each pair together at every width. */
 .case-meta {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-  gap: var(--space-3);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  /* Deliberately NOT space-between, and the left group deliberately does
+     not grow: both would push the timestamps to the far edge of a wide
+     header and leave a few hundred pixels of nothing between Priority
+     and Created. The groups sit next to each other with one clear
+     separation instead, so "Created" reads as the next column along
+     rather than as an unrelated block. */
+  justify-content: flex-start;
+  gap: var(--space-2) var(--space-6);
   margin-top: var(--space-3);
   padding-top: var(--space-3);
   border-top: 1px solid var(--border);
 }
 .case-meta-item { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+
+/* Left: the editable pair, under their shared heading. */
+.case-meta-edit {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  flex: 0 1 auto;
+  min-width: 0;
+}
+.case-meta-fields {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+}
+.case-meta-fields .case-meta-item { flex: 0 1 auto; }
+
+/* Right: the read-only timestamps, as a definition list -- they are
+   label/value facts rather than form fields, and marking them up as such
+   also keeps them from being mistaken for editable controls.
+   Label above value, matching the pattern the controls opposite use, so
+   the two halves read as one row of metadata rather than two designs. */
+.case-meta-facts {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin: 0;
+  flex: 0 0 auto;
+  min-width: 0;
+}
+.case-fact { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.case-meta-facts dt { margin: 0; }
+.case-meta-facts dd { margin: 0; overflow-wrap: anywhere; }
+
+/* Tablet and small laptops: the sidebar stays, but gives back width.
+   Between here and the 900px breakpoint (where it collapses into the
+   menu entirely) the content is the scarce resource, not the
+   navigation. Tokens are redefined rather than the rules that use them,
+   so every consumer follows automatically. */
+@media (max-width: 1200px) {
+  :root {
+    --sidebar-w: 216px;
+    --shell-gap: var(--space-4);
+    --page-pad: var(--space-4);
+  }
+}
+
+/* Very wide displays get a wider cap.
+   1760px is the right bound up to about 1920, where it leaves a modest
+   ~100px margin. Held at 1760 on a 2560 display it leaves ~420px on each
+   side -- the same wasted gutters this layout exists to remove -- and,
+   worse, the 14-column timeline still scrolled inside its own box while
+   800px of viewport sat empty beside it. Horizontal scrolling should
+   happen when the CONTENT needs it, not because the shell declined the
+   room. */
+@media (min-width: 2000px) {
+  :root {
+    --content-max: 2160px;
+    --page-pad: var(--space-8, 32px);
+  }
+}
 
 @media (max-width: 900px) {
   .app-shell { grid-template-columns: minmax(0, 1fr); gap: 0; }
@@ -1615,36 +1803,10 @@ tr:hover td { background: rgba(255,255,255,0.02); }
 
 /* ---------------- Case lifecycle (Phase 13) ---------------- */
 
-/* The analyst lifecycle, shown alongside the engine status in the case
-   list. Distinct from .badge.status (engine state), .badge.prio
-   (artifact triage priority) and severity badges -- four different
-   judgements that must never be mistaken for one another.
-
-   Every state is carried by its WORD; colour only reinforces it, and a
-   closed case additionally gets a muted, dashed treatment so it reads as
-   finished even in monochrome. */
-.badge.lifecycle {
-  border: 1px solid var(--border);
-  background: transparent;
-}
-.badge.lifecycle-open { color: var(--low); border-color: rgba(111,179,255,0.5); }
-.badge.lifecycle-investigating { color: var(--medium); border-color: rgba(255,210,77,0.5); }
-.badge.lifecycle-contained { color: var(--ok); border-color: rgba(77,219,155,0.5); }
-.badge.lifecycle-closed {
-  color: var(--text-dim);
-  border-style: dashed;
-  border-color: var(--text-dim);
-}
-
-.badge.case-prio { border: 1px solid var(--border); background: transparent; color: var(--text-dim); }
-.badge.case-prio-critical { color: var(--critical); border-color: rgba(255,92,122,0.5); }
-.badge.case-prio-high     { color: var(--high); border-color: rgba(255,154,77,0.5); }
-.badge.case-prio-medium   { color: var(--medium); border-color: rgba(255,210,77,0.45); }
-.badge.case-prio-low      { color: var(--low); border-color: rgba(111,179,255,0.4); }
 
 /* A closed case is dimmed in the list so it recedes without becoming
    unreadable -- it is still fully navigable. */
-.case-card-row:has(.lifecycle-closed) .case-card-name { color: var(--text-dim); }
+.case-card-row:has(.case-state-closed) .case-card-name { color: var(--text-dim); }
 
 /* ---- unsaved-changes save bar ---- */
 
@@ -1919,12 +2081,17 @@ select:disabled, .filter-input:disabled {
   background: rgba(255, 154, 77, 0.14);
   color: var(--high);
 }
+/* The heading takes a row of its own so the two groups below it START AT
+   THE SAME LINE: with the heading nested inside the left group, the
+   control labels were pushed down by its height while "Created" stayed
+   at the top of the row, and the two columns read as misaligned.
+   flex-basis of 100% is what claims the row. */
 .case-meta-edit-label {
-  width: 100%;
+  flex: 1 1 100%;
   text-transform: uppercase;
   letter-spacing: 0.04em;
   font-size: 0.7rem;
-  margin-bottom: 2px;
+  margin-bottom: 0;
 }
 /* Narrow viewports: the action group drops onto its own full-width row
    BELOW the case identity rather than competing with it for horizontal
@@ -1936,4 +2103,76 @@ select:disabled, .filter-input:disabled {
     justify-content: flex-start;
     width: 100%;
   }
+  /* The two metadata groups stack instead of competing for a narrow
+     row. Each keeps its own internal layout, so nothing is stranded. */
+  .case-meta {
+    gap: var(--space-4);
+  }
+  .case-meta-edit,
+  .case-meta-facts {
+    flex: 1 1 100%;
+  }
+}
+
+/* ---------------- Cases page ---------------- */
+
+/* New case: Name, Description and the submit button share one row on a
+   desktop, since none of them needs the full width of a wide shell.
+   The three tracks are sized by role -- the name is the field that
+   matters, the description is optional context, the button is its own
+   content -- rather than split evenly. Below 900px it falls back to the
+   stacked layout, where a cramped three-up row would be worse than
+   scrolling. Nothing about validation or submission changes: the same
+   ids, the same handlers, the same error element. */
+/* Fields, then the note, then the action -- the order the eye should
+   travel. The button is deliberately NOT on the field row: it is the
+   primary action and reads as one only when it follows the information
+   that governs it. */
+.new-case-form {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) minmax(0, 3fr);
+  gap: var(--space-3);
+  align-items: start;
+}
+/* Left-aligned with the form content and sized to its own text, never
+   stretched across the panel. */
+.new-case-actions {
+  display: flex;
+  justify-content: flex-start;
+}
+.new-case-actions button { flex: 0 0 auto; }
+.new-case-panel .field { margin-bottom: 0; }
+
+@media (max-width: 900px) {
+  .new-case-form { grid-template-columns: minmax(0, 1fr); }
+}
+
+/* The bulk-action bar reserves its height on the EVIDENCE list so that
+   ticking a checkbox does not shove the row under the cursor downwards
+   (see .bulk-bar-host). The cases list does not have that problem -- its
+   toolbar is directly above and the rows are large -- and reserving
+   56px there instead put a band of empty space between the Cases
+   heading and the first card. Collapsed when empty, so the list starts
+   where it looks like it should. */
+#case-bulk-bar:empty {
+  height: 0;
+  min-height: 0;
+  margin: 0;
+}
+#case-bulk-bar:empty + .case-list { margin-top: var(--space-6); }
+
+/* Narrow viewports: the fixed badge columns would leave the name a
+   sliver, so the card returns to a stacked flow and the badges wrap as
+   a group beneath the case information. Alignment across rows is a
+   desktop affordance; on a phone, legibility wins. */
+@media (max-width: 900px) {
+  .case-card {
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--space-2);
+    align-items: start;
+  }
+  .case-card-col { display: inline-flex; }
+  .case-card-info + .case-card-col { margin-top: var(--space-1); }
+  .case-card-row { align-items: start; }
+  .case-card-row > input[type="checkbox"] { margin-top: var(--space-2); }
 }

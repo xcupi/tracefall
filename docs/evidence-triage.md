@@ -18,7 +18,8 @@ thousands of files, of which a handful are evidence Tracefall can act
 on. Before this phase the selection screen was one flat table of every
 file, with an artifact type only for the files a parser recognized.
 Everything else — a Prefetch file, `$MFT`, a browser cache entry, a font
-— was an anonymous row with a blank type. There was no way to find the
+— was an anonymous row with a blank type. (All but the font are parsed
+today; the point stands for whatever is not.) There was no way to find the
 six registry hives inside seven thousand files, and no way to know that
 nine hundred Prefetch files were being ignored.
 
@@ -37,10 +38,37 @@ It keeps two things deliberately separate:
 | **Support** — can Tracefall parse this? | Derived at runtime from `ingest.Registry()` | A parser is added or removed |
 | **Priority** — how much forensic value does this artifact class carry? | A fixed table in the same package | Forensic judgement changes |
 
-**Priority is independent of support.** A raw `.pf` Prefetch file is
-HIGH priority and unsupported. That combination is not a contradiction
-and is not hidden — it is the most useful thing the screen can tell an
-investigator, because it says what Tracefall is *not* looking at.
+**Priority is independent of support.** An LSASS process dump is
+CRITICAL and unsupported; a Chromium `data_0` rankings file is LOW and
+unsupported. That combination is not a contradiction and is not hidden —
+an unsupported CRITICAL row is the most useful thing this screen can
+say, because it names what Tracefall is *not* looking at.
+
+LOW is never assigned because a parser is missing. It means the artifact
+is auxiliary, indirect, redundant, or has limited standalone value, and
+every LOW row has to justify itself on those grounds.
+
+### The four levels
+
+| Level | Means |
+|---|---|
+| **CRITICAL** | Can contain highly significant evidence of compromise, execution, persistence, credentials, or core system activity. |
+| **HIGH** | Highly valuable for reconstructing user and system activity and building an attack timeline. |
+| **MEDIUM** | Commonly provides useful supporting evidence or important context, but rarely carries an investigation alone. |
+| **LOW** | Auxiliary, indirect, redundant, or of limited standalone value. |
+
+`UNKNOWN` is **not a fifth level**. It is the absence of a
+classification, used only for a file that matched no rule at all, and it
+is deliberately not folded into LOW: *"we do not know what this is"* and
+*"we know what this is and it is of limited value"* are different
+statements, and an investigator triaging seven thousand files needs to
+tell them apart. It sorts last and is never recommended.
+
+**Every classification carries a rationale.** Each entry states in one
+clause why it sits at its level — visible in the Notes column, on the
+badge's tooltip, and in the file's detail panel. A rationale may argue
+only from forensic value: none of them may mention whether a parser
+exists, and a test enforces that.
 
 ### Supported artifact types
 
@@ -56,6 +84,16 @@ what the binary can actually parse:
 | `registry_run_key` | Registry (RECmd export) | Registry | High | `recmd@1` |
 | `scheduled_task` | Scheduled Task XML | Scheduled Task | High | `scheduledtasks@1` |
 | `browser_history` | Browser history (Chromium / Firefox) | Browser | Medium | `browserhistory@1` |
+| `browser_cache` | Browser cache entry (Chromium Simple Cache / blockfile, Firefox cache2 / cache1) | Browser | Medium | `browsercache@1` |
+| `browser_cache_index` | Browser cache index/container (Chromium blockfile index, Firefox `_CACHE_MAP_`) | Browser | Low | `browsercacheindex@1` |
+| `ntfs_mft` | NTFS `$MFT` | File system | High | `mft@1` |
+| `ntfs_usnjrnl` | NTFS `$UsnJrnl` change journal | File system | High | `usnjrnl@1` |
+| `ntfs_logfile` | NTFS `$LogFile` transaction log | File system | Medium | `logfile@1` |
+| `windows_lnk` | Windows LNK shortcut | File system | **High** | `lnk@1` |
+| `recycle_bin_metadata` | Windows Recycle Bin `$I` metadata | File system | **High** | `recyclebin@1` |
+| `recycle_bin_content` | Recycle Bin recovered content (`$R`) | File system | Medium | `recyclebincontent@1` |
+| `jumplist_automatic` | Windows Jump List (Automatic Destinations) | Execution Artifact | **High** | `jumplist@1` |
+| `jumplist_custom` | Windows Jump List (Custom Destinations) | Execution Artifact | **High** | `jumplistcustom@1` |
 
 Several artifact types are produced by more than one parser — raw EVTX
 and EvtxECmd CSV both yield `windows_event_log`; raw `.pf` and PECmd CSV
@@ -78,12 +116,36 @@ claim a file — see `parsers.ContentDetector`.)
 
 | Class | Priority | Why it is not parsed |
 |---|---|---|
+| Process memory dump (LSASS or similar) | **Critical** | No memory analysis. Cataloged and hashed only. |
+| WMI repository (`OBJECTS.DATA`) | **Critical** | No WMI repository parser. |
+| Memory image, full capture (`hiberfil.sys`, `memory.dmp`) | **Critical** | No memory analysis. |
+| Event Log, legacy `.evt` | **Critical** | Only the modern EVTX format is parsed. |
 | Amcache hive | High | Hive format is read, but there is no Amcache-specific extraction. |
 | SRUM database | High | No ESE database parser. |
-| NTFS `$MFT` / `$LogFile` / `$UsnJrnl` | High | No NTFS filesystem parser. |
-| Memory images (`pagefile.sys`, `memory.dmp`, …) | High | No memory analysis. |
-| ShellBags / `UsrClass.dat` | Medium | Hive is read; no ShellBags extraction. |
-| Browser data (other formats) | Medium | Only Chromium `History` and Firefox `places.sqlite` are parsed. Edge Legacy/IE `WebCacheV01.dat` is an ESE database; cookie and cache stores are not parsed. |
+| ShellBags / `UsrClass.dat` | High | Hive is read; no ShellBags extraction. |
+| Windows Timeline (`ActivitiesCache.db`) | High | No ActivitiesCache parser. |
+| PowerShell transcript | High | No transcript parser; console history *is* parsed. |
+| USB / device install log (SetupAPI) | High | No SetupAPI log parser. |
+| Antimalware detection log | High | No antimalware log parser. |
+| Web server log (IIS / W3C) | High | No web server log parser. |
+| Page / swap file | High | No memory analysis. |
+| Windows Search index (`Windows.edb`) | Medium | An ESE database. |
+| Thumbnail cache | Medium | No thumbcache parser. |
+| RDP bitmap cache | Medium | No RDP bitmap cache parser. |
+| Event trace log (`.etl`) | Medium | No ETL parser. |
+| Hosts / network configuration file | Medium | Static configuration is not parsed. |
+| Host firewall log | Medium | No firewall log parser. |
+| Crash dump | Medium | No memory analysis. |
+| NTFS metadata files (`$Secure`, `$Bitmap`, `$Boot`, …) | Medium | The `$MFT`, `$UsnJrnl` and `$LogFile` *are* parsed; these other system files are not. |
+| IE / Edge Legacy web cache (`WebCacheV01.dat`) | Medium | An ESE database. Tracefall has no ESE parser. |
+| Browser cookie store | Medium | No cookie-store parser. Cookies are never extracted. |
+| Chromium blockfile auxiliary file | Low | `data_0`: rankings. Use times, but no cache key. |
+| Chromium blockfile payload file | Low | `data_2` / `data_3`: stream payloads. Metadata is in `data_1`. |
+| Chromium cached response body | Low | `f_######`: a body, with no key, time or headers. |
+| Browser cache hash index | Low | Simple Cache `index`/`the-real-index` and cache2 `index` store key *hashes*. |
+| Browser cache journal/state | Low | Journals, locks, temporary indexes: a cache's own bookkeeping. |
+| Browser cache unsupported format | Medium | A recognized cache structure in a version this build does not decode. |
+| Browser cache unknown | Low | In a cache directory; structural detection identified nothing. |
 | Event Log (legacy `.evt`) | Medium | Only the modern EVTX format is parsed. |
 | CSV (unrecognized tool output) | Medium | Does not match any EZ Tools output naming convention. |
 | Application log (`.log`) | Low | Format is application-specific. |
@@ -93,6 +155,413 @@ claim a file — see `parsers.ContentDetector`.)
 
 Anything matching no rule is classified **Unrecognized / Unknown
 priority**, with a reason saying so. Nothing is guessed.
+
+### Browser cache: what it proves, and what it does not
+
+Browser cache support is the one capability where the *limits* matter
+more than the coverage, so they are stated on every record rather than
+left in this document.
+
+**Six structures are read, and only six.** Four hold cache entries; two
+are containers that describe a cache and hold no cache keys at all.
+
+| Structure | Read | Timeline events | Times the format records |
+|---|---|---|---|
+| Chromium **Simple Cache** entry files (`<hash>_0`) | Yes | **None** | none — the entry file stores no time |
+| Chromium **blockfile** `data_1` entry records | Yes | Yes | `creation_time` (per entry) |
+| Chromium **blockfile** `index` | Yes, as a **container** | **None** | cache `create_time` (per cache) |
+| Firefox **cache2** entry files (v1–3) | Yes | Yes | `lastFetched`, `lastModified` |
+| Firefox **cache1** `_CACHE_00{1,2,3}_` records | Yes | Yes | `lastFetched`, `lastModified`, `expirationTime` |
+| Firefox **cache1** `_CACHE_MAP_` | Yes, as a **container** | **None** | none |
+
+The blockfile and cache1 formats are **legacy** generations, tagged
+`cache_generation: legacy` on every record — a superseded cache format
+on a modern system is itself worth noticing. Blockfile is not merely
+historical: `GPUCache`, older Chrome/Edge profiles and Chromium-embedder
+applications still write it, and it is the *only* Chromium cache
+generation whose entries carry their own timestamp.
+
+Firefox cache1 is the only format read that records an **HTTP request
+method**. No other cache stores one, and no other format's records
+carry an `http_method` field.
+
+**Explicitly NOT read, and reported as such rather than guessed at:**
+
+| Structure | Why |
+|---|---|
+| Chromium `f_######` external files | Cached response **bodies**. No key, no time, no headers. The `data_1` entry that owns one names it by address. |
+| Simple Cache `index`, `index-dir/the-real-index` | Key **hashes**, not keys. It does record a last-used time per hash, but joining that to an entry means reading a file other than the one being imported — see below. |
+| Firefox cache2 `index` | SHA-1 key hashes only; strictly weaker than the entry files already parsed. |
+| blockfile `data_0` (rankings) | 36-byte LRU nodes: times, but no cache key. A time that cannot be attributed to a resource is not evidence of one. |
+| blockfile `data_2` / `data_3` | 1 KiB and 4 KiB stream payloads. Entry records live only in the 256-byte block file. |
+| Cookie stores, `WebCacheV01.dat` | Out of scope. Cookies are never extracted from any browser. |
+
+### Shortcuts and Recycle Bin metadata
+
+Both are parsed natively, and both are read for what they actually say —
+which is less than they are commonly assumed to say.
+
+**Windows LNK shortcut** — `internal/shelllink`, parser `lnk@1`.
+
+Shortcut metadata can preserve the referenced target path, volume
+information and target timestamps even when the target is no longer
+present. **LNK metadata alone does not prove execution.**
+
+Read: the 76-byte `ShellLinkHeader` (validated by its size and the fixed
+`00021401-…-46` class identifier), `LinkFlags`, `FileAttributes`, the
+target's creation/access/write `FILETIME`s, target size, `ShowCommand`;
+`LinkInfo` (local base path, common path suffix, drive type, volume
+serial and label, network share); the `LinkTargetIDList`; the five
+`StringData` values in whichever of ANSI or Unicode `LinkFlags`
+declares; and the `TrackerDataBlock`'s machine ID.
+
+Each recorded timestamp becomes its own event — `lnk_target_created`,
+`lnk_target_modified`, `lnk_target_accessed` — carrying a
+`timestamp_meaning` that says it describes the **target file** as the
+shortcut recorded it. A shortcut with no target timestamps produces
+structured evidence and **no timeline events**; its own file mtime is
+never substituted.
+
+Where a shortcut carries more than one path representation, both are
+kept: `link_info_path` and `id_list_path` sit alongside `target_path`,
+because a disagreement between them is itself forensically interesting.
+
+*Limitation:* shell items are decoded for their documented, version-stable
+fields — root-folder GUIDs, volume names, and a file entry's ANSI primary
+name, size, DOS timestamp and attributes. The `0xBEEF0004` extension
+block's long name is **not** decoded: its offsets vary by Windows version,
+and a wrong path that looks authoritative is worse than a short one.
+
+**Windows Recycle Bin `$I` metadata** — `internal/recyclebin`, parser
+`recyclebin@1`.
+
+Recycle Bin metadata records the deleted file's original path, size and
+deletion time. **The `$R` file contains the deleted content when it is
+still available.**
+
+Both record versions are read — version 1 (Vista–8.1, a fixed
+260-character path field) and version 2 (Windows 10+, length-prefixed).
+A record declaring any other version is refused by name rather than
+decoded with a layout that may not apply.
+
+The single event is `recyclebin_deletion`, labelled **"Recycle Bin
+deletion time"**. It is not a write time, not a creation time, and not
+evidence that anything ran.
+
+Where the paired `$R` file was collected beside the `$I` record, the
+pairing is reported as an observation about the **collection** —
+`paired_r_file_status: present in this collection`, with its size. Where
+it was not, the record names the file that *would* pair and says it is
+absent. The `$R` file is never opened.
+
+### Jump Lists
+
+Two containers, read by two parsers, because they are two formats
+carrying different evidence:
+
+| | Automatic Destinations | Custom Destinations |
+|---|---|---|
+| Container | OLE compound file (`internal/olecf`) | concatenated shell links |
+| Streams | one numbered stream per shortcut, plus `DestList` | none |
+| Jump List's own timestamps | **yes** — last-recorded access per entry | **no** |
+| Access count, MRU order, pinning | yes | no |
+| Artifact | `jumplist_automatic` | `jumplist_custom` |
+
+Embedded shortcuts are decoded by `internal/shelllink` — the same parser
+that reads standalone `.lnk` files. Nothing about the shell link format
+is reimplemented.
+
+#### Two timestamps, never merged
+
+| Event type | Timestamp means |
+|---|---|
+| `jumplist_entry_access` | The **Jump List's own** last-recorded access, from the DestList: when the application last recorded reaching the item. |
+| `jumplist_target_metadata` | A **target file** timestamp carried by the embedded shortcut — its creation, write or access time. A property of the file, not a use of it. |
+
+Every event carries a `timestamp_meaning` saying which it is. A Jump List
+entry shows that an **application holds a reference to a target**; it is
+**not proof of execution** — Windows records items opened, saved,
+previewed, or merely reached through a file dialog. No event populates
+`ProcessName` or `CommandLine`, and a shortcut's arguments are recorded
+as `shortcut_arguments`, never as a command line that ran.
+
+#### Application attribution
+
+A Jump List is named for a 16-hex-digit AppID: a one-way hash of the
+application's path. It can only be **looked up**, never reversed, so the
+table in `internal/jumplist/appid.go` is deliberately small — identifiers
+that are stable across installations because they derive from fixed
+system paths. An AppID outside it resolves to nothing and is reported as
+`Unknown application (AppID <id>)`, with the raw identifier always kept:
+that identifier is the only lead an analyst has, and hiding it behind
+"unknown" would discard it. A renamed file carrying no AppID at all is
+reported differently again — absent is not the same as unresolved.
+
+#### Provenance
+
+Every event traces back through the whole chain:
+
+```
+Jump List file → AppID/application → OLE stream (name + directory index)
+   → embedded shortcut (offset, byte length) → target path → event
+```
+
+`jumplist_stream`, `jumplist_stream_directory_index`,
+`embedded_link_offset` and `embedded_link_bytes` record exactly where
+inside the artifact each shortcut was found.
+
+#### Failure is contained
+
+One malformed embedded shortcut costs that entry, not the file — the
+others parse, and the damaged entry is still reported with whatever its
+DestList row supplied. An unreadable or unsupported-version DestList
+loses the ordering and access times while leaving every shortcut
+readable. A DestList row whose stream is missing is reported as evidence
+in its own right.
+
+#### Detection
+
+Custom Destinations is content-detectable: a shell link header is 20
+fixed bytes, and a custom list places its first one *after* a small
+header rather than at offset zero — which is also what separates it from
+a standalone `.lnk`. So a **renamed Custom Destinations list is still
+found**.
+
+Automatic Destinations is **not** content-detected, deliberately. Its
+container is the OLE compound file format, shared with pre-2007 Office
+documents, MSI packages and `Thumbs.db`, and nothing in the first 512
+bytes tells them apart — what distinguishes a Jump List is a `DestList`
+stream beside numbered shortcut streams, visible only after walking the
+container's allocation tables, which discovery does not do. Claiming
+every compound file by content would classify every old `.doc` in a
+collection as a Jump List and then report each as a parse failure. The
+extension is claimed instead, and a file wearing it without the content
+is refused at parse time.
+
+*Limitations:* the DestList's four droid GUIDs (link-tracking volume and
+object identifiers) are read as opaque values and not resolved to
+volumes or MAC addresses. DestList versions 1, 3 and 4 are decoded; any
+other version is reported and its rows skipped, leaving the shortcuts
+intact. The Custom Destinations category header is recorded as a byte
+count but not decoded into category names. Shell items inside embedded
+shortcuts carry the same `0xBEEF0004` limitation as standalone `.lnk`
+files.
+
+#### The `$R` half: recovered content
+
+A deletion is two files, and Tracefall now reads both:
+
+| | `$I` — metadata | `$R` — content |
+|---|---|---|
+| Artifact | `recycle_bin_metadata` (High) | `recycle_bin_content` (Medium) |
+| Parser | `recyclebin@1` | `recyclebincontent@1` |
+| Carries | original path, name, size, deletion time, version, SID | the deleted file's bytes, and nothing else |
+| Detection | structural (version + FILETIME + path shape) | name + location, then validated by resolving the pair |
+| Timeline | one `recyclebin_deletion` event | **none** |
+
+**Every identifying fact on a `$R` record is borrowed, and says so.**
+A `$R` file has no header, no timestamp and no path; its own name is an
+identifier, *not* the deleted file's name. So the record separates the
+two sources explicitly:
+
+```
+content   { status, recovered_size, sha256, measured_from: "$RA1B2C3.docx" }
+metadata  { resolved, source: "$IA1B2C3.docx", original_path,
+            original_name, original_size, deletion_time, record_version }
+```
+
+The hash is SHA-256 over the bytes actually read, streamed so a large
+deleted file is never held in memory. The evidence model's own
+`SourceFile.SHA256` — computed for every collected file at discovery —
+covers the same bytes independently.
+
+**Why `$R` produces no timeline event.** The deletion already has one,
+emitted by the `$I` parser from the timestamp the `$I` record actually
+carries. A `$R` file records no time of its own, and borrowing the
+`$I`'s to place a second row at the same moment would put one deletion
+on the timeline twice. Recovered content is an attribute of a deletion,
+not a separate moment in it.
+
+**Every pairing outcome is reported distinctly**, and none is a parse
+failure — each is a true finding about the evidence:
+
+| `pairing_status` | Meaning |
+|---|---|
+| `resolved` | The `$I` was found and parsed; its facts appear, attributed to it. |
+| `orphan` | No `$I` was collected. Content is hashed; path, name and deletion time are `null` — never guessed from the `$R` filename. |
+| `invalid` | The `$I` is present but is not a readable record. Distinct from absent. |
+
+Content status is separate again: `recovered` (read through and hashed),
+`unreadable` (**no hash is produced** — a digest over a partial read
+identifies nothing), or `not_read_size_limit` above 2 GiB, where the size
+is recorded and the bytes are left alone.
+
+**A size mismatch preserves both numbers.** `original_size` is what the
+system recorded at deletion; `recovered_size` is what the collection
+holds. When they differ, both are kept unchanged and a warning says so —
+the difference is a fact about the evidence, not an error to correct.
+
+*Limitations:* the content is hashed and measured, never copied,
+carved or interpreted — Tracefall does not identify file types, extract
+text, or scan recovered content. Above 2 GiB it is not hashed at all.
+A `$R` file outside a Recycle Bin directory is not claimed, because
+nothing distinguishes it from any other file.
+
+#### Detection is structural for both
+
+Neither parser claims a filename. A `.lnk` extension is not evidence that
+a file is a shortcut, and a `$I` prefix is not evidence that a file is a
+metadata record — and claiming either by name would classify a
+mislabelled file as supported and then report a *parse failure* where the
+honest answer is "this is not that artifact". A file that resembles
+either and fails validation stays unsupported.
+
+#### Not every file in a cache is a cache entry
+
+A browser cache is a small filesystem of its own. Alongside the entry
+records it holds rankings, payload blocks, indexes, journals, lock files
+and raw bodies — none of which are parseable into forensic records, and
+none of which are broken evidence. **An unsupported cache file is not a
+failed one.**
+
+Triage therefore classifies each kind separately, with its own label,
+its own priority, and a one-line note:
+
+| Class | Supported | Priority | Note |
+|---|---|---|---|
+| Browser cache entry | yes | Medium | — |
+| Browser cache container/index | yes | Medium | parsed for the cache's own metadata; **not an event source** |
+| Chromium blockfile auxiliary file (`data_0`) | no | Low | ranking/index data is not independently parsed |
+| Chromium blockfile payload file (`data_2`/`data_3`) | no | Low | metadata is in the associated `data_1` entry records |
+| Chromium cached response body (`f_######`) | no | Low | metadata is in the associated `data_1` entry record |
+| Browser cache hash index | no | Low | names no URL; the entry files it points at are parsed |
+| Browser cache journal/state | no | Low | no independently parsed cache-entry metadata |
+| Browser cache unsupported format | no | **Medium** | recognized structure, unsupported version/variant |
+| Browser cache unknown | no | Low | format could not be identified |
+
+Two things that follow from this table are load-bearing:
+
+**Priority follows what the file could yield.** An auxiliary or
+bookkeeping file is LOW because it holds no independently useful
+metadata by design. An unsupported *variant* is MEDIUM because it is a
+structure Tracefall reads, in a version it does not — it may still hold
+recoverable data, and an analyst should see it.
+
+**"Supported" keeps meaning "can be parsed into forensic records."**
+Recognizing a file never makes it supported, and never raises the
+supported count. Containers are the one qualified case: they are
+genuinely parsed, so they are genuinely supported, and they carry a Note
+saying they are not where the cached resources are.
+
+#### Classification is structural
+
+Discovery reads each file's leading bytes. When no parser claims one, it
+asks what the bytes *are* before falling back to anything else:
+
+```
+parser claims it?          -> supported artifact type
+bytes identify it?         -> recognition class (rankings / payload / variant)
+exact format-defined name? -> cached body, journal/state
+path rule?                 -> hash index, and the generic fallback
+```
+
+A file named `data_0` that is structurally an entry file is parsed as
+one; a file named `data_1` that is structurally a rankings file is not.
+Names are consulted only where a format defines an exact filename and
+writes no signature — cached bodies (`f_######`), bookkeeping files, and
+the Firefox cache1 block files — and never outside a cache directory.
+The generic *"format could not be identified"* message is reached only
+when structural detection settles nothing.
+
+#### One file in, one file read
+
+Tracefall ties every event to the hash of the file it came from. The
+readers therefore never follow a cache address into a sibling file: a
+`data_1` entry whose HTTP headers live in `data_2`, or whose key is
+stored externally, is emitted with the **address recorded as a warning**
+and the missing field left empty. Nothing is inferred from a file the
+case did not import.
+
+In practice this costs little — stream 0 (the response headers) is small
+and is normally allocated in the same 256-byte block file as the entry —
+and it is why Simple Cache entries still carry no timestamp even though
+the Simple Cache *index* records last-used times.
+
+#### Detection
+
+Structural in every case but one. Blockfile files carry magic
+`0xC103CAC3` (index) and `0xC104CAC3` (data); cache2 is validated
+through its trailing metadata offset; Simple Cache has its own magic;
+`_CACHE_MAP_` is validated by version word plus header coherence.
+
+The exception is the Firefox cache1 **block files**. Their first 4096
+bytes are an allocation bitmap — no magic, no version, no fixed shape —
+so nothing in the 512-byte sniff window identifies them. They are
+claimed by their three exact, format-defined names (`_CACHE_001_`,
+`_CACHE_002_`, `_CACHE_003_` — never `_CACHE_004_`, never
+`_CACHE_001_.bak`) and then validated structurally while parsing.
+
+#### Four outcomes, kept distinct
+
+An analyst must be able to tell these apart, and the pipeline does:
+
+| Outcome | What it looks like |
+|---|---|
+| **Supported entry file** | `browser_cache`, imported, events on the timeline |
+| **Container/index file** | `browser_cache_index`, imported, structured evidence, **no events** |
+| **Unsupported/unknown** | Not supported, with a reason naming the structure and what *is* parsed |
+| **Corrupt** | A parse failure, attributed to that file, isolating it from its neighbours |
+| **Valid but empty** | A **successful import** with a parse report saying zero entries were recovered — never a parse failure |
+
+Every multi-entry file also emits a `browsercache:parse-report` record
+carrying blocks scanned, entries emitted, and entries skipped by reason
+(evicted, doomed, no recoverable key). "This cache held no live entries"
+and "this file could not be read" are different findings.
+
+#### What a cached object proves
+
+**A cached object proves the browser received and stored a response.**
+It does *not* prove the user navigated to the URL, viewed it, clicked
+it, downloaded it, or ran it — a page's subresources, prefetch hints,
+advertising and tracking pixels all land in the cache without anyone
+choosing them. Every cache record carries an explicit `evidence_meaning`
+field saying exactly that, and cache events carry a confidence of
+**0.7**, below browser history's 1.0.
+
+Consequences of that boundary, all enforced by tests:
+
+- **No fabricated timestamps.** A Chromium Simple Cache entry produces
+  structured evidence and *no timeline event*. A blockfile or cache1
+  record whose recorded time is absent or implausible is **not emitted
+  as an entry at all** rather than emitted with a zero time. The file's
+  mtime is never substituted.
+- **No invented actor.** Cache entries carry no user and no process. A
+  path may name a Windows profile directory; that is recorded as
+  `user_profile_path`, which is a path, not an authenticated identity.
+- **No recycled records.** Blockfile entries in the *evicted* or
+  *doomed* state are counted in the parse report but never emitted:
+  their fields are being reused and may no longer describe the key.
+- **No verdict.** A suspicious-looking cached URL raises no finding on
+  its own.
+- **No secrets.** `Cookie`, `Set-Cookie`, `Authorization` and the other
+  authentication headers are redacted before anything is persisted, in
+  every format.
+- **No bodies.** Only metadata is read, in every format. Every record
+  says so in `cached_body`.
+- **Read-only.** Original files are opened for reading and never
+  modified; SHA-256/SHA-512 integrity is unaffected.
+
+Entry files are **medium** priority and containers **low**, so neither
+is in the recommended set — one real cache holds tens of thousands of
+files, and sweeping them into "Select recommended" would bury the six
+registry hives that selection exists to surface.
+
+Where the same host appears in *both* browser history and browser
+cache, the correlation engine emits a `web_resource` correlation
+([`internal/correlate/web_resource.go`](../internal/correlate/web_resource.go)).
+It is a link between two independent sources, not a finding: it carries
+no severity and describes a benign CDN exactly as it describes anything
+else.
 
 `GET /api/capabilities` returns all of the above, plus the filter
 vocabularies the dashboard builds its dropdowns from — so a new family

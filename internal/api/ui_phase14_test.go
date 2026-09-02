@@ -2,6 +2,7 @@ package api
 
 import (
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -538,5 +539,631 @@ func TestUI_CaseStatusBadgesUseThePalette(t *testing.T) {
 	// status badge.
 	if !strings.Contains(rule(".badge.prio"), "background: transparent") {
 		t.Error("priority badges gained a fill; they would then look like status badges")
+	}
+}
+
+// The application shell must use the viewport rather than sitting in a
+// narrow centred column.
+//
+// The layout was capped at 1100px, which left roughly 410px empty on
+// each side of a 1920 display and — worse — made the 14-column timeline
+// scroll inside its own box while most of the screen sat unused. These
+// pin the token values the whole layout derives from, since a single
+// number here silently governs every page.
+func TestUI_ApplicationShellIsWide(t *testing.T) {
+	css, err := os.ReadFile("../web/static/style.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(css)
+
+	tokenValue := func(name string) string {
+		i := strings.Index(text, name+":")
+		if i < 0 {
+			t.Fatalf("no %s token", name)
+		}
+		rest := text[i+len(name)+1:]
+		return strings.TrimSpace(rest[:strings.Index(rest, ";")])
+	}
+
+	// Content cap: wide enough to be worth the screen, still bounded.
+	max := tokenValue("--content-max")
+	if !strings.HasSuffix(max, "px") {
+		t.Fatalf("--content-max is not a pixel value: %q", max)
+	}
+	px, err := strconv.Atoi(strings.TrimSuffix(max, "px"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if px < 1600 {
+		t.Errorf("--content-max is %dpx; anything under 1600 recreates the wasted side margins", px)
+	}
+	if px > 2000 {
+		t.Errorf("--content-max is %dpx; an unbounded line length is unreadable", px)
+	}
+
+	// Sidebar: stable, and not consuming content width.
+	side := tokenValue("--sidebar-w")
+	sidePx, err := strconv.Atoi(strings.TrimSuffix(side, "px"))
+	if err != nil {
+		t.Fatalf("--sidebar-w is not a pixel value: %q", side)
+	}
+	if sidePx < 240 || sidePx > 260 {
+		t.Errorf("--sidebar-w is %dpx, outside the 240-260 band", sidePx)
+	}
+
+	// The shell must still guard against a wide table stretching the
+	// grid track and pushing the PAGE into horizontal scroll.
+	if !strings.Contains(text, "grid-template-columns: var(--sidebar-w) minmax(0, 1fr)") {
+		t.Error("the shell no longer uses minmax(0, 1fr); a wide table would overflow the page")
+	}
+	if !strings.Contains(text, ".app-main { min-width: 0; }") {
+		t.Error(".app-main lost min-width:0")
+	}
+
+	// The top bar's content must align with the shell rather than
+	// sitting flush left while the sidebar starts further in.
+	if !strings.Contains(text, "calc((100% - var(--content-max)) / 2 + var(--page-pad))") {
+		t.Error("the top bar does not inset its content to the shell column")
+	}
+	// 100vw would include the scrollbar and cause horizontal overflow.
+	i := strings.Index(text, ".topbar,")
+	if i >= 0 && strings.Contains(text[i:i+400], "100vw") {
+		t.Error("the top bar inset uses 100vw, which includes the scrollbar and overflows the page")
+	}
+
+	// A very wide tier must exist so an ultrawide is not left with the
+	// same gutters this change removed.
+	if !strings.Contains(text, "@media (min-width: 2000px)") {
+		t.Error("no very-wide tier: a 2560 display keeps ~420px gutters and the timeline still scrolls internally")
+	}
+}
+
+// The case LIST must speak the same vocabulary as the case detail page.
+//
+// It previously rendered statusBadge(c.status) -- the raw ENGINE status
+// -- so a case that had simply never been analysed showed a badge
+// reading "created", sitting where the analysis state belongs. That is
+// not a value in either published vocabulary (open/investigating/
+// contained/closed for the case, analyzed/never analyzed/stale for the
+// analysis) and reads as a status the product does not have.
+func TestUI_CaseListUsesTheSameBadgeVocabularyAsTheDetailPage(t *testing.T) {
+	src := appJS(t)
+	text := string(src)
+	body := functionBody(t, src, "async function renderCaseList(")
+
+	for _, fn := range []string{"caseWorkflowBadge(", "casePriorityBadge(", "analysisStateBadge("} {
+		if !strings.Contains(body, fn) {
+			t.Errorf("the case list does not use %s -- the shared badge helper the detail page uses", fn)
+		}
+	}
+	if strings.Contains(body, "statusBadge(") {
+		t.Error("the case list still renders the raw engine status as a badge")
+	}
+	if strings.Contains(body, "lifecycleBadge(") {
+		t.Error("the case list still uses its own lifecycle badge instead of the shared one")
+	}
+
+	// EXACTLY ONE definition of each shared helper. Two definitions of
+	// casePriorityBadge existed at once: function declarations hoist, so
+	// the later silently won and the list rendered with the header's
+	// classes while its own CSS went unused.
+	for _, fn := range []string{
+		"function casePriorityBadge(",
+		"function caseWorkflowBadge(",
+		"function analysisStateBadge(",
+	} {
+		if n := strings.Count(text, fn); n != 1 {
+			t.Errorf("%s is defined %d times; duplicate declarations silently shadow each other", fn, n)
+		}
+	}
+
+	// The list has no summary to compute staleness from, so the shared
+	// helper must derive it rather than mislabel a stale case.
+	analysis := functionBody(t, src, "function analysisStateBadge(")
+	if !strings.Contains(analysis, "staleAnalysis === undefined") {
+		t.Error("analysisStateBadge does not handle being called without a stale flag, " +
+			"so the case list would report a stale case as analyzed")
+	}
+	if !strings.Contains(analysis, "c.analyzed_at") {
+		t.Error("the derived staleness does not consult analyzed_at")
+	}
+}
+
+// The Cases page must not open with a band of empty space.
+func TestUI_CasesListStartsBelowItsToolbar(t *testing.T) {
+	css, err := os.ReadFile("../web/static/style.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(css)
+
+	// Anchored on the RULE BODY, not the selector: the same selector also
+	// appears in the sibling "+ .case-list" spacing rule, so a plain
+	// substring check would still pass with the height collapse removed.
+	i := strings.Index(text, "\n#case-bulk-bar:empty {")
+	if i < 0 {
+		t.Fatal("the cases bulk bar still reserves its full height when empty, " +
+			"pushing the first card ~64px below the toolbar")
+	}
+	collapse := text[i : i+strings.Index(text[i:], "}")]
+	// Newline-anchored: "min-height: 0" also contains "height: 0", so an
+	// unanchored check passes even when the height itself is restored.
+	if !strings.Contains(collapse, "\n  height: 0;") {
+		t.Errorf("the empty cases bulk bar does not collapse its height: %s", collapse)
+	}
+	// And the list still needs deliberate breathing room beneath the
+	// toolbar once the bar is collapsed.
+	if !strings.Contains(text, "#case-bulk-bar:empty + .case-list") {
+		t.Error("no spacing rule for the list once the bulk bar collapses; " +
+			"the first card would sit flush against the toolbar")
+	}
+	// The reservation must SURVIVE on the evidence list, where it exists
+	// to stop the row under the cursor jumping when a box is ticked.
+	if strings.Contains(text, "#evidence-bulk-bar:empty") {
+		t.Error("the evidence bulk bar's height reservation was removed; ticking a " +
+			"checkbox there will shove the row under the cursor")
+	}
+	if !strings.Contains(text, ".bulk-bar-host") {
+		t.Error(".bulk-bar-host was removed entirely")
+	}
+}
+
+// The New case form is compact on desktop and stacks when narrow.
+func TestUI_NewCaseFormIsCompactOnDesktop(t *testing.T) {
+	css, err := os.ReadFile("../web/static/style.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(css)
+	i := strings.Index(text, "\n.new-case-form {")
+	if i < 0 {
+		t.Fatal("no .new-case-form rule")
+	}
+	rule := text[i : i+strings.Index(text[i:], "}")]
+	if !strings.Contains(rule, "grid-template-columns") {
+		t.Error("the new-case form is not laid out in columns")
+	}
+	if !strings.Contains(text, ".new-case-form { grid-template-columns: minmax(0, 1fr); }") {
+		t.Error("no narrow-viewport fallback to a stacked form")
+	}
+
+	// Behaviour must be untouched: same ids, same error element.
+	src := appJS(t)
+	body := functionBody(t, src, "async function renderCaseList(")
+	for _, id := range []string{"new-case-name", "new-case-desc", "create-case-btn", "new-case-error", "new-case-name-icon"} {
+		if !strings.Contains(body, id) {
+			t.Errorf("the compact form dropped %q", id)
+		}
+	}
+	// The uniqueness note must still be present. It moved from the
+	// bordered .field-info-box to plain .field-info-note text so it stops
+	// reading as a third input; the message itself is unchanged.
+	if !strings.Contains(body, "field-info-note") {
+		t.Error("the uniqueness note was dropped from the form")
+	}
+	if !strings.Contains(body, "Case names must be unique") {
+		t.Error("the uniqueness wording was dropped")
+	}
+}
+
+// Case cards must form COLUMNS, not a per-row flex arrangement.
+//
+// The badges were previously flex siblings of the case name, so where
+// each one landed depended on how long that particular name was and no
+// two rows lined up. A list is scanned vertically -- down the status
+// column -- so the columns have to be deterministic.
+func TestUI_CaseCardsUseAlignedGridColumns(t *testing.T) {
+	src := appJS(t)
+	body := functionBody(t, src, "async function renderCaseList(")
+
+	// Badges are their own grid cells, not siblings of the name.
+	if strings.Contains(body, "case-card-head") {
+		t.Error("the card still uses the flex head that mixed the name and badges in one row")
+	}
+	for _, hook := range []string{"case-card-info", "case-card-col"} {
+		if !strings.Contains(body, hook) {
+			t.Errorf("the card markup has no %s element", hook)
+		}
+	}
+	if n := strings.Count(body, `<div class="case-card-col">`); n != 3 {
+		t.Errorf("found %d badge columns, want 3 (status, priority, analysis)", n)
+	}
+
+	css, err := os.ReadFile("../web/static/style.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(css)
+	i := strings.Index(text, "\n.case-card {")
+	if i < 0 {
+		t.Fatal("no .case-card rule")
+	}
+	rule := text[i : i+strings.Index(text[i:], "}")]
+	if !strings.Contains(rule, "display: grid") {
+		t.Error(".case-card is not a grid, so its columns cannot align across rows")
+	}
+	if !strings.Contains(rule, "grid-template-columns") {
+		t.Error(".case-card declares no column tracks")
+	}
+	// The name column must absorb the slack so a long name cannot shift
+	// the badge columns.
+	if !strings.Contains(rule, "minmax(") {
+		t.Error("the case-information column is not minmax(); a long name would move the badges")
+	}
+
+	// Badges align to the START of their column. Centring reintroduces
+	// the raggedness the grid removes, because a centred badge shifts
+	// with its own text length.
+	j := strings.Index(text, "\n.case-card-col {")
+	if j < 0 {
+		t.Fatal("no .case-card-col rule")
+	}
+	col := text[j : j+strings.Index(text[j:], "}")]
+	if !strings.Contains(col, "justify-content: flex-start") {
+		t.Errorf("badges are not start-aligned within their column: %s", col)
+	}
+	if strings.Contains(col, "justify-content: center") {
+		t.Error("badges are centred in their column, which un-aligns them across rows")
+	}
+
+	// A narrow fallback must exist; fixed badge columns would leave the
+	// name a sliver on a phone.
+	if !strings.Contains(text, ".case-card {\n    grid-template-columns: minmax(0, 1fr);") {
+		t.Error("no narrow-viewport fallback for the card grid")
+	}
+}
+
+// New case: fields, then the helper note, then the primary action.
+func TestUI_NewCaseFormHierarchy(t *testing.T) {
+	src := appJS(t)
+	body := functionBody(t, src, "async function renderCaseList(")
+
+	iFields := strings.Index(body, `class="new-case-form"`)
+	iNote := strings.Index(body, `class="field-info-note"`)
+	iAction := strings.Index(body, `class="new-case-actions"`)
+	if iFields < 0 || iNote < 0 || iAction < 0 {
+		t.Fatalf("missing form landmarks: fields=%d note=%d action=%d", iFields, iNote, iAction)
+	}
+	if !(iFields < iNote && iNote < iAction) {
+		t.Error("the form order is not fields -> helper note -> primary action")
+	}
+	// The button must no longer sit on the field row.
+	if strings.Contains(body, "new-case-submit") {
+		t.Error("the Create case button is still a column of the field row")
+	}
+
+	css, err := os.ReadFile("../web/static/style.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(css)
+
+	// Two fields side by side on desktop, stacked when narrow.
+	i := strings.Index(text, "\n.new-case-form {")
+	rule := text[i : i+strings.Index(text[i:], "}")]
+	if strings.Count(rule, "minmax(") != 2 {
+		t.Errorf("the field row is not two columns: %s", rule)
+	}
+	if !strings.Contains(text, ".new-case-form { grid-template-columns: minmax(0, 1fr); }") {
+		t.Error("no stacked fallback for the field row")
+	}
+
+	// The action is left-aligned and sized to its content.
+	j := strings.Index(text, "\n.new-case-actions {")
+	if j < 0 {
+		t.Fatal("no .new-case-actions rule")
+	}
+	act := text[j : j+strings.Index(text[j:], "}")]
+	if !strings.Contains(act, "justify-content: flex-start") {
+		t.Error("the primary action is not left-aligned with the form content")
+	}
+	if !strings.Contains(text, ".new-case-actions button { flex: 0 0 auto; }") {
+		t.Error("the Create case button is allowed to stretch to full width")
+	}
+}
+
+// The uniqueness note is INFORMATION, not a third input -- but a real
+// error must keep a distinct, visible treatment.
+func TestUI_HelperNoteIsNotStyledAsAnInput(t *testing.T) {
+	css, err := os.ReadFile("../web/static/style.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(css)
+
+	i := strings.Index(text, "\n.field-info-note {")
+	if i < 0 {
+		t.Fatal("no .field-info-note rule; the helper text is still the bordered box")
+	}
+	note := text[i : i+strings.Index(text[i:], "}")]
+	if strings.Contains(note, "border:") && !strings.Contains(note, "border: none") {
+		t.Errorf("the helper note still draws a border, so it reads as an input: %s", note)
+	}
+	if !strings.Contains(note, "color: var(--text-dim)") {
+		t.Error("the helper note is not subdued")
+	}
+
+	// The error treatment must survive, distinctly.
+	if !strings.Contains(text, ".field-error-box") {
+		t.Error(".field-error-box was removed; validation errors would lose their treatment")
+	}
+	src := appJS(t)
+	if !strings.Contains(string(src), "field-error-box") {
+		t.Error("nameFieldError no longer renders the distinct error box")
+	}
+	// And the informational box remains available for genuine warnings.
+	if !strings.Contains(text, ".field-info-box {") {
+		t.Error(".field-info-box was deleted rather than left for warning use")
+	}
+}
+
+// ---------------- Phase 14: browser cache in the dashboard ----------------
+
+// Browser cache and browser history are SEPARATE timeline categories.
+// Collapsing them into one -- or leaving either in "other" -- would put
+// a cached subresource in the same bucket as a recorded navigation.
+func TestUI_BrowserCacheAndHistoryAreDistinctCategories(t *testing.T) {
+	src := string(appJS(t))
+
+	for _, want := range []string{
+		`browser_visit: "browser_history"`,
+		`browser_cache_entry: "browser_cache"`,
+		`browser_history: "Browser History"`,
+		`browser_cache: "Browser Cache"`,
+	} {
+		if !strings.Contains(src, want) {
+			t.Errorf("app.js is missing %s", want)
+		}
+	}
+	// Neither may be mapped into an existing category: "network" would
+	// merge them with DNS/connection events, and each other.
+	for _, wrong := range []string{
+		`browser_cache_entry: "network"`, `browser_visit: "network"`,
+		`browser_cache_entry: "browser_history"`, `browser_visit: "browser_cache"`,
+	} {
+		if strings.Contains(src, wrong) {
+			t.Errorf("app.js maps a browser event to the wrong category: %s", wrong)
+		}
+	}
+	if !strings.Contains(src, `browser_cache: "Browser cache entry"`) {
+		t.Error("the browser_cache artifact type has no label")
+	}
+}
+
+// A URL-bearing event must be searchable BY URL and must show the URL
+// as its detail. Matching only network_dest would limit the analyst to
+// bare hostnames, and a cache row's file_path is the hashed cache file,
+// which names nothing an investigator recognizes.
+func TestUI_WebEvidenceIsSearchableAndReadableByURL(t *testing.T) {
+	src := appJS(t)
+
+	hay := functionBody(t, src, "function eventSearchHaystack(")
+	if !strings.Contains(hay, "e.extra.url") {
+		t.Error("the timeline search haystack does not include the event's URL")
+	}
+
+	detail := functionBody(t, src, "function eventDetailValue(")
+	if !strings.Contains(detail, "e.extra.url") {
+		t.Error("the timeline detail cell does not prefer the URL for web evidence")
+	}
+	// The URL must outrank file_path: a cache entry's file_path is the
+	// hashed on-disk name.
+	urlAt := strings.Index(detail, "url")
+	pathAt := strings.Index(detail, "e.file_path")
+	if urlAt < 0 || pathAt < 0 || urlAt > pathAt {
+		t.Errorf("the URL does not take precedence over file_path in the detail cell: %s", detail)
+	}
+}
+
+// An imported file that produced no timeline events must say why, so a
+// legitimate "0 event(s)" is never read as a silent parse failure.
+func TestUI_ZeroEventImportIsExplained(t *testing.T) {
+	src := appJS(t)
+	body := functionBody(t, src, "function noEventNote(")
+
+	if !strings.Contains(body, "Parsed successfully") {
+		t.Error("the note does not distinguish a successful parse from a failure")
+	}
+	// It must apply ONLY to files that actually imported: a parse
+	// failure has its own status and must not be described as parsed.
+	if !strings.Contains(body, `sf.import_status !== "imported"`) {
+		t.Error("the note is not restricted to successfully imported files")
+	}
+	if !strings.Contains(body, "eventCount !== 0") {
+		t.Error("the note is not restricted to files that produced no events")
+	}
+	// And the provenance panel must actually call it.
+	prov := functionBody(t, src, "function renderSourceFileProvenance(")
+	if !strings.Contains(prov, "noEventNote(") {
+		t.Error("the source-file provenance panel does not render the note")
+	}
+}
+
+// ---------------- Priority is shown for every artifact ----------------
+
+// The priority badge must render on every row, including unsupported
+// and unrecognized ones. A blank cell reads as "no opinion", which is
+// indistinguishable from "nobody looked".
+func TestUI_PriorityBadgeRendersForEveryArtifact(t *testing.T) {
+	src := appJS(t)
+	body := functionBody(t, src, "function priorityBadge(")
+
+	if strings.Contains(body, `if (!p) return "";`) {
+		t.Error("priorityBadge still returns nothing for a row without a priority")
+	}
+	if !strings.Contains(body, `p || "unknown"`) {
+		t.Error("priorityBadge does not fall back to an explicit unknown level")
+	}
+	// Every call site passes the rationale, so the reasoning is
+	// reachable wherever the badge appears. Counting substrings would be
+	// brittle -- "priority_reason" appears in other renderers too -- so
+	// the single-argument call form is what is banned.
+	for _, single := range []string{
+		"priorityBadge(f.priority)", "priorityBadge(b.priority)",
+		"priorityBadge(sf.priority)",
+	} {
+		if strings.Contains(string(src), single) {
+			t.Errorf("%s drops the rationale; every call site must pass it", single)
+		}
+	}
+
+	// The unknown level needs a style of its own, or it renders as an
+	// unstyled badge that looks like a defect.
+	css, err := os.ReadFile("../web/static/style.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(css), ".badge.prio-unknown") {
+		t.Error("the unknown priority badge has no style rule")
+	}
+}
+
+// The Notes column carries the priority rationale, and the file detail
+// panel shows it as its own row.
+func TestUI_PriorityRationaleIsVisible(t *testing.T) {
+	src := string(appJS(t))
+
+	if !strings.Contains(src, "ev-note-why") {
+		t.Error("the coverage Notes column does not render the priority rationale")
+	}
+	if !strings.Contains(src, `row("Why this priority", f.priority_reason)`) {
+		t.Error("the evidence detail panel does not show why the priority was assigned")
+	}
+	// The rationale is rendered beside the level it explains, so the
+	// note reads "High: <reason>" rather than a bare sentence.
+	if !strings.Contains(src, `PRIORITY_LABELS[b.priority] || b.priority || "Unknown"`) {
+		t.Error("the rationale is not labelled with the priority level it explains")
+	}
+}
+
+// ---------------- Evidence deletion confirmation ----------------
+
+// Deleting evidence must be confirmed through a modal whose buttons say
+// what they do. window.confirm cannot express that -- its buttons are
+// OK/Cancel -- so a destructive action would be confirmed by a button
+// that does not name the action.
+func TestUI_EvidenceDeletionUsesANamedConfirmationModal(t *testing.T) {
+	src := string(appJS(t))
+
+	if !strings.Contains(src, "function confirmDestructive(") {
+		t.Fatal("there is no confirmation modal")
+	}
+	body := functionBody(t, appJS(t), "function confirmDestructive(")
+	for _, want := range []string{`createElement("dialog")`, "showModal()", `data-choice="confirm"`, `data-choice="cancel"`} {
+		if !strings.Contains(body, want) {
+			t.Errorf("the modal is missing %q", want)
+		}
+	}
+	// Escape and the backdrop must cancel, and focus must start on
+	// Cancel so Enter never confirms a deletion the user has not read.
+	if !strings.Contains(body, `finish(false)`) {
+		t.Error("the modal has no cancelling path")
+	}
+	if !strings.Contains(body, `'[data-choice="cancel"]'`) {
+		t.Error("focus does not start on the cancelling button")
+	}
+
+	// The required wording, verbatim.
+	if !strings.Contains(src, `title: "Delete Evidence?"`) {
+		t.Error(`the modal title is not "Delete Evidence?"`)
+	}
+	if !strings.Contains(src, `confirmLabel: "Delete Evidence"`) {
+		t.Error(`the confirming button is not labelled "Delete Evidence"`)
+	}
+	if !strings.Contains(src, `cancelLabel = "Cancel"`) {
+		t.Error(`the cancelling button is not labelled "Cancel"`)
+	}
+	warning := functionBody(t, appJS(t), "const EVIDENCE_DELETION_WARNING =")
+	for _, want := range []string{
+		"invalidate the current analysis results",
+		"findings, investigations, correlations, activity chains, and ATT&CK mappings",
+		"cannot be undone",
+	} {
+		if !strings.Contains(warning, want) {
+			t.Errorf("the warning does not say %q: %s", want, warning)
+		}
+	}
+
+	// Both evidence-deletion paths use it, and neither still uses the
+	// unlabelled browser prompt.
+	if strings.Count(src, `confirmLabel: "Delete Evidence"`) < 2 {
+		t.Error("not every evidence-deletion path uses the modal")
+	}
+	for _, fn := range []string{"async function confirmAndDeleteEvidence(", "function wireDeleteCollection("} {
+		if strings.Contains(functionBody(t, appJS(t), fn), "window.confirm(") {
+			t.Errorf("%s still confirms with window.confirm", fn)
+		}
+	}
+}
+
+// A case whose analysis was invalidated reports NOT ANALYZED -- neither
+// "stale" (which means results still describe evidence that exists) nor
+// "never analyzed" (which would deny that analysis ever ran).
+func TestUI_InvalidatedAnalysisReportsNotAnalyzed(t *testing.T) {
+	src := appJS(t)
+	badge := functionBody(t, src, "function analysisStateBadge(")
+
+	if !strings.Contains(badge, "NOT ANALYZED") {
+		t.Error("there is no NOT ANALYZED state")
+	}
+	// Invalidated must be checked BEFORE stale, or an invalidated case
+	// falls through to the stale branch.
+	invalidatedAt := strings.Index(badge, "if (invalidated)")
+	staleAt := strings.Index(badge, "if (stale)")
+	if invalidatedAt < 0 || staleAt < 0 || invalidatedAt > staleAt {
+		t.Error("the invalidated state is not checked before the stale state")
+	}
+	if !strings.Contains(string(src), "summary.analysis_invalidated") {
+		t.Error("the UI does not read the backend's invalidation flag")
+	}
+	// Stale must be suppressed when invalidated, so the two can never
+	// both be claimed.
+	if !strings.Contains(string(src), "!invalidated && c.status !== \"analyzed\"") {
+		t.Error("stale is not suppressed for an invalidated case")
+	}
+}
+
+// ---------------- Recycle Bin $R: recovered content ----------------
+
+// The two halves of a Recycle Bin pair must be distinguishable at a
+// glance. Sharing a label would make a pair look like two copies of one
+// thing.
+func TestUI_RecycleBinHalvesAreLabelledDistinctly(t *testing.T) {
+	src := string(appJS(t))
+	for _, want := range []string{
+		`recycle_bin_metadata: "Recycle Bin metadata ($I)"`,
+		`recycle_bin_content: "Recovered deleted content ($R)"`,
+	} {
+		if !strings.Contains(src, want) {
+			t.Errorf("app.js is missing %s", want)
+		}
+	}
+	if strings.Contains(src, `recycle_bin_content: "Windows Recycle Bin $I metadata"`) {
+		t.Error("the $R half is labelled as an $I metadata record")
+	}
+}
+
+// A file that produced records but no events must still be able to show
+// them. Recovered content is exactly that case: its record IS the
+// deliverable, and before this it had no route out of the database.
+func TestUI_RecordsAreShownForFilesWithNoEvents(t *testing.T) {
+	src := appJS(t)
+	body := functionBody(t, src, "function renderSourceFileRecords(")
+
+	if !strings.Contains(body, "p.raw_evidence") {
+		t.Error("the panel does not read the provenance view's raw records")
+	}
+	// Only for files with no events -- a file with events already shows
+	// its records through them.
+	if !strings.Contains(body, "p.event_count > 0") {
+		t.Error("records are rendered even for files whose events already show them")
+	}
+	if !strings.Contains(body, "raw_evidence_truncated") {
+		t.Error("a truncated record list is not disclosed, so an empty tail reads as completeness")
+	}
+	prov := functionBody(t, src, "function renderSourceFileProvenance(")
+	if !strings.Contains(prov, "renderSourceFileRecords(") {
+		t.Error("the source-file provenance panel does not render the records")
 	}
 }

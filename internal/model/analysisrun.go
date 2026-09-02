@@ -52,6 +52,30 @@ type AnalysisRun struct {
 	// Error is the failure reason for a failed run, sanitized for
 	// display. Empty for a successful one.
 	Error string `json:"error,omitempty"`
+
+	// InvalidatedAt is when this run stopped describing the case's
+	// evidence -- set when the evidence it analyzed was deleted. Nil for
+	// a run that still describes the current evidence set.
+	//
+	// The run row and everything it produced are KEPT; what changes is
+	// that none of it is current any more. See InvalidationReason.
+	InvalidatedAt *time.Time `json:"invalidated_at,omitempty"`
+
+	// InvalidationReason states, in plain language, what happened to the
+	// evidence. It is chain-of-custody information: an analyst reading
+	// the history has to be able to see WHY a run's results stopped
+	// counting, not merely that they did.
+	InvalidationReason string `json:"invalidation_reason,omitempty"`
+}
+
+// IsCurrent reports whether this run's results may be presented as the
+// case's current analysis.
+//
+// Only a completed run that has not been invalidated qualifies. A
+// running, failed or invalidated run has produced nothing that describes
+// the evidence the case holds now.
+func (r AnalysisRun) IsCurrent() bool {
+	return r.Status == AnalysisRunCompleted && r.InvalidatedAt == nil
 }
 
 // Analysis run statuses.
@@ -63,6 +87,16 @@ const (
 	AnalysisRunRunning   = "running"
 	AnalysisRunCompleted = "completed"
 	AnalysisRunFailed    = "failed"
+	// AnalysisRunInvalidated is a run that COMPLETED and whose results
+	// have since stopped describing the case, because the evidence they
+	// were derived from was deleted.
+	//
+	// It is deliberately not "failed": the run did its job correctly at
+	// the time, and saying otherwise would misrepresent the history. It
+	// is also not a deletion -- the row, its counts and the findings it
+	// produced are all retained for audit. What the status controls is
+	// whether any of it is presented as CURRENT, and it never is.
+	AnalysisRunInvalidated = "invalidated"
 )
 
 // LegacyProvenanceUnavailable is the value provenance views use for a

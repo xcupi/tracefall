@@ -39,9 +39,18 @@ type TriagedSourceFile struct {
 	Family      string `json:"family"`
 	FamilyLabel string `json:"family_label"`
 	Priority    string `json:"priority"`
+	// PriorityReason states why this artifact class carries that
+	// priority. Always present, for supported and unsupported files
+	// alike -- priority is a judgement about the artifact, and a
+	// judgement an analyst cannot inspect is one they cannot check.
+	PriorityReason string `json:"priority_reason,omitempty"`
 	// UnsupportedReason explains, in plain language, why Tracefall cannot
 	// parse this file. Empty for supported files.
 	UnsupportedReason string `json:"unsupported_reason,omitempty"`
+	// Note qualifies a SUPPORTED file -- currently a cache container,
+	// which is parsed but is not an event source. Kept apart from
+	// UnsupportedReason so a note can never be read as a failure.
+	Note string `json:"note,omitempty"`
 	// Recognized distinguishes "Tracefall knows what this is and has no
 	// parser for it" (NTFS $MFT) from "Tracefall has no idea what this
 	// is". Both are unsupported; only one is actionable.
@@ -65,7 +74,9 @@ func triage(sf model.SourceFile) TriagedSourceFile {
 		Family:            string(cap.Family),
 		FamilyLabel:       cap.FamilyLabel,
 		Priority:          string(cap.Priority),
+		PriorityReason:    cap.PriorityReason,
 		UnsupportedReason: cap.Reason,
+		Note:              cap.Note,
 		Recognized:        cap.Recognized,
 		ParsedInstead:     cap.ParsedInstead,
 		NotParsed:         cap.NotParsed,
@@ -87,19 +98,23 @@ func triageAll(files []model.SourceFile) []TriagedSourceFile {
 
 // CoverageBucket is one artifact class's share of a catalog.
 type CoverageBucket struct {
-	TypeLabel   string `json:"type_label"`
-	Family      string `json:"family"`
-	FamilyLabel string `json:"family_label"`
-	Priority    string `json:"priority"`
-	Supported   bool   `json:"supported"`
+	TypeLabel      string `json:"type_label"`
+	Family         string `json:"family"`
+	FamilyLabel    string `json:"family_label"`
+	Priority       string `json:"priority"`
+	PriorityReason string `json:"priority_reason,omitempty"`
+	Supported      bool   `json:"supported"`
 	// Files is how many files of this class the catalog holds;
 	// SupportedFiles how many of them Tracefall can actually parse
 	// (equal to Files for a supported class, zero otherwise);
 	// ImportedFiles how many have actually become evidence.
-	Files          int    `json:"files"`
-	SupportedFiles int    `json:"supported_files"`
-	ImportedFiles  int    `json:"imported_files"`
-	Reason         string `json:"reason,omitempty"`
+	Files          int `json:"files"`
+	SupportedFiles int `json:"supported_files"`
+	ImportedFiles  int `json:"imported_files"`
+	// Reason (unsupported) and Note (supported but qualified) are the
+	// two halves of the Notes column. They are never both set.
+	Reason string `json:"reason,omitempty"`
+	Note   string `json:"note,omitempty"`
 }
 
 // Coverage summarizes what an evidence collection actually contains.
@@ -156,7 +171,8 @@ func computeCoverage(files []TriagedSourceFile) Coverage {
 		if !ok {
 			b = &CoverageBucket{
 				TypeLabel: f.TypeLabel, Family: f.Family, FamilyLabel: f.FamilyLabel,
-				Priority: f.Priority, Supported: f.Supported, Reason: f.UnsupportedReason,
+				Priority: f.Priority, PriorityReason: f.PriorityReason, Supported: f.Supported,
+				Reason: f.UnsupportedReason, Note: f.Note,
 			}
 			buckets[k] = b
 		}

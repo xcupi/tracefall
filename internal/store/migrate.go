@@ -72,6 +72,23 @@ func migrate(db *sql.DB) error {
 	if err := addColumnIfMissing(db, "findings", "analysis_run_id", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return fmt.Errorf("migrating findings (analysis_run_id): %w", err)
 	}
+	// Correlations gain the same run linkage findings already carry, so
+	// an invalidated run's correlations can be excluded from current
+	// results by the same rule. Existing rows keep an empty value and
+	// are treated as legacy -- see Store.ListCorrelations.
+	if err := addColumnIfMissing(db, "correlations", "analysis_run_id", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return fmt.Errorf("migrating correlations (analysis_run_id): %w", err)
+	}
+	// An analysis run can now be invalidated: its results stop being
+	// current when the evidence they describe is deleted. Both columns
+	// default to empty, which reads as "still current" for every run
+	// recorded before the lifecycle existed.
+	if err := addColumnIfMissing(db, "analysis_runs", "invalidated_at", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return fmt.Errorf("migrating analysis_runs (invalidated_at): %w", err)
+	}
+	if err := addColumnIfMissing(db, "analysis_runs", "invalidation_reason", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return fmt.Errorf("migrating analysis_runs (invalidation_reason): %w", err)
+	}
 	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_events_case_dedup ON events(case_id, dedup_hash)`); err != nil {
 		return fmt.Errorf("creating events dedup index: %w", err)
 	}

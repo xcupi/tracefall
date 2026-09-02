@@ -32,6 +32,7 @@ import (
 	"sort"
 	"strings"
 
+	"tracefall/internal/browsercache"
 	"tracefall/internal/model"
 	"tracefall/internal/parsers"
 )
@@ -41,15 +42,49 @@ import (
 // Tracefall can parse it.
 type Priority string
 
+// The four levels, and what each one means. These definitions are the
+// only thing a new entry in the tables below should be argued against.
+//
+// A priority describes the ARTIFACT CLASS. It never encodes whether
+// Tracefall can parse it: an unsupported artifact keeps the priority its
+// forensic value earns, which is precisely what tells an investigator
+// what this build is not looking at. Assigning LOW because a parser is
+// missing would hide exactly the gap the registry exists to expose.
 const (
+	// PriorityCritical: can contain highly significant evidence of
+	// compromise, execution, persistence, credentials, or core system
+	// activity. Losing it usually means losing the case.
 	PriorityCritical Priority = "critical"
-	PriorityHigh     Priority = "high"
-	PriorityMedium   Priority = "medium"
-	PriorityLow      Priority = "low"
-	// PriorityUnknown is used for a file no rule recognizes at all. It
-	// sorts last and is never "recommended".
+	// PriorityHigh: highly valuable for reconstructing user and system
+	// activity and building an attack timeline.
+	PriorityHigh Priority = "high"
+	// PriorityMedium: commonly provides useful supporting evidence or
+	// important context, but rarely carries an investigation alone.
+	PriorityMedium Priority = "medium"
+	// PriorityLow: auxiliary, indirect, redundant, or of limited
+	// standalone value -- a file whose content is better read from the
+	// artifact that describes it, or which records no investigative fact
+	// of its own.
+	//
+	// LOW is a statement about forensic value ONLY. It is never applied
+	// because an artifact is unsupported.
+	PriorityLow Priority = "low"
+	// PriorityUnknown is not a level in the scale above: it is the
+	// absence of a classification, used only for a file that matched no
+	// rule at all. It is deliberately NOT folded into LOW -- "we have no
+	// idea what this is" and "we know what this is and it is of limited
+	// value" are different statements, and an investigator triaging a
+	// collection needs to tell them apart. It sorts last and is never
+	// recommended.
 	PriorityUnknown Priority = "unknown"
 )
+
+// Levels lists the four real priority levels, most significant first.
+// The UI builds its filter vocabulary from this rather than hardcoding
+// the set.
+func Levels() []Priority {
+	return []Priority{PriorityCritical, PriorityHigh, PriorityMedium, PriorityLow}
+}
 
 // Rank orders priorities most-important-first, for deterministic sorting.
 func (p Priority) Rank() int {
@@ -120,7 +155,32 @@ type Capability struct {
 	// Reason explains an unsupported classification in plain language --
 	// what Tracefall cannot do, and what it CAN read instead where an
 	// alternative exists. Empty for supported artifacts.
+	//
+	// Kept SHORT. It is rendered in a table column, and an analyst
+	// scanning thirty rows needs the distinguishing fact, not the whole
+	// capability list -- which lives in ParsedInstead/NotParsed and in
+	// docs/evidence-triage.md.
 	Reason string `json:"reason,omitempty"`
+
+	// PriorityReason states, in one clause, WHY this artifact class
+	// carries the priority it does.
+	//
+	// It exists because priority is the registry's most consequential
+	// judgement and was previously unexplained: an analyst saw "HIGH"
+	// with no way to check the reasoning, and no way to notice when it
+	// was wrong. It is deliberately about forensic value only -- no
+	// rationale here may mention whether a parser exists.
+	PriorityReason string `json:"priority_reason,omitempty"`
+
+	// Note qualifies a SUPPORTED classification.
+	//
+	// Separate from Reason on purpose: Reason answers "why can't you
+	// parse this?", Note answers "you parse this, but there is something
+	// I should know". A cache container is genuinely supported and
+	// genuinely parsed, and is still not an event source -- an analyst
+	// who does not learn that from the row will go looking for its
+	// events.
+	Note string `json:"note,omitempty"`
 
 	// Recognized separates two states that are both "not supported" but
 	// mean completely different things to an investigator:
@@ -174,29 +234,216 @@ type typeInfo struct {
 	label    string
 	family   Family
 	priority Priority
+	// why is the one-clause justification for priority. See
+	// Capability.PriorityReason. Required for every entry: a priority
+	// nobody had to justify is a priority nobody can check.
+	why string
+	// note qualifies a supported class. See Capability.Note.
+	note string
 }
 
 var supportedTypeInfo = map[string]typeInfo{
 	model.ArtifactWindowsEventLog: {
 		label: "Windows Event Log (EVTX)", family: FamilyEventLog, priority: PriorityCritical,
+		why: "Records logons, process creation, service installs and PowerShell activity -- the primary account of what happened on the system.",
 	},
 	model.ArtifactRegistryHive: {
 		label: "Windows Registry Hive", family: FamilyRegistry, priority: PriorityCritical,
+		why: "Holds persistence, configuration, execution and account data, and survives the deletion of what it describes.",
 	},
 	model.ArtifactRegistryRunKey: {
 		label: "Registry (RECmd export)", family: FamilyRegistry, priority: PriorityHigh,
+		why: "Autostart entries are a first-choice persistence mechanism and name the program that runs.",
 	},
 	model.ArtifactScheduledTask: {
 		label: "Scheduled Task XML", family: FamilyScheduledTask, priority: PriorityHigh,
+		why: "A scheduled task names a program, a trigger and an account: persistence with an execution schedule attached.",
 	},
 	model.ArtifactPrefetch: {
 		label: "Prefetch", family: FamilyPrefetch, priority: PriorityHigh,
+		why: "Proves a program ran, when, and how often, including programs since deleted.",
 	},
 	model.ArtifactPowerShellHistory: {
 		label: "PowerShell console history", family: FamilyPowerShell, priority: PriorityHigh,
+		why: "Records the commands an operator actually typed, often verbatim and often after the event log was cleared.",
 	},
 	model.ArtifactBrowserHistory: {
 		label: "Browser history (Chromium / Firefox)", family: FamilyBrowser, priority: PriorityMedium,
+		why: "Establishes what a user navigated to and when -- strong supporting evidence for delivery and download activity.",
+	},
+	// MEDIUM, and that is load-bearing rather than a shrug. Recommended()
+	// selects supported artifacts of critical or high priority, so a
+	// medium-priority cache entry is importable but never swept up
+	// automatically. A single browser cache holds tens of thousands of
+	// entry files; "Select recommended" pulling all of them in would make
+	// the selection unusable, which is exactly what the evidence-
+	// selection requirement warns against.
+	// Label deliberately short. WHICH cache format an entry came from is
+	// on every event and every raw record as cache_format_name; repeating
+	// the four supported formats on every catalog row would crowd out
+	// the thing the row exists to say.
+	model.ArtifactBrowserCache: {
+		label:  "Browser cache entry",
+		family: FamilyBrowser, priority: PriorityMedium,
+		why: "Shows resources the browser received and stored; corroborates activity but does not by itself establish user intent.",
+	},
+	// A cache CONTAINER: an index or map. Genuinely parsed -- entry
+	// counts, cache size, a creation time -- so genuinely supported, and
+	// carrying a Note because it is not an event source.
+	model.ArtifactBrowserCacheIndex: {
+		label:  "Browser cache container/index",
+		family: FamilyBrowser, priority: PriorityMedium,
+		why:  "Describes a cache as a whole -- entry count, size, creation time -- which dates and sizes the browsing evidence beside it.",
+		note: "Container/index: parsed for the cache's own metadata (entry count, size, creation time). Not an event source -- the cached resources are in the associated entry files.",
+	},
+	// HIGH: a shortcut often preserves the only surviving description of
+	// a file that has been deleted. The priority reflects that value and
+	// does not change when a particular shortcut happens to omit an
+	// optional structure -- a .lnk with no LinkInfo still carries a
+	// target path and three timestamps.
+	model.ArtifactLNK: {
+		label: "Windows LNK shortcut", family: FamilyFileSystem, priority: PriorityHigh,
+		why: "Preserves a referenced target's path, volume and timestamps, often after the target itself is gone.",
+		note: "Shortcut metadata can preserve the referenced target path, volume information and target timestamps " +
+			"even when the target is no longer present. LNK metadata alone does not prove execution.",
+	},
+	// MEDIUM, unchanged from when this was unsupported. Gaining a parser
+	// does not change what an artifact is worth: the $R file is still
+	// content whose identity lives in the paired $I record, and the $I
+	// record is still the half that carries the forensic facts. What
+	// changed is that the content can now be measured and hashed.
+	// HIGH. A Jump List ties an application to the files a user reached
+	// through it, with a per-entry access count and, for automatic
+	// lists, the application's own last-access time -- application and
+	// target attribution over a long history, which is squarely "highly
+	// valuable for reconstructing user activity".
+	model.ArtifactJumpListAutomatic: {
+		label: "Windows Jump List (Automatic Destinations)", family: FamilyExecution, priority: PriorityHigh,
+		why: "Ties an application to the files a user reached through it, with an access count and the application's own last-access time per item.",
+		note: "Embedded shortcuts are decoded by the same parser that reads standalone .lnk files. A Jump List entry " +
+			"shows that an application holds a reference to a target -- it is not proof the target was executed.",
+	},
+	model.ArtifactJumpListCustom: {
+		label: "Windows Jump List (Custom Destinations)", family: FamilyExecution, priority: PriorityHigh,
+		why: "An application's own task and pinned entries, tying it to the targets it offers or has been given.",
+		note: "A different container from an Automatic Destinations list: concatenated shortcuts with no DestList, " +
+			"so it records no access times, access counts or most-recently-used order.",
+	},
+	model.ArtifactRecycleBinContent: {
+		label: "Recycle Bin recovered content ($R)", family: FamilyFileSystem, priority: PriorityMedium,
+		why: "The deleted file's content. What it was and when it was deleted is in the paired $I record, not here.",
+		note: "The recovered content of a deleted file. Its original path, name and deletion time are read from " +
+			"the paired $I record; its size and SHA-256 are measured from this file. Produces no timeline events -- " +
+			"the deletion itself is timestamped by the $I record.",
+	},
+	model.ArtifactRecycleBin: {
+		label: "Windows Recycle Bin $I metadata", family: FamilyFileSystem, priority: PriorityHigh,
+		why: "Names a deleted file's original full path, its size and the moment of deletion -- deletion evidence with attribution.",
+		note: "Recycle Bin metadata records the deleted file's original path, size and deletion time. " +
+			"The $R file contains the deleted content when it is still available.",
+	},
+	model.ArtifactMFT: {
+		label: "NTFS $MFT", family: FamilyFileSystem, priority: PriorityHigh,
+		why: "A record for every file on the volume, with four timestamps each, including files that were deleted.",
+	},
+	model.ArtifactUsnJournal: {
+		label: "NTFS $UsnJrnl change journal", family: FamilyFileSystem, priority: PriorityHigh,
+		why: "A historical log of filesystem change, recovering creation and deletion the current $MFT no longer shows.",
+	},
+	// $LogFile is MEDIUM, not HIGH, and deliberately so. It is parsed
+	// and validated, but it yields transaction metadata rather than
+	// timeline events (see internal/parsers/logfile), so recommending it
+	// as urgently as the $MFT or the journal would overstate what an
+	// analyst gets from importing it.
+	model.ArtifactLogFile: {
+		label: "NTFS $LogFile transaction log", family: FamilyFileSystem, priority: PriorityMedium,
+		why: "Transaction metadata that contextualises filesystem activity; it yields no timeline events of its own.",
+	},
+}
+
+// ---------- recognition-only classes ----------
+//
+// Keyed by the model.Artifact* recognition constants that DISCOVERY
+// assigns from a file's own bytes when no parser claimed it (see
+// ingest.recognizeUnparsed). No parser produces these, and nothing here
+// is ever Supported -- recognizing a file is not the same as being able
+// to parse it.
+//
+// They exist because a browser cache is a small filesystem of its own.
+// Rankings, payload blocks, journals, locks and raw bodies are not
+// broken evidence and not parse failures: they are files whose useful
+// metadata lives in the entry record that addresses them, or which carry
+// no forensic metadata at all. One message for all of them would say
+// nothing; these say which is which, in one line each.
+//
+// Priority follows what the file could yield, not what family it is in:
+// auxiliary and bookkeeping files are LOW, an unknown file in a cache
+// directory is LOW, and a recognized structure in an unsupported variant
+// is MEDIUM because it may still hold recoverable data.
+var recognizedTypeInfo = map[string]unsupportedRule{
+	model.ArtifactBrowserCacheRankings: {
+		label:     "Chromium blockfile auxiliary file",
+		family:    FamilyBrowser,
+		priority:  PriorityLow,
+		why:       "Records use times but no cache key, so nothing in it can be attributed to a URL.",
+		reason:    "Chromium blockfile auxiliary file (data_0). Ranking/index data is not independently parsed.",
+		notParsed: []string{"Chromium blockfile rankings (data_0): use times, but no cache key"},
+	},
+	model.ArtifactBrowserCachePayload: {
+		label:     "Chromium blockfile payload file",
+		family:    FamilyBrowser,
+		priority:  PriorityLow,
+		why:       "Holds stream content only; the metadata describing it is in the entry record that addresses it.",
+		reason:    "Chromium blockfile auxiliary payload file (data_2/data_3). Cache metadata is stored in the associated data_1 entry records.",
+		notParsed: []string{"Chromium blockfile payload blocks (data_2 / data_3)"},
+	},
+	model.ArtifactBrowserCacheBody: {
+		label:     "Chromium cached response body",
+		family:    FamilyBrowser,
+		priority:  PriorityLow,
+		why:       "A response body with no key, time or headers -- the entry record that names it carries all of those.",
+		reason:    "Cached response body (f_######). Its metadata is stored in the associated data_1 entry record.",
+		notParsed: []string{"Cached response bodies (Tracefall reads cache metadata only)"},
+	},
+	model.ArtifactBrowserCacheAuxiliary: {
+		label:    "Browser cache auxiliary file",
+		family:   FamilyBrowser,
+		priority: PriorityLow,
+		why:      "Cache bookkeeping whose useful metadata lives in the entry records that address it.",
+		reason:   "Browser-cache auxiliary file. Its metadata is stored in the associated cache entry records.",
+		notParsed: []string{
+			"Cache structures whose metadata lives in the entry records that address them",
+		},
+	},
+	model.ArtifactBrowserCacheState: {
+		label:    "Browser cache journal/state",
+		family:   FamilyBrowser,
+		priority: PriorityLow,
+		why:      "A cache's own housekeeping. It records no cached resource and no user activity.",
+		reason:   "Browser-cache journal/state file. No independently parsed cache-entry metadata.",
+		notParsed: []string{
+			"Cache journals, lock files and temporary indexes",
+		},
+	},
+	model.ArtifactBrowserCacheVariant: {
+		label:    "Browser cache unsupported format",
+		family:   FamilyBrowser,
+		priority: PriorityMedium,
+		why:      "A cache structure Tracefall reads in a version it does not: it may still hold recoverable URLs and timestamps.",
+		reason:   "Recognized browser-cache format, but this version or variant is not supported.",
+		notParsed: []string{
+			"Browser-cache structures in a version or state this build does not decode",
+		},
+	},
+	model.ArtifactBrowserCacheUnknown: {
+		label:    "Browser cache unknown",
+		family:   FamilyBrowser,
+		priority: PriorityLow,
+		why:      "Unidentified, but inside a browser cache -- worth an analyst's glance even though nothing is known about it.",
+		reason:   "File is located in a browser-cache directory, but its format could not be identified.",
+		notParsed: []string{
+			"Files in a browser cache whose format structural detection could not identify",
+		},
 	},
 }
 
@@ -221,13 +468,24 @@ var supportedTypeInfo = map[string]typeInfo{
 var browserParsedInstead = []string{
 	"Chromium History (Chrome, Edge, Brave, Opera, Vivaldi)",
 	"Firefox History (places.sqlite)",
+	"Chromium Simple Cache entries (cache metadata)",
+	"Chromium blockfile cache data_1 entries (cache metadata)",
+	"Chromium blockfile cache index (container metadata)",
+	"Firefox cache2 entries (cache metadata)",
+	"Firefox cache1 _CACHE_00x_ entries (cache metadata)",
+	"Firefox cache1 _CACHE_MAP_ (container metadata)",
 }
 
 type unsupportedRule struct {
 	label    string
 	family   Family
 	priority Priority
-	reason   string
+	// why is the one-clause justification for priority, exactly as for a
+	// supported class -- and written to the same standard, because an
+	// unsupported artifact's priority is the more consequential of the
+	// two: it is what tells an investigator what is being missed.
+	why    string
+	reason string
 	// parsedInstead / notParsed populate the Capability fields of the
 	// same name. See Capability for why the boundary is expressed as two
 	// lists and not only as prose.
@@ -238,8 +496,18 @@ type unsupportedRule struct {
 	match func(lowerPath, lowerBase string) bool
 }
 
-func hasExt(ext string) func(string, string) bool {
-	return func(_, base string) bool { return strings.HasSuffix(base, ext) }
+// hasExt matches any of the given extensions. Variadic because several
+// artifact classes are one class written with more than one suffix -- a
+// crash dump is a crash dump whether it is .dmp, .mdmp or .hdmp.
+func hasExt(exts ...string) func(string, string) bool {
+	return func(_, base string) bool {
+		for _, e := range exts {
+			if strings.HasSuffix(base, e) {
+				return true
+			}
+		}
+		return false
+	}
 }
 
 func baseIs(names ...string) func(string, string) bool {
@@ -248,6 +516,133 @@ func baseIs(names ...string) func(string, string) bool {
 		set[strings.ToLower(n)] = true
 	}
 	return func(_, base string) bool { return set[base] }
+}
+
+// matchBlockfileExternalBody matches a Chromium blockfile external body
+// file: f_ followed by exactly six hexadecimal digits, and nothing else.
+// The strict shape matters -- "f_report.txt" is not one.
+func matchBlockfileExternalBody(p, base string) bool {
+	if !browsercache.InCacheDirectory("/" + p) {
+		return false
+	}
+	if len(base) != 8 || !strings.HasPrefix(base, "f_") {
+		return false
+	}
+	for _, c := range base[2:] {
+		if !(c >= '0' && c <= '9') && !(c >= 'a' && c <= 'f') && !(c >= 'A' && c <= 'F') {
+			return false
+		}
+	}
+	return true
+}
+
+// matchCacheHashIndex matches the cache indexes that store key hashes
+// rather than keys. Confined to a cache directory so an unrelated file
+// called "index" elsewhere in a collection is never claimed.
+func matchCacheHashIndex(p, base string) bool {
+	if !browsercache.InCacheDirectory("/" + p) {
+		return false
+	}
+	switch base {
+	case "index", "the-real-index", "index-dir":
+		return true
+	}
+	return false
+}
+
+// matchCacheStateFile matches a cache's own bookkeeping files by their
+// exact names, and only inside a cache directory. Exact names because
+// these formats define them; confined to a cache directory because
+// "journal" and "LOCK" are far too common to claim anywhere else.
+func matchCacheStateFile(p, base string) bool {
+	if !browsercache.InCacheDirectory("/" + p) {
+		return false
+	}
+	switch base {
+	case "lock", ".lock", "parent.lock", "journal", "index.log", "index.tmp",
+		"temp-index", "index-dir", "context.tmp", "cache_dir_lock":
+		return true
+	}
+	return false
+}
+
+// matchInCacheDirectory is the locator for the generic cache fallback.
+func matchInCacheDirectory(p, _ string) bool {
+	return browsercache.InCacheDirectory("/" + p)
+}
+
+// matchProcessDump matches a process memory dump by name. LSASS is
+// called out because a dump of it is credential material, but any
+// "<process>.dmp" under a dump-collection path is the same class of
+// artifact.
+func matchProcessDump(p, base string) bool {
+	if strings.HasPrefix(base, "lsass") && strings.HasSuffix(base, ".dmp") {
+		return true
+	}
+	return strings.HasSuffix(base, ".dmp") &&
+		(strings.Contains(p, "/procdump/") || strings.Contains(p, "/dumps/") || strings.Contains(p, "/crashdumps/"))
+}
+
+// matchPowerShellTranscript matches PowerShell's session transcripts,
+// which are named for their start time by the transcription policy.
+func matchPowerShellTranscript(_, base string) bool {
+	return strings.HasPrefix(base, "powershell_transcript") && strings.HasSuffix(base, ".txt")
+}
+
+// matchSetupAPILog matches the device-install logs that record when a
+// removable device was first attached.
+func matchSetupAPILog(_, base string) bool {
+	return strings.HasPrefix(base, "setupapi.") && strings.HasSuffix(base, ".log")
+}
+
+// matchDefenderLog matches Microsoft Defender's detection and protection
+// logs. Confined to a Defender path so an unrelated MPLog is not claimed.
+func matchDefenderLog(p, base string) bool {
+	if strings.Contains(p, "windows defender") || strings.Contains(p, "/defender/") {
+		return strings.HasSuffix(base, ".log")
+	}
+	return strings.HasPrefix(base, "mplog-") && strings.HasSuffix(base, ".log")
+}
+
+// matchWebServerLog matches IIS/W3C extended log files, which are named
+// u_exYYMMDD.log (or u_inYYMMDD / u_ncYYMMDD) or live under LogFiles.
+func matchWebServerLog(p, base string) bool {
+	if !strings.HasSuffix(base, ".log") {
+		return false
+	}
+	for _, prefix := range []string{"u_ex", "u_in", "u_nc", "u_ev"} {
+		if strings.HasPrefix(base, prefix) {
+			return true
+		}
+	}
+	return strings.Contains(p, "/inetpub/logs/") || strings.Contains(p, "/logfiles/w3svc")
+}
+
+// matchThumbcache matches the per-size thumbnail cache databases.
+func matchThumbcache(_, base string) bool {
+	return (strings.HasPrefix(base, "thumbcache_") || strings.HasPrefix(base, "iconcache_")) &&
+		strings.HasSuffix(base, ".db")
+}
+
+// matchRDPCache matches the outbound RDP client's bitmap cache.
+func matchRDPCache(p, base string) bool {
+	if strings.HasPrefix(base, "bcache") && strings.HasSuffix(base, ".bmc") {
+		return true
+	}
+	return strings.Contains(p, "/terminal server client/cache/") && strings.HasSuffix(base, ".bin")
+}
+
+// matchHostsFile matches the static name-resolution files, which have no
+// extension and must therefore be anchored to their directory.
+func matchHostsFile(p, base string) bool {
+	if !strings.Contains(p, "/etc/") {
+		return false
+	}
+	switch base {
+	case "hosts", "lmhosts", "lmhosts.sam", "networks", "protocol", "services":
+		return true
+	}
+	return false
 }
 
 func pathContains(fragments ...string) func(string, string) bool {
@@ -264,35 +659,143 @@ func pathContains(fragments ...string) func(string, string) bool {
 // unsupportedRules is ordered: the first match wins, so specific rules
 // precede general ones.
 var unsupportedRules = []unsupportedRule{
+	// ---- credential and persistence stores ----
+	//
+	// CRITICAL by the level's own definition: an artifact that can carry
+	// credentials or a persistence mechanism. That none of these has a
+	// parser is exactly why their priority matters -- a HIGH or CRITICAL
+	// row Tracefall cannot read is the most useful thing this screen can
+	// tell an investigator.
+	{
+		label: "Process memory dump (LSASS or similar)", family: FamilyMemory, priority: PriorityCritical,
+		why:    "A process memory dump of LSASS carries credential material directly; of any process, its decrypted runtime state.",
+		reason: "Tracefall performs no memory analysis. The dump is cataloged and hashed, not read.",
+		match:  matchProcessDump,
+	},
+	{
+		label: "WMI repository", family: FamilyExecution, priority: PriorityCritical,
+		why:    "Holds WMI event subscriptions, a fileless persistence mechanism that survives reboot and leaves little else behind.",
+		reason: "Tracefall has no WMI repository parser. OBJECTS.DATA and its indexes are not decoded.",
+		match:  baseIs("objects.data", "index.btr", "mapping1.map", "mapping2.map", "mapping3.map"),
+	},
+
+	// ---- execution and user-activity artifacts ----
 	{
 		label: "Amcache hive", family: FamilyExecution, priority: PriorityHigh,
+		why:    "Records executables present on the system with SHA-1 and first-execution evidence, including binaries since deleted.",
 		reason: "Amcache records program execution and installation. Tracefall reads the hive format but has no Amcache-specific extraction yet, so no events are produced from it.",
 		match:  baseIs("amcache.hve"),
 	},
 	{
 		label: "SRUM database", family: FamilyExecution, priority: PriorityHigh,
+		why:    "Per-application network and resource usage over 30-60 days: what ran, and how much data it moved.",
 		reason: "The System Resource Usage Monitor database records per-application network and resource usage. Tracefall has no ESE database parser.",
 		match:  baseIs("srudb.dat"),
 	},
 	{
-		label: "ShellBags / UsrClass", family: FamilyRegistry, priority: PriorityMedium,
+		// HIGH, not medium: ShellBags reconstruct which folders a user
+		// opened, including on removable and network volumes, and they
+		// outlive the directories themselves. That is squarely "highly
+		// valuable for reconstructing user activity".
+		label: "ShellBags / UsrClass", family: FamilyRegistry, priority: PriorityHigh,
+		why:    "Reconstructs which folders a user browsed, including removable and network volumes, and survives their deletion.",
 		reason: "Tracefall reads this hive, but has no ShellBags-specific extraction, so only persistence locations produce events.",
 		match:  baseIs("usrclass.dat"),
 	},
 	{
-		// Deliberately RECOGNIZED-but-unsupported, not "Unrecognized":
-		// telling an investigator "this is the $MFT and Tracefall cannot
-		// parse it" is actionable (they can carve it with another tool);
-		// calling it an unknown file is not.
-		label: "NTFS $MFT", family: FamilyFileSystem, priority: PriorityHigh,
-		reason: "Tracefall has no NTFS filesystem parser. File-system timeline analysis is not available.",
-		notParsed: []string{
-			"NTFS $MFT (master file table)",
-			"NTFS $LogFile",
-			"NTFS $UsnJrnl change journal",
+		// $MFT, $UsnJrnl and $LogFile are all PARSED now, so none of them
+		// appears here. What remains are the NTFS metafiles Tracefall
+		// genuinely does not read -- claiming them because the other
+		// three work would be a fabricated capability.
+		label: "NTFS volume metadata (other metafiles)", family: FamilyFileSystem, priority: PriorityMedium,
+		why:    "Volume-level structures that contextualise filesystem evidence without recording activity of their own.",
+		reason: "Tracefall reads the NTFS $MFT, $UsnJrnl change journal and $LogFile. The remaining NTFS metafiles -- $Secure (security descriptors), $Bitmap (cluster allocation), $Quota, $ObjId and $Reparse -- are separate structures with their own formats and are not parsed.",
+		parsedInstead: []string{
+			"NTFS $MFT (master file table) -- file metadata and MACB timestamps",
+			"NTFS $UsnJrnl:$J change journal -- historical file change records",
+			"NTFS $LogFile -- validated transaction metadata (no timeline events; see the notes)",
 		},
-		match: baseIs("$mft", "$logfile", "$usnjrnl", "$j"),
+		notParsed: []string{
+			"$Secure (security descriptor store)",
+			"$Bitmap (cluster allocation map)",
+			"$Quota, $ObjId, $Reparse indexes",
+			"$Boot, $BadClus, $Volume",
+		},
+		match: baseIs("$secure", "$bitmap", "$quota", "$objid", "$reparse", "$boot", "$badclus", "$volume"),
 	},
+	{
+		label: "Windows Timeline (ActivitiesCache.db)", family: FamilyExecution, priority: PriorityHigh,
+		why:    "Records applications used and files opened per user with start and end times -- a ready-made activity timeline.",
+		reason: "Tracefall has no ActivitiesCache parser. It is a SQLite database with a Windows-specific schema.",
+		match:  baseIs("activitiescache.db"),
+	},
+	{
+		label: "PowerShell transcript", family: FamilyPowerShell, priority: PriorityHigh,
+		why:    "A verbatim record of a PowerShell session including command output, often surviving when the event log does not.",
+		reason: "Tracefall has no transcript parser; console history (ConsoleHost_history.txt) IS parsed.",
+		match:  matchPowerShellTranscript,
+	},
+	{
+		label: "USB / device install log (SetupAPI)", family: FamilyLog, priority: PriorityHigh,
+		why:    "First-connection times for removable devices, which is the primary evidence of data movement to external media.",
+		reason: "Tracefall has no SetupAPI log parser.",
+		match:  matchSetupAPILog,
+	},
+	{
+		label: "Antimalware detection log", family: FamilyLog, priority: PriorityHigh,
+		why:    "Detection and remediation history names malicious files and the time they were seen, often the earliest signal available.",
+		reason: "Tracefall has no antimalware log parser.",
+		match:  matchDefenderLog,
+	},
+	{
+		label: "Web server log (IIS / W3C)", family: FamilyLog, priority: PriorityHigh,
+		why:    "Records requests against a hosted service: the primary evidence for web exploitation and webshell activity.",
+		reason: "Tracefall has no web server log parser.",
+		match:  matchWebServerLog,
+	},
+	{
+		label: "Windows Search index (Windows.edb)", family: FamilyExecution, priority: PriorityMedium,
+		why:    "Indexes file names, paths and content, including for files since deleted -- useful corroboration, rarely primary.",
+		reason: "Windows.edb is an ESE database. Tracefall has no ESE parser.",
+		match:  baseIs("windows.edb"),
+	},
+	{
+		label: "Thumbnail cache", family: FamilyExecution, priority: PriorityMedium,
+		why:    "Retains thumbnails of images and documents after the originals are deleted, evidencing that a file once existed.",
+		reason: "Tracefall has no thumbcache parser.",
+		match:  matchThumbcache,
+	},
+	{
+		label: "RDP bitmap cache", family: FamilyExecution, priority: PriorityMedium,
+		why:    "Fragments of what was displayed during an outbound RDP session; reconstructable but partial and labour-intensive.",
+		reason: "Tracefall has no RDP bitmap cache parser.",
+		match:  matchRDPCache,
+	},
+	{
+		label: "Event trace log (.etl)", family: FamilyLog, priority: PriorityMedium,
+		why:    "Kernel and provider tracing that can carry process and network detail, though rarely retained long enough to rely on.",
+		reason: "Tracefall has no ETL parser.",
+		match:  hasExt(".etl"),
+	},
+	{
+		label: "Hosts / network configuration file", family: FamilyLog, priority: PriorityMedium,
+		why:    "A modified hosts file redirects name resolution -- small, high-signal, and frequently altered by malware.",
+		reason: "Tracefall does not parse static network configuration files.",
+		match:  matchHostsFile,
+	},
+	{
+		label: "Host firewall log", family: FamilyLog, priority: PriorityMedium,
+		why:    "Allowed and dropped connections at the host, corroborating network activity seen elsewhere.",
+		reason: "Tracefall has no firewall log parser.",
+		match:  baseIs("pfirewall.log", "pfirewall.log.old"),
+	},
+	{
+		label: "Crash dump", family: FamilyMemory, priority: PriorityMedium,
+		why:    "A snapshot of one process or the kernel at failure: can hold injected code, but is bounded and often unrelated.",
+		reason: "Tracefall performs no memory analysis.",
+		match:  hasExt(".dmp", ".mdmp", ".hdmp"),
+	},
+
 	// ---- browser artifacts ----
 	//
 	// Browser support is PARTIAL, and the old single rule ("Browser data
@@ -308,6 +811,7 @@ var unsupportedRules = []unsupportedRule{
 	// history is still covered.
 	{
 		label: "IE / Edge Legacy web cache (WebCacheV01.dat)", family: FamilyBrowser, priority: PriorityMedium,
+		why:           "Holds Internet Explorer and Edge Legacy browsing history -- the same class of evidence as any other browser history.",
 		reason:        "WebCacheV01.dat is an ESE (Extensible Storage Engine) database. Tracefall has no ESE parser, so Internet Explorer and Edge Legacy browsing history is not extracted.",
 		parsedInstead: browserParsedInstead,
 		notParsed:     []string{"Internet Explorer / Edge Legacy WebCacheV01.dat (ESE database)"},
@@ -315,50 +819,121 @@ var unsupportedRules = []unsupportedRule{
 	},
 	{
 		label: "Browser cookie store", family: FamilyBrowser, priority: PriorityMedium,
+		why:           "Evidences authenticated sessions and site contact; supports user activity without establishing it.",
 		reason:        "Tracefall has no cookie-store parser. Cookies are not extracted from any browser.",
 		parsedInstead: browserParsedInstead,
 		notParsed:     []string{"Browser cookie stores"},
 		match:         baseIs("cookies.sqlite", "cookies"),
 	},
 	{
-		label: "Browser cache", family: FamilyBrowser, priority: PriorityMedium,
-		reason:        "Tracefall has no browser-cache parser. Cached responses and their metadata are not extracted from any browser.",
+		// The path-only cache rules.
+		//
+		// These are the LAST resort for a cache file: discovery already
+		// recognized what it could from the bytes (see
+		// recognizedTypeInfo), so a file reaching here either was not
+		// read at discovery time -- a catalog written by an older build
+		// -- or carries no signature at all. Each still says which kind
+		// of cache file it is rather than sharing one message.
+		//
+		// Note the priorities: none of these is MEDIUM by default.
+		// Auxiliary and bookkeeping files hold no independently useful
+		// metadata by design, and saying so at LOW keeps them out of an
+		// analyst's way without hiding them.
+		label:  "Browser cache auxiliary file",
+		family: FamilyBrowser, priority: PriorityLow,
+		why:           "Cache bookkeeping whose useful metadata lives in the entry records that address it.",
+		reason:        "Cached response body (f_######). Its metadata is stored in the associated data_1 entry record.",
 		parsedInstead: browserParsedInstead,
-		notParsed:     []string{"Browser cache stores"},
-		match:         pathContains("/cache/", "/code cache/"),
+		notParsed:     []string{"Cached response bodies (Tracefall reads cache metadata only)"},
+		match:         matchBlockfileExternalBody,
 	},
 	{
-		label: "Memory image", family: FamilyMemory, priority: PriorityHigh,
+		label:  "Browser cache hash index",
+		family: FamilyBrowser, priority: PriorityLow,
+		why:           "Stores key hashes rather than keys, so it names no URL; the entry files it points at carry the evidence.",
+		reason:        "Cache index of key hashes, not keys, so it names no URL. The entry files it points at are parsed.",
+		parsedInstead: browserParsedInstead,
+		notParsed: []string{
+			"Chromium Simple Cache index / index-dir/the-real-index (key hashes and last-used times)",
+			"Firefox cache2 index (SHA-1 key hashes)",
+		},
+		match: matchCacheHashIndex,
+	},
+	{
+		label:  "Browser cache journal/state",
+		family: FamilyBrowser, priority: PriorityLow,
+		why:           "A cache's own housekeeping. It records no cached resource and no user activity.",
+		reason:        "Browser-cache journal/state file. No independently parsed cache-entry metadata.",
+		parsedInstead: browserParsedInstead,
+		notParsed:     []string{"Cache journals, lock files and temporary indexes"},
+		match:         matchCacheStateFile,
+	},
+	{
+		// The generic fallback, and ONLY the generic fallback: a file in
+		// a cache directory whose format nothing could identify. LOW,
+		// not medium -- an unidentified file is not a promise of value.
+		label:  "Browser cache unknown",
+		family: FamilyBrowser, priority: PriorityLow,
+		why:           "Unidentified, but inside a browser cache -- worth a glance even though nothing is established about it.",
+		reason:        "File is located in a browser-cache directory, but its format could not be identified.",
+		parsedInstead: browserParsedInstead,
+		notParsed:     []string{"Files in a browser cache whose format structural detection could not identify"},
+		match:         matchInCacheDirectory,
+	},
+	{
+		// Split from the single "memory image" rule: a full capture and
+		// a page file are not the same evidence. hiberfil/memory.dmp are
+		// a complete snapshot of running state; pagefile/swapfile are
+		// fragments of it -- valuable, but partial and unstructured.
+		label: "Memory image (full capture)", family: FamilyMemory, priority: PriorityCritical,
+		why:    "A complete snapshot of running state: injected code, decrypted payloads, network state and credential material.",
 		reason: "Tracefall performs no memory analysis.",
-		match:  baseIs("pagefile.sys", "hiberfil.sys", "memory.dmp", "swapfile.sys"),
+		match:  baseIs("hiberfil.sys", "memory.dmp", "memory.raw", "winpmem.raw"),
+	},
+	{
+		label: "Page / swap file", family: FamilyMemory, priority: PriorityHigh,
+		why:    "Fragments of process memory paged to disk: often recoverable strings and payloads, but partial and unstructured.",
+		reason: "Tracefall performs no memory analysis.",
+		match:  baseIs("pagefile.sys", "swapfile.sys"),
 	},
 	{
 		label: "Windows Error Report", family: FamilyLog, priority: PriorityLow,
+		why:    "Crash telemetry naming a process and its modules: corroborates execution already evidenced elsewhere.",
 		reason: "Crash telemetry. Tracefall has no WER parser.",
 		match:  hasExt(".wer"),
 	},
 	{
-		label: "Event Log (legacy .evt)", family: FamilyEventLog, priority: PriorityMedium,
+		// CRITICAL, matching EVTX. A pre-Vista .evt holds the same
+		// evidence in an older container: on a system that writes them,
+		// it IS the event log. This was MEDIUM, which tracked the
+		// missing parser rather than the artifact -- the one thing a
+		// priority must never do.
+		label: "Event Log (legacy .evt)", family: FamilyEventLog, priority: PriorityCritical,
+		why:    "The same account of logons, service installs and process activity that EVTX carries, in the pre-Vista container.",
 		reason: "Tracefall parses the modern EVTX format only, not the pre-Vista .evt format.",
 		match:  hasExt(".evt"),
 	},
 	{
 		label: "Log file", family: FamilyLog, priority: PriorityLow,
+		why:    "Application-specific text whose value depends entirely on the application; records no general investigative fact.",
 		reason: "Plain-text logs are not parsed; their format is application-specific.",
 		match:  hasExt(".log"),
 	},
 	{
 		label: "CSV (unrecognized tool output)", family: FamilyOther, priority: PriorityMedium,
+		why:    "Tool output that may hold processed forensic data, but of unknown provenance and structure.",
 		reason: "This CSV does not match the naming convention of any EZ Tools output Tracefall parses (EvtxECmd, PECmd, RECmd).",
 		match:  hasExt(".csv"),
 	},
 	{
 		label: "XML (not a Scheduled Task)", family: FamilyOther, priority: PriorityLow,
+		why:    "Configuration or data serialization; carries no activity record of its own.",
 		reason: "Only Task Scheduler XML collected under a Tasks directory is parsed.",
 		match:  hasExt(".xml"),
 	},
 	{
 		label: "Documentation / notes", family: FamilyOther, priority: PriorityLow,
+		why:    "Human-written text about the collection, not evidence the system produced.",
 		reason: "Not forensic evidence.",
 		match: func(_, base string) bool {
 			return hasExt(".md")("", base) || hasExt(".txt")("", base) || hasExt(".rtf")("", base)
@@ -372,10 +947,16 @@ var unknownCapability = Capability{
 	Label:       "Unrecognized",
 	Family:      FamilyOther,
 	FamilyLabel: FamilyLabels[FamilyOther],
-	Priority:    PriorityUnknown,
-	Supported:   false,
-	Recognized:  false,
-	Reason:      "Tracefall does not recognize this file as a known forensic artifact.",
+	// UNKNOWN, deliberately, and never LOW. Calling an unidentified file
+	// "limited forensic value" asserts something nobody established --
+	// the file might be the most important thing in the collection. The
+	// honest answer is that its class was not determined, which is what
+	// this priority says and what sorts it last without dismissing it.
+	Priority:       PriorityUnknown,
+	PriorityReason: "Not classified: this file matched no artifact rule, so no forensic value has been assessed either way.",
+	Supported:      false,
+	Recognized:     false,
+	Reason:         "Tracefall does not recognize this file as a known forensic artifact.",
 }
 
 // Registry answers capability questions for one build of Tracefall.
@@ -410,14 +991,16 @@ func NewRegistry(registered []parsers.ArtifactParser) *Registry {
 			info = typeInfo{label: humanize(at), family: FamilyOther, priority: PriorityMedium}
 		}
 		r.byType[at] = Capability{
-			ArtifactType: at,
-			Label:        info.label,
-			Family:       info.family,
-			FamilyLabel:  FamilyLabels[info.family],
-			Priority:     info.priority,
-			Supported:    true,
-			Recognized:   true,
-			Parser:       p.Name(),
+			ArtifactType:   at,
+			Label:          info.label,
+			Family:         info.family,
+			FamilyLabel:    FamilyLabels[info.family],
+			Priority:       info.priority,
+			Supported:      true,
+			Recognized:     true,
+			Parser:         p.Name(),
+			PriorityReason: info.why,
+			Note:           info.note,
 		}
 	}
 
@@ -447,15 +1030,16 @@ func (r *Registry) Unsupported() []Capability {
 	out := make([]Capability, 0, len(unsupportedRules))
 	for _, rule := range unsupportedRules {
 		out = append(out, Capability{
-			Label:         rule.label,
-			Family:        rule.family,
-			FamilyLabel:   FamilyLabels[rule.family],
-			Priority:      rule.priority,
-			Supported:     false,
-			Recognized:    true,
-			Reason:        rule.reason,
-			ParsedInstead: rule.parsedInstead,
-			NotParsed:     rule.notParsed,
+			Label:          rule.label,
+			Family:         rule.family,
+			FamilyLabel:    FamilyLabels[rule.family],
+			Priority:       rule.priority,
+			PriorityReason: rule.why,
+			Supported:      false,
+			Recognized:     true,
+			Reason:         rule.reason,
+			ParsedInstead:  rule.parsedInstead,
+			NotParsed:      rule.notParsed,
 		})
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].Priority.Rank() < out[j].Priority.Rank() })
@@ -475,6 +1059,22 @@ func (r *Registry) Classify(relPath, artifactType string) Capability {
 	if artifactType != "" {
 		if c, ok := r.byType[artifactType]; ok {
 			return c
+		}
+		// A recognition assigned by discovery from the file's own bytes.
+		// Recognized, never Supported -- see recognizedTypeInfo.
+		if rule, ok := recognizedTypeInfo[artifactType]; ok {
+			return Capability{
+				Label:          rule.label,
+				Family:         rule.family,
+				FamilyLabel:    FamilyLabels[rule.family],
+				Priority:       rule.priority,
+				PriorityReason: rule.why,
+				Supported:      false,
+				Recognized:     artifactType != model.ArtifactBrowserCacheUnknown,
+				Reason:         rule.reason,
+				ParsedInstead:  browserParsedInstead,
+				NotParsed:      rule.notParsed,
+			}
 		}
 		// An artifact type from an older collection whose parser no
 		// longer exists in this build. Report it honestly rather than
@@ -496,15 +1096,16 @@ func (r *Registry) Classify(relPath, artifactType string) Capability {
 	for _, rule := range unsupportedRules {
 		if rule.match(lower, base) {
 			return Capability{
-				Label:         rule.label,
-				Family:        rule.family,
-				FamilyLabel:   FamilyLabels[rule.family],
-				Priority:      rule.priority,
-				Supported:     false,
-				Recognized:    true,
-				Reason:        rule.reason,
-				ParsedInstead: rule.parsedInstead,
-				NotParsed:     rule.notParsed,
+				Label:          rule.label,
+				Family:         rule.family,
+				FamilyLabel:    FamilyLabels[rule.family],
+				Priority:       rule.priority,
+				PriorityReason: rule.why,
+				Supported:      false,
+				Recognized:     true,
+				Reason:         rule.reason,
+				ParsedInstead:  rule.parsedInstead,
+				NotParsed:      rule.notParsed,
 			}
 		}
 	}

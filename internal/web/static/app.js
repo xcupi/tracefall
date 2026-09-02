@@ -714,6 +714,16 @@ const ARTIFACT_TYPE_LABELS = {
   registry_run_key: "Registry (RECmd export)",
   registry_hive: "Windows Registry Hive",
   scheduled_task: "Scheduled Task",
+  ntfs_mft: "NTFS $MFT",
+  ntfs_usnjrnl: "NTFS $UsnJrnl change journal",
+  ntfs_logfile: "NTFS $LogFile transaction log",
+  browser_cache: "Browser cache entry",
+  browser_cache_index: "Browser cache index",
+  windows_lnk: "Windows LNK shortcut",
+  jumplist_automatic: "Jump List (Automatic Destinations)",
+  jumplist_custom: "Jump List (Custom Destinations)",
+  recycle_bin_metadata: "Recycle Bin metadata ($I)",
+  recycle_bin_content: "Recovered deleted content ($R)",
 };
 function artifactLabel(t) {
   if (!t) return "-";
@@ -759,12 +769,55 @@ const EVENT_CATEGORIES = {
   // Phase 9: a registry key's last-write time, observed in a raw hive.
   // Not persistence in itself -- see model.EventRegistryKeyLastWrite.
   registry_key_last_write: "other",
+  // Phase 15: NTFS $MFT filesystem metadata. Its own category, not
+  // "execution": a file's creation time says the file came into
+  // existence, not that anything ran. Four types rather than one so an
+  // examiner can filter "created" apart from "accessed".
+  filesystem_created: "filesystem",
+  filesystem_modified: "filesystem",
+  filesystem_changed: "filesystem",
+  filesystem_accessed: "filesystem",
+  // Phase 16: USN change journal. A SEPARATE category from "filesystem"
+  // on purpose -- an $MFT event is a file's current metadata, a journal
+  // event is a historical record that the volume observed a change. An
+  // examiner filtering the timeline needs to be able to hold them apart.
+  usnjrnl_create: "filesystem_journal",
+  usnjrnl_delete: "filesystem_journal",
+  usnjrnl_modify: "filesystem_journal",
+  usnjrnl_rename: "filesystem_journal",
+  usnjrnl_metadata_change: "filesystem_journal",
+  // Phase 14: browser cache, and browser history alongside it. Two
+  // categories, NOT one and not "network": history is navigation
+  // evidence, cache is response evidence, and an analyst filtering a
+  // timeline has to be able to keep them apart. Before cache support
+  // browser_visit had no entry at all and fell into "other", which put
+  // a recorded navigation in the same bucket as everything unclassified.
+  browser_visit: "browser_history",
+  browser_cache_entry: "browser_cache",
+  // Phase 17: shortcut target metadata and Recycle Bin deletions. Both
+  // sit in the filesystem category: a shortcut describes a target FILE
+  // and a $I record describes a deleted one. Neither is execution, and
+  // putting either under "execution" would say it was.
+  // A Jump List ties an APPLICATION to a target. Its own access event
+  // belongs with execution-adjacent application activity; the target
+  // timestamps it carries describe a file, exactly as the standalone
+  // shortcut events do, and sit with them under filesystem.
+  jumplist_entry_access: "execution",
+  jumplist_target_metadata: "filesystem",
+  lnk_target_created: "filesystem",
+  lnk_target_modified: "filesystem",
+  lnk_target_accessed: "filesystem",
+  recyclebin_deletion: "filesystem",
 };
 const EVENT_CATEGORY_LABELS = {
   authentication: "Authentication",
   execution: "Execution",
   persistence: "Persistence",
   network: "Network",
+  filesystem: "File System",
+  filesystem_journal: "File System Journal",
+  browser_history: "Browser History",
+  browser_cache: "Browser Cache",
   other: "Other",
 };
 function eventCategory(e) {
@@ -1147,6 +1200,17 @@ function eventSearchHaystack(e, eventFindingIdx) {
     e.event_type, e.command_line, e.file_path, e.registry_path,
     e.network_source, e.network_dest, e.provider, e.artifact_type, e.parser,
     e.event_id ? "eventid:" + e.event_id : "",
+    // Web evidence -- browser history visits, browser cache entries --
+    // carries its URL in extra, not in a top-level column. Searching
+    // "payload.exe" or a full URL has to reach it, and matching only
+    // network_dest would restrict the analyst to bare hostnames.
+    (e.extra && e.extra.url) || "",
+    (e.extra && e.extra.content_type) || "",
+    // A shortcut's target and a deleted file's original path are what an
+    // investigator actually knows to search for -- neither is a
+    // top-level column.
+    (e.extra && e.extra.target_path) || "",
+    (e.extra && e.extra.original_path) || "",
     // ATT&CK techniques reach a timeline row through the findings that
     // cite it, which the tab has already indexed.
     (eventFindingIdx[e.id] || []).flatMap((f) => f.attack_techniques || []).join(" "),
@@ -1721,7 +1785,14 @@ function wireDetailCells(root) {
 // eventDetailValue picks the most relevant single field to show for an
 // event in a "Detail" column.
 function eventDetailValue(e) {
-  return e.command_line || e.registry_path || e.file_path || e.network_dest || "";
+  // For web evidence the URL is the detail -- a browser-cache row whose
+  // detail read "0a1b2c3d_0" would name the cache file on disk rather
+  // than the resource that was cached. A shortcut is the same shape of
+  // problem: the row exists to say which TARGET was referenced, not
+  // which .lnk file recorded it.
+  const url = e.extra && e.extra.url;
+  const target = e.extra && e.extra.target_path;
+  return e.command_line || e.registry_path || url || target || e.file_path || e.network_dest || "";
 }
 
 // ---------------- Router ----------------
@@ -1973,19 +2044,26 @@ function renderLockBanner() {
 
 async function renderCaseList() {
   app.innerHTML = `
-    <div class="panel">
+    <div class="panel new-case-panel">
       <h2>New case</h2>
-      <div class="field">
-        <label>Name</label>
-        <div class="input-wrap">
-          <input id="new-case-name" placeholder="e.g. WKSTN-042 Phishing Triage" />
-          <span id="new-case-name-icon" class="input-error-icon hidden">!</span>
+      <div class="new-case-form">
+        <div class="field">
+          <label for="new-case-name">Name</label>
+          <div class="input-wrap">
+            <input id="new-case-name" placeholder="e.g. WKSTN-042 Phishing Triage" />
+            <span id="new-case-name-icon" class="input-error-icon hidden">!</span>
+          </div>
+          <div id="new-case-error"></div>
         </div>
-        <div id="new-case-error"></div>
+        <div class="field">
+          <label for="new-case-desc">Description</label>
+          <input id="new-case-desc" placeholder="optional" />
+        </div>
       </div>
-      <div class="field"><label>Description</label><input id="new-case-desc" placeholder="optional" /></div>
-      <div class="field-info-box">Case names must be unique (case-insensitive, trimmed of leading/trailing spaces).</div>
-      <button id="create-case-btn">Create case</button>
+      <p class="field-info-note">Case names must be unique (case-insensitive, trimmed of leading/trailing spaces).</p>
+      <div class="new-case-actions">
+        <button id="create-case-btn">Create case</button>
+      </div>
     </div>
     <div class="panel">
       <div class="row between">
@@ -2036,14 +2114,14 @@ async function renderCaseList() {
       <div class="case-card-row">
         <input type="checkbox" class="case-checkbox" data-id="${esc(c.id)}" aria-label="Select case ${esc(c.name)}" />
         <a class="case-card" href="#/cases/${c.id}">
-          <div class="case-card-head">
+          <div class="case-card-info">
             <span class="case-card-name">${esc(c.name)}</span>
-            ${lifecycleBadge(c.case_status)}
-            ${casePriorityBadge(c.priority)}
-            ${statusBadge(c.status)}
+            ${c.description ? `<div class="muted small case-card-meta">${esc(c.description)}</div>` : ""}
+            <div class="muted small mono case-card-meta">${esc(c.id)} &middot; created ${fmtTime(c.created_at)}</div>
           </div>
-          ${c.description ? `<div class="muted small case-card-meta">${esc(c.description)}</div>` : ""}
-          <div class="muted small mono case-card-meta">${esc(c.id)} &middot; created ${fmtTime(c.created_at)}</div>
+          <div class="case-card-col">${caseWorkflowBadge(c.case_status)}</div>
+          <div class="case-card-col">${casePriorityBadge(c.priority)}</div>
+          <div class="case-card-col">${analysisStateBadge(c)}</div>
         </a>
       </div>`
       )
@@ -2052,30 +2130,6 @@ async function renderCaseList() {
   } catch (e) {
     document.getElementById("case-list").innerHTML = errorBox(e);
   }
-}
-
-// lifecycleBadge shows the ANALYST lifecycle (open / investigating /
-// contained / closed).
-//
-// Added in Phase 13 because the list previously showed only
-// statusBadge(c.status) -- the ENGINE state (created/ingested/analyzed).
-// A closed case was therefore indistinguishable from an open one without
-// opening it, which is exactly what an analyst scanning the list needs
-// to see. Both are shown: they answer different questions.
-//
-// The state is carried by the WORD, never by colour alone; the colour
-// only reinforces it.
-function lifecycleBadge(caseStatus) {
-  const s = caseStatus || "open";
-  return `<span class="badge lifecycle lifecycle-${esc(s)}" title="Analyst workflow status">${esc(s)}</span>`;
-}
-
-// casePriorityBadge shows the case's triage priority. Deliberately
-// styled apart from finding severity and artifact priority: three
-// different judgements that must not be read as one.
-function casePriorityBadge(priority) {
-  if (!priority) return "";
-  return `<span class="badge case-prio case-prio-${esc(priority)}" title="Case priority">${esc(priority)}</span>`;
 }
 
 // wireCaseSelection powers the case list's checkbox selection and bulk
@@ -2170,7 +2224,12 @@ async function renderCaseDetail(caseId, tab) {
   // so a reviewer glancing at Findings/Investigations/ATT&CK can't mistake
   // stale numbers for current ones. See renderAnalysisAction's identical
   // condition, which additionally offers the "Re-run analysis" action.
-  const staleAnalysis = c.status !== "analyzed" && (summary.findings > 0 || summary.correlations > 0);
+  // Invalidated analysis is not stale analysis: stale means results
+  // still describe evidence the case holds, and after a deletion it
+  // holds none of it. The backend decides -- see Summary.AnalysisInvalidated.
+  const invalidated = !!summary.analysis_invalidated;
+  const staleAnalysis =
+    !invalidated && c.status !== "analyzed" && (summary.findings > 0 || summary.correlations > 0);
 
   // ---- Application shell (Phase 10B) ----
   //
@@ -2189,7 +2248,7 @@ async function renderCaseDetail(caseId, tab) {
     <div class="app-shell">
       ${renderSidebar(caseId, c, tab)}
       <main class="app-main" id="app-main">
-        ${renderCaseHeader(caseId, c, summary, staleAnalysis)}
+        ${renderCaseHeader(caseId, c, summary, staleAnalysis, invalidated)}
         <div id="tab-content"><p class="empty">Loading...</p></div>
       </main>
     </div>
@@ -2338,12 +2397,12 @@ document.addEventListener("keydown", (e) => {
 // selects below, which remain the single place state is changed, so
 // there is exactly one control per piece of state and no ambiguity
 // about which one is authoritative.
-function renderCaseStateBadges(c, staleAnalysis) {
+function renderCaseStateBadges(c, staleAnalysis, invalidated) {
   return `
     <div class="case-state-badges" role="group" aria-label="Case state">
       ${caseWorkflowBadge(c.case_status)}
       ${casePriorityBadge(c.priority)}
-      ${analysisStateBadge(c, staleAnalysis)}
+      ${analysisStateBadge(c, staleAnalysis, invalidated)}
     </div>`;
 }
 
@@ -2376,8 +2435,24 @@ function casePriorityBadge(priority) {
 // underneath it. The third is the dangerous one -- results that look
 // authoritative but describe evidence that is no longer what the case
 // holds -- so it is the one that gets the warning styling.
-function analysisStateBadge(c, staleAnalysis) {
-  if (staleAnalysis) {
+// The case LIST has no summary to compute staleAnalysis from -- /api/cases
+// returns bare cases -- so when the flag is not supplied it is derived
+// from fields the case itself carries: an analysis timestamp plus an
+// engine status that has since moved off "analyzed" means evidence
+// changed after the last run. That is the same fact the detail page's
+// flag encodes, read from data the list already has, so the two views
+// agree without widening the API.
+function analysisStateBadge(c, staleAnalysis, invalidated) {
+  const stale = staleAnalysis === undefined ? !!c.analyzed_at && c.status !== "analyzed" : staleAnalysis;
+  // Invalidated outranks everything. A case whose evidence was deleted
+  // has no valid analysis at all, so it is neither stale (which means
+  // results still describe evidence that EXISTS) nor never-analyzed
+  // (which would deny that analysis ever ran).
+  if (invalidated) {
+    return `<span class="badge analysis-state analysis-never"
+                  title="The evidence this case's analysis was derived from has been deleted, so there is no valid analysis for the evidence the case now holds. The previous run is retained in the case history, marked invalidated.">NOT ANALYZED</span>`;
+  }
+  if (stale) {
     return `<span class="badge analysis-state analysis-stale"
                   title="Findings, correlations, investigations and ATT&amp;CK results were produced before the evidence last changed. Re-run analysis before treating them as current.">ANALYSIS STALE</span>`;
   }
@@ -2396,7 +2471,7 @@ function analysisStateBadge(c, staleAnalysis) {
 // stacks them instead of introducing a horizontal scrollbar -- and
 // nothing is hidden to achieve that, because case status and priority
 // are forensic context, not decoration.
-function renderCaseHeader(caseId, c, summary, staleAnalysis) {
+function renderCaseHeader(caseId, c, summary, staleAnalysis, invalidated) {
   return `
     <header class="case-header">
       <div class="case-header-top">
@@ -2406,7 +2481,7 @@ function renderCaseHeader(caseId, c, summary, staleAnalysis) {
           <div class="muted small mono case-id">${esc(c.id)}</div>
         </div>
         <div class="case-header-actions">
-          ${renderCaseStateBadges(c, staleAnalysis)}
+          ${renderCaseStateBadges(c, staleAnalysis, invalidated)}
           <div class="dropdown">
             <button type="button" class="secondary small" id="export-case-btn"
                     aria-haspopup="true" aria-expanded="false" aria-controls="export-menu">Export &#9662;</button>
@@ -2422,32 +2497,43 @@ function renderCaseHeader(caseId, c, summary, staleAnalysis) {
 
       <div class="case-meta">
         <div class="case-meta-edit-label muted small">Edit case state</div>
-        <div class="case-meta-item">
-          <label class="muted small" for="case-status-select">Case status</label>
-          <select id="case-status-select" class="filter-input">
-            ${["open", "investigating", "contained", "closed"].map((st) => `<option value="${st}" ${c.case_status === st ? "selected" : ""}>${st[0].toUpperCase() + st.slice(1)}</option>`).join("")}
-          </select>
+        <div class="case-meta-edit">
+          <div class="case-meta-fields">
+            <div class="case-meta-item">
+              <label class="muted small" for="case-status-select">Case status</label>
+              <select id="case-status-select" class="filter-input">
+                ${["open", "investigating", "contained", "closed"].map((st) => `<option value="${st}" ${c.case_status === st ? "selected" : ""}>${st[0].toUpperCase() + st.slice(1)}</option>`).join("")}
+              </select>
+            </div>
+            <div class="case-meta-item">
+              <label class="muted small" for="case-priority-select">Priority</label>
+              <select id="case-priority-select" class="filter-input">
+                ${["low", "medium", "high", "critical"].map((pr) => `<option value="${pr}" ${c.priority === pr ? "selected" : ""}>${pr[0].toUpperCase() + pr.slice(1)}</option>`).join("")}
+              </select>
+            </div>
+          </div>
         </div>
-        <div class="case-meta-item">
-          <label class="muted small" for="case-priority-select">Priority</label>
-          <select id="case-priority-select" class="filter-input">
-            ${["low", "medium", "high", "critical"].map((pr) => `<option value="${pr}" ${c.priority === pr ? "selected" : ""}>${pr[0].toUpperCase() + pr.slice(1)}</option>`).join("")}
-          </select>
-        </div>
-        <div class="case-meta-item">
-          <span class="muted small">Created</span>
-          <span class="small">${esc(fmtTime(c.created_at))}</span>
-        </div>
-        <div class="case-meta-item">
-          <span class="muted small">Last analyzed</span>
-          <span class="small">${c.analyzed_at ? esc(fmtTime(c.analyzed_at)) : "Never analyzed"}</span>
-        </div>
+        <dl class="case-meta-facts">
+          <div class="case-fact">
+            <dt class="muted small">Created</dt>
+            <dd class="small">${esc(fmtTime(c.created_at))}</dd>
+          </div>
+          <div class="case-fact">
+            <dt class="muted small">Last analyzed</dt>
+            <dd class="small">${c.analyzed_at ? esc(fmtTime(c.analyzed_at)) : "Never analyzed"}</dd>
+          </div>
+        </dl>
       </div>
       <div id="case-save-bar" hidden></div>
       <div id="case-metadata-error"></div>
       <div id="case-lock-banner"></div>
       ${
-        staleAnalysis
+        invalidated
+          ? `<div class="stale-banner">
+        <strong>Analysis invalidated: its evidence was deleted</strong>
+        <div>The evidence this case's findings, correlations, investigations and ATT&amp;CK results were derived from has been deleted, so none of them is current and none is shown. The previous run is retained in this case's history, marked invalidated, and can still be inspected there. Re-run analysis to produce results for the evidence the case holds now.</div>
+      </div>`
+          : staleAnalysis
           ? `<div class="stale-banner">
         <strong>Evidence changed since last analysis</strong>
         <div>The findings, correlations, investigations, and ATT&amp;CK techniques shown on every view are from the analysis run at ${esc(fmtTime(c.analyzed_at))} and do not reflect evidence added or removed since. Re-run analysis (Overview &rarr; Evidence Collections) before treating these as current.</div>
@@ -3506,7 +3592,7 @@ function rowForDiscoveredFile(f, selected) {
       <div class="muted ev-path" title="${esc(f.path)}">${esc(f.path)}</div>
     </td>
     <td class="small ev-type">${esc(f.type_label || artifactLabel(f.artifact_type))}</td>
-    <td class="ev-priority">${priorityBadge(f.priority)}</td>
+    <td class="ev-priority">${priorityBadge(f.priority, f.priority_reason)}</td>
     <td class="small nowrap num ev-size">${fmtBytes(f.size_bytes)}</td>
     <td class="ev-status">${evidenceStatusBadge(f)}</td>
     <td class="ev-actions">
@@ -3537,7 +3623,7 @@ function cardForDiscoveredFile(f, selected) {
     </div>
     <div class="evidence-card-meta">
       <span class="small">${esc(f.type_label || artifactLabel(f.artifact_type))}</span>
-      ${priorityBadge(f.priority)}
+      ${priorityBadge(f.priority, f.priority_reason)}
       ${evidenceStatusBadge(f)}
       <span class="small muted nowrap">${fmtBytes(f.size_bytes)}</span>
     </div>
@@ -3551,8 +3637,9 @@ function evidenceStatusBadge(f) {
   const canSelect = f.import_status === "discovered" && f.supported;
   if (canSelect) return `<span class="badge status ok-badge">supported</span>`;
   const status = evidenceStatusValue(f);
+  const tip = f.unsupported_reason || f.note;
   return `<span class="badge status${status === "failed" ? " critical" : ""}"${
-    f.unsupported_reason ? ` title="${esc(f.unsupported_reason)}"` : ""
+    tip ? ` title="${esc(tip)}"` : ""
   }>${esc(EVIDENCE_STATUS_LABELS[status] || status)}</span>`;
 }
 
@@ -3568,8 +3655,10 @@ function evidenceDetails(f) {
       ${row("Artifact family", f.family_label)}
       ${row("Parser", f.parser)}
       ${row("Forensic priority", PRIORITY_LABELS[f.priority] || f.priority)}
+      ${row("Why this priority", f.priority_reason)}
       ${row("Status", EVIDENCE_STATUS_LABELS[evidenceStatusValue(f)] || f.import_status)}
       ${row("Classification", capabilityClassification(f))}
+      ${row("Note", f.note)}
       ${row("Size", fmtBytes(f.size_bytes))}
       ${row("SHA-256", f.sha256)}
       ${row("Embedded hash (from container)", f.embedded_hash)}
@@ -3711,10 +3800,14 @@ function renderEvidenceCoverage(cov) {
 function coverageRow(b) {
   return `<tr>
     <td class="small">${esc(b.type_label)}</td>
-    <td class="small">${priorityBadge(b.priority)}</td>
+    <td class="small">${priorityBadge(b.priority, b.priority_reason)}</td>
     <td class="small num">${fmtCount(b.files)}</td>
     <td class="small num">${b.supported ? fmtCount(b.supported_files) : "0"}</td>
-    <td class="small muted">${b.reason ? esc(b.reason) : ""}</td>
+    <td class="small muted ev-note">${esc(b.reason || b.note || "")}${
+      b.priority_reason
+        ? `<div class="ev-note-why">${esc(PRIORITY_LABELS[b.priority] || b.priority || "Unknown")}: ${esc(b.priority_reason)}</div>`
+        : ""
+    }</td>
   </tr>`;
 }
 
@@ -3722,9 +3815,17 @@ function coverageRow(b) {
 // apart from finding severity: they are different judgements and must
 // never be read as the same thing. A HIGH-priority artifact Tracefall
 // cannot parse is normal and worth saying out loud.
-function priorityBadge(p) {
-  if (!p) return "";
-  return `<span class="badge prio prio-${esc(p)}">${esc(PRIORITY_LABELS[p] || p)}</span>`;
+// A row without a priority still gets a badge. An empty cell reads as
+// "no opinion", which is indistinguishable from "nobody looked" -- and
+// the point of the priority column is that every artifact carries a
+// forensic judgement, whether or not Tracefall can parse it.
+//
+// why, when present, becomes the badge's tooltip: the rationale behind
+// the level, available wherever the badge appears.
+function priorityBadge(p, why) {
+  const level = p || "unknown";
+  const tip = why ? ` title="${esc(why)}"` : "";
+  return `<span class="badge prio prio-${esc(level)}"${tip}>${esc(PRIORITY_LABELS[level] || level)}</span>`;
 }
 
 function fmtCount(n) {
@@ -5133,9 +5234,66 @@ function renderSourceFileProvenance(p) {
     ${row("Imported", sf.imported_at ? esc(fmtTime(sf.imported_at)) : `<span class="muted small">Not recorded</span>`)}
     ${sf.deleted ? row("Deleted", esc(fmtTime(sf.deleted_at))) : ""}
     ${row("File hash (SHA-256)", sf.sha256 ? `<span class="mono small">${esc(sf.sha256)}</span>` : `<span class="muted small">Not recorded</span>`)}
-    ${row("Produced", `Used by <strong>${fmtCount(p.event_count)}</strong> event(s) &middot; contributed to <strong>${fmtCount(p.finding_count)}</strong> finding(s)`)}
+    ${row("Produced", `Used by <strong>${fmtCount(p.event_count)}</strong> event(s) &middot; contributed to <strong>${fmtCount(p.finding_count)}</strong> finding(s)
+       ${noEventNote(sf, p.event_count)}`)}
     ${p.collection ? row("Evidence", renderProvenanceCollection(p.collection)) : ""}
-  </div>`;
+  </div>
+  ${renderSourceFileRecords(p)}`;
+}
+
+// noEventNote explains a successfully imported file that contributed no
+// timeline events, so "0 event(s)" is never read as a silent failure.
+// A file that FAILED carries the parse-error status instead, and says so
+// on its own row -- this note is only for the honest case where the
+// artifact genuinely records nothing datable (an NTFS $LogFile, a
+// Chromium Simple Cache entry, whose format holds no timestamp). The
+// evidence itself is still stored and still hashed; what it lacks is a
+// point on a clock.
+function noEventNote(sf, eventCount) {
+  if (eventCount !== 0 || sf.import_status !== "imported") return "";
+  return `<div class="muted small" style="margin-top:4px">Parsed successfully. This artifact recorded no
+    timestamped events, so it contributes structured evidence rather than timeline rows.</div>`;
+}
+
+// renderSourceFileRecords shows what a file parsed to when it produced
+// records with NO event.
+//
+// A record attached to an event is already reachable by opening that
+// event. A record with none -- an NTFS $LogFile's transaction metadata,
+// a browser-cache container, a Recycle Bin $R file's recovered content
+// and hash -- had nowhere to be seen, so a real forensic record was
+// stored and never shown. Rendered only in that case, so a file with
+// events is not given a second, redundant copy of what its rows already
+// say.
+function renderSourceFileRecords(p) {
+  const records = p.raw_evidence || [];
+  if (!records.length || p.event_count > 0) return "";
+  return `
+    <details class="prov-records">
+      <summary class="muted small" style="cursor:pointer">
+        Parsed record${records.length === 1 ? "" : "s"} (${fmtCount(records.length)})${
+          p.raw_evidence_truncated ? " -- showing the first " + fmtCount(records.length) : ""
+        }
+      </summary>
+      ${records
+        .map(
+          (r) => `<div class="prov-record">
+            <div class="muted small mono">${esc(r.source_reference || "")}</div>
+            <div class="evidence-box">${esc(prettyJSON(r.raw))}</div>
+          </div>`
+        )
+        .join("")}
+    </details>`;
+}
+
+// prettyJSON re-indents a stored record for reading, and returns it
+// untouched when it is not JSON -- a raw CSV line is evidence too.
+function prettyJSON(raw) {
+  try {
+    return JSON.stringify(JSON.parse(raw), null, 2);
+  } catch {
+    return raw;
+  }
 }
 
 // LEGACY_UNAVAILABLE is the one wording used everywhere a record
@@ -5173,24 +5331,20 @@ function wireDeleteCollection(caseId, cd, root) {
     e.stopPropagation(); // never toggle the card open/closed
 
     const name = cd.original_filename || collectionLabel(cd.collection_id);
-    const lines = [
-      `Delete the entire collection "${name}"?`,
-      "",
-      `Source type:        ${SOURCE_TYPE_LABELS[cd.source_type] || cd.source_type}`,
-      `Discovered files:   ${fmtCount(cd.file_count)}`,
-      `Imported files:     ${fmtCount(cd.imported_file_count)}`,
-      `Events parsed:      ${fmtCount(cd.parsed_event_count)}`,
-      "",
-      "This permanently removes the collection, its complete discovered inventory,",
-      "and the events imported from it. Events also observed in another collection",
-      "are kept and re-attributed to that collection.",
-      "",
-      "Findings, correlations, investigations and ATT&CK results will become stale",
-      "and must be recalculated by re-running analysis.",
-      "",
-      "This cannot be undone.",
-    ];
-    if (!window.confirm(lines.join("\n"))) return;
+    // The same modal and the same warning as deleting individual files:
+    // deleting a collection IS deleting evidence, and the consequence
+    // for the analysis is identical.
+    const ok = await confirmDestructive({
+      title: "Delete Evidence?",
+      message: EVIDENCE_DELETION_WARNING,
+      details:
+        `Collection "${name}" (${SOURCE_TYPE_LABELS[cd.source_type] || cd.source_type}): ` +
+        `${fmtCount(cd.file_count)} discovered file(s), ${fmtCount(cd.imported_file_count)} imported, ` +
+        `${fmtCount(cd.parsed_event_count)} event(s) parsed. Events also observed in another ` +
+        `collection are kept and re-attributed to that collection.`,
+      confirmLabel: "Delete Evidence",
+    });
+    if (!ok) return;
 
     const original = btn.textContent;
     btn.disabled = true;
@@ -5839,6 +5993,9 @@ const CORR_LABELS = {
   // process_chain/entity/temporal.
   credential_chain: "Credential chain",
   service_chain: "Service chain",
+  // Phase 14: the same web host seen in two independent browser
+  // artifacts. A link between sources, not a narrative chain.
+  web_resource: "Web resource correlation",
 };
 
 // renderCorrelationsTab splits correlations into activity chains (a
@@ -6375,23 +6532,80 @@ function wireEvidenceFileSelection(caseId, container) {
 // confirmAndDeleteEvidence requires explicit confirmation (see
 // requirement 13) and explains that derived analysis will need to be
 // recalculated, before permanently removing one or more evidence files.
+// confirmDestructive shows a modal and resolves true only if the user
+// chooses the confirming action.
+//
+// window.confirm cannot express this: its buttons are OK/Cancel and
+// cannot be named, so a destructive action would be confirmed by a
+// button that does not say what it does. A native <dialog> gives the
+// focus trap, the Escape key and the backdrop for free, so the only
+// thing built here is the content and the promise.
+//
+// details is optional supplementary text -- counts, names -- shown under
+// the main message in a quieter style. The main message is never
+// abbreviated to make room for it.
+function confirmDestructive({ title, message, details, confirmLabel, cancelLabel = "Cancel" }) {
+  return new Promise((resolve) => {
+    const dlg = document.createElement("dialog");
+    dlg.className = "confirm-modal";
+    dlg.setAttribute("aria-labelledby", "confirm-modal-title");
+    dlg.innerHTML = `
+      <h2 id="confirm-modal-title">${esc(title)}</h2>
+      <p class="confirm-modal-message">${esc(message)}</p>
+      ${details ? `<div class="confirm-modal-details">${esc(details)}</div>` : ""}
+      <div class="confirm-modal-actions">
+        <button type="button" class="secondary" data-choice="cancel">${esc(cancelLabel)}</button>
+        <button type="button" class="danger" data-choice="confirm">${esc(confirmLabel)}</button>
+      </div>`;
+
+    let settled = false;
+    const finish = (ok) => {
+      if (settled) return;
+      settled = true;
+      dlg.close();
+      dlg.remove();
+      resolve(ok);
+    };
+    dlg.addEventListener("click", (e) => {
+      const choice = e.target.closest("[data-choice]");
+      if (choice) finish(choice.dataset.choice === "confirm");
+    });
+    // Escape and the backdrop both mean cancel -- the safe outcome is
+    // the one a stray keypress lands on.
+    dlg.addEventListener("cancel", (e) => {
+      e.preventDefault();
+      finish(false);
+    });
+
+    document.body.appendChild(dlg);
+    dlg.showModal();
+    // Focus starts on Cancel, so Enter never confirms a deletion the
+    // user has not read.
+    dlg.querySelector('[data-choice="cancel"]').focus();
+  });
+}
+
+// EVIDENCE_DELETION_WARNING is the one wording every evidence-deletion
+// path uses. Deleting evidence does not merely make analysis stale -- it
+// INVALIDATES it, because the results were derived from evidence that
+// will no longer exist, and the backend removes them from every current
+// view (see Service.invalidateAnalysisAfterDeletion).
+const EVIDENCE_DELETION_WARNING =
+  "Deleting this evidence will invalidate the current analysis results derived from it, " +
+  "including findings, investigations, correlations, activity chains, and ATT&CK mappings. " +
+  "This action cannot be undone.";
+
 async function confirmAndDeleteEvidence(caseId, ids) {
-  const title = ids.length === 1 ? "Delete 1 evidence file?" : `Delete ${fmtCount(ids.length)} evidence files?`;
-  const lines = [
-    title,
-    "",
-    `Files selected:  ${fmtCount(ids.length)}`,
-    "",
-    "This permanently removes the selected evidence. Events observed only in",
-    "these files are removed with them; events also observed elsewhere are kept",
-    "and re-attributed to the collection that still holds them.",
-    "",
-    "Findings, correlations, investigations and ATT&CK results will become stale",
-    "and must be recalculated by re-running analysis.",
-    "",
-    "This cannot be undone.",
-  ];
-  if (!window.confirm(lines.join("\n"))) return;
+  const ok = await confirmDestructive({
+    title: "Delete Evidence?",
+    message: EVIDENCE_DELETION_WARNING,
+    details:
+      `${fmtCount(ids.length)} evidence file(s) selected. Events observed only in these files are ` +
+      `removed with them; events also observed elsewhere are kept and re-attributed to the ` +
+      `collection that still holds them.`,
+    confirmLabel: "Delete Evidence",
+  });
+  if (!ok) return;
   try {
     if (ids.length === 1) {
       await api(`/cases/${caseId}/evidence/${ids[0]}`, { method: "DELETE" });

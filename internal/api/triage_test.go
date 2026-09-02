@@ -25,8 +25,12 @@ func mixedCatalog() map[string][]byte {
 		// FAILURE, which is not the same thing as unsupported.
 		"Windows/System32/config/COMPONENTS": regfgen.Truncate(persistenceHive(), 2200),
 		// Recognized artifact classes Tracefall has no parser for.
+		// $Secure, not $MFT or $LogFile: the master file table, the
+		// change journal AND the transaction log are all parsed now, so
+		// none of them is an example of a recognized-but-unsupported
+		// artifact. The security descriptor store still is.
 		"Windows/Prefetch/CMD.EXE-A1B2C3D4.pf": []byte("MAM\x04synthetic"),
-		"C/$MFT":                               []byte("FILE0synthetic"),
+		"Windows/System32/sru/SRUDB.dat":       []byte("NTFS security descriptor store, synthetic"),
 		// Noise.
 		"Windows/Fonts/segoeui.ttf": []byte("synthetic font"),
 	}
@@ -67,7 +71,7 @@ func TestDiscovery_ClassifiesAndCountsTheWholeCatalog(t *testing.T) {
 		t.Errorf("discovered = %d, want 6", cov.Discovered)
 	}
 	// Security.evtx, NTUSER.DAT, COMPONENTS and (since Phase 10A) the
-	// .pf are all claimed by a parser; $MFT and the font are not.
+	// .pf are all claimed by a parser; SRUDB.dat and the font are not.
 	if cov.Supported != 4 || cov.Unsupported != 2 {
 		t.Errorf("supported/unsupported = %d/%d, want 4/2", cov.Supported, cov.Unsupported)
 	}
@@ -110,26 +114,26 @@ func TestDiscovery_UnsupportedHighPriorityArtifactIsVisible(t *testing.T) {
 	c := mustCreateCase(t, mux, "Unsupported visibility")
 	disc := discoverBinaryDir(t, mux, c.ID, mixedCatalog())
 
-	mft, ok := sourceFileByPath(disc.SourceFiles, "C/$MFT")
+	srum, ok := sourceFileByPath(disc.SourceFiles, "Windows/System32/sru/SRUDB.dat")
 	if !ok {
-		t.Fatal("$MFT was not cataloged at all")
+		t.Fatal("SRUDB.dat was not cataloged at all")
 	}
-	if mft.Supported {
-		t.Error("$MFT reported as supported")
+	if srum.Supported {
+		t.Error("SRUDB.dat reported as supported")
 	}
-	if mft.Priority != "high" {
-		t.Errorf("priority = %q, want high -- an unsupported artifact still has forensic value", mft.Priority)
+	if srum.Priority != "high" {
+		t.Errorf("priority = %q, want high -- an unsupported artifact still has forensic value", srum.Priority)
 	}
-	if mft.ImportStatus != model.SourceFileUnsupported {
-		t.Errorf("import status = %q, want unsupported", mft.ImportStatus)
+	if srum.ImportStatus != model.SourceFileUnsupported {
+		t.Errorf("import status = %q, want unsupported", srum.ImportStatus)
 	}
-	if mft.ImportStatus == model.SourceFileFailed {
+	if srum.ImportStatus == model.SourceFileFailed {
 		t.Error("an unsupported file must never be reported as a parse failure")
 	}
-	if mft.UnsupportedReason == "" {
-		t.Error("no reason given for why $MFT cannot be parsed")
+	if srum.UnsupportedReason == "" {
+		t.Error("no reason given for why SRUDB.dat cannot be parsed")
 	}
-	if mft.Recommended {
+	if srum.Recommended {
 		t.Error("an unimportable file must not be recommended")
 	}
 }
@@ -416,7 +420,7 @@ func TestImport_ParseFailureIsDistinctFromUnsupported(t *testing.T) {
 
 	// The genuinely unsupported files must NOT appear as parse failures.
 	for _, f := range res.ParseFailures {
-		if f.Filename == "$MFT" || f.Filename == "segoeui.ttf" {
+		if f.Filename == "SRUDB.dat" || f.Filename == "segoeui.ttf" {
 			t.Errorf("unsupported file %q reported as a parse failure", f.Filename)
 		}
 	}
@@ -451,7 +455,7 @@ func TestImport_ParseFailureIsDistinctFromUnsupported(t *testing.T) {
 			if s.ImportStatus != model.SourceFileImported {
 				t.Errorf("%s status = %q, want imported", s.OriginalFilename, s.ImportStatus)
 			}
-		case "$MFT", "segoeui.ttf":
+		case "SRUDB.dat", "segoeui.ttf":
 			if s.ImportStatus != model.SourceFileUnsupported {
 				t.Errorf("%s status = %q, want unsupported", s.OriginalFilename, s.ImportStatus)
 			}

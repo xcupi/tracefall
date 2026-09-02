@@ -19,21 +19,33 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
+	"strings"
 
 	"github.com/google/uuid"
 
+	"tracefall/internal/browsercache"
 	"tracefall/internal/model"
 	"tracefall/internal/parsers"
+	browsercacheparser "tracefall/internal/parsers/browsercache"
+	browsercacheindexparser "tracefall/internal/parsers/browsercacheindex"
 	"tracefall/internal/parsers/browserhistory"
 	evtxnative "tracefall/internal/parsers/evtx"
 	"tracefall/internal/parsers/evtxcsv"
+	jumplistparser "tracefall/internal/parsers/jumplist"
+	lnkparser "tracefall/internal/parsers/lnk"
+	"tracefall/internal/parsers/logfile"
+	"tracefall/internal/parsers/mft"
 	"tracefall/internal/parsers/pecmd"
 	"tracefall/internal/parsers/prefetchraw"
 	"tracefall/internal/parsers/pshistory"
 	"tracefall/internal/parsers/recmd"
+	recyclebinparser "tracefall/internal/parsers/recyclebin"
+	recyclebincontentparser "tracefall/internal/parsers/recyclebincontent"
 	"tracefall/internal/parsers/registry"
 	"tracefall/internal/parsers/scheduledtasks"
+	"tracefall/internal/parsers/usnjrnl"
 )
 
 // Registry is the ordered list of known artifact parsers. Adding support
@@ -60,6 +72,44 @@ func Registry() []parsers.ArtifactParser {
 		prefetchraw.New(),
 		pshistory.New(),
 		browserhistory.New(),
+		// Phase 15: NTFS $MFT. Ordered last among the native parsers
+		// because its content detector is the broadest -- it must not
+		// pre-empt a more specific match on a file that merely happens
+		// to begin with a plausible record header.
+		mft.New(),
+		// Phase 16: the other two NTFS metadata structures. Each has a
+		// reserved name and a structural sniff of its own, so none of
+		// the three can claim another's file.
+		usnjrnl.New(),
+		logfile.New(),
+		// Phase 14: browser HTTP cache. Registered LAST because these
+		// two detect almost entirely by content -- they must never
+		// pre-empt a parser whose filename match is more specific.
+		//
+		// The container parser comes FIRST of the two: a blockfile index
+		// and a cache1 map describe a cache rather than holding an
+		// entry, and only it accepts them. The entry parser rejects both
+		// by name in its own error, so the order is belt and braces
+		// rather than a dependency.
+		browsercacheindexparser.New(),
+		browsercacheparser.New(),
+		// Phase 17: shortcuts and Recycle Bin metadata. Both detect
+		// purely by content -- neither claims a filename -- so their
+		// position here only guarantees they never pre-empt a parser
+		// whose match is more specific.
+		lnkparser.New(),
+		recyclebinparser.New(),
+		// The $R half of a Recycle Bin pair. Registered AFTER the $I
+		// parser: $I is content-detected and $R is claimed by name, so
+		// the more specific check runs first and a mislabelled file
+		// cannot be taken for the wrong half of the pair.
+		recyclebincontentparser.New(),
+		// Phase 21: Jump Lists. Registered after the shortcut parser so
+		// a standalone .lnk is never mistaken for a container, and it
+		// detects by container structure as well as by extension, which
+		// is what finds a renamed Jump List.
+		jumplistparser.NewAutomatic(),
+		jumplistparser.NewCustom(),
 	}
 }
 
@@ -107,6 +157,7 @@ func Discover(root string, registry []parsers.ArtifactParser) ([]DiscoveredFile,
 		// identified by content instead -- a hive copied out of a triage
 		// image may be called anything, and a .evtx extension proves
 		// nothing about what is inside. See parsers.ContentDetector.
+		var recognized string
 		if matched == nil {
 			header := readHeader(path, parsers.SniffLength)
 			if len(header) > 0 {
@@ -115,6 +166,15 @@ func Discover(root string, registry []parsers.ArtifactParser) ([]DiscoveredFile,
 						matched = p
 						break
 					}
+				}
+				// Still unclaimed. Before giving up, ask what the bytes
+				// ARE. A cache directory is full of rankings, payload
+				// blocks, journals and bodies that no parser will ever
+				// claim and that are not broken evidence -- recognizing
+				// each one lets triage explain it instead of reporting
+				// them all identically. See browsercache.RecognizeUnparsed.
+				if matched == nil {
+					recognized = recognizeUnparsed(relPath, header)
 				}
 			}
 		}
@@ -134,6 +194,11 @@ func Discover(root string, registry []parsers.ArtifactParser) ([]DiscoveredFile,
 			df.ArtifactType = matched.ArtifactType()
 			df.Parser = matched.Name()
 			df.Supported = true
+		} else if recognized != "" {
+			// Recognized, deliberately NOT supported: knowing what a file
+			// is does not mean it can be parsed into forensic records,
+			// and the supported count must keep meaning exactly that.
+			df.ArtifactType = recognized
 		}
 		out = append(out, df)
 		return nil
@@ -142,6 +207,78 @@ func Discover(root string, registry []parsers.ArtifactParser) ([]DiscoveredFile,
 		return nil, fmt.Errorf("ingest: discovering %s: %w", root, err)
 	}
 	return out, nil
+}
+
+// recognizeUnparsed maps a structural recognition onto the model's
+// recognition-only artifact types.
+//
+// It runs only for files no parser claimed, and only ever produces types
+// that are never Supported. Nothing here changes what is parsed; it
+// changes what an analyst is told about what is not.
+func recognizeUnparsed(relPath string, header []byte) string {
+	lower := strings.ToLower(relPath)
+	if !browsercache.InCacheDirectory("/" + lower) {
+		return ""
+	}
+	base := path.Base(lower)
+
+	switch r := browsercache.RecognizeUnparsed(base, header); r {
+	case browsercache.RecognizedBlockfileRankings:
+		return model.ArtifactBrowserCacheRankings
+	case browsercache.RecognizedBlockfilePayload:
+		return model.ArtifactBrowserCachePayload
+	case browsercache.RecognizedNone:
+		// fall through to the name-defined classes below
+	default:
+		if r.IsVariant() {
+			return model.ArtifactBrowserCacheVariant
+		}
+		return model.ArtifactBrowserCacheAuxiliary
+	}
+
+	// The bytes settled nothing. Two classes of cache file carry no
+	// signature at all and are identified by the exact filenames their
+	// formats define -- a cached response body, and a cache's own
+	// bookkeeping. Both are checked only INSIDE a cache directory, and
+	// both use exact names rather than patterns, so a file that merely
+	// resembles one elsewhere is never claimed.
+	if isCachedBodyName(base) {
+		return model.ArtifactBrowserCacheBody
+	}
+	if isCacheStateName(base) {
+		return model.ArtifactBrowserCacheState
+	}
+	// Nothing settled it here. Deliberately NOT reporting "unknown":
+	// the capability registry still has path rules for the cache files
+	// that carry no signature at all, and returning a recognition now
+	// would pre-empt them. Its generic fallback is the last word.
+	return ""
+}
+
+// isCachedBodyName matches a Chromium blockfile external body file:
+// f_ followed by exactly six hexadecimal digits, and nothing else.
+func isCachedBodyName(base string) bool {
+	if len(base) != 8 || !strings.HasPrefix(base, "f_") {
+		return false
+	}
+	for i := 2; i < 8; i++ {
+		c := base[i]
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+// isCacheStateName matches the bookkeeping files browsers write beside
+// their caches. Exact names only.
+func isCacheStateName(base string) bool {
+	switch base {
+	case "lock", ".lock", "parent.lock", "journal", "index.log", "index.tmp",
+		"temp-index", "index-dir", "context.tmp", "cache_dir_lock":
+		return true
+	}
+	return false
 }
 
 // ParsedFile is the result of parsing exactly one already-discovered
@@ -189,6 +326,30 @@ func ParseFile(caseID, collectionID, sourceFileID, root, relPath string, p parse
 			raw = append(raw, r)
 		}
 		events[i] = ev
+	}
+
+	// Raw evidence a parser produced BEYOND its events is carried through
+	// rather than discarded.
+	//
+	// The loop above pairs raw[i] to events[i] positionally, which is the
+	// contract Service.deduplicate also relies on. Anything past that
+	// index used to be dropped silently -- which meant a parser's own
+	// analysis report was lost, and a parser that legitimately produces
+	// NO events (internal/parsers/logfile validates the NTFS transaction
+	// log and deliberately emits no timeline entries) had all of its
+	// output discarded.
+	//
+	// These records carry no RawEvidenceID on any event; they belong to
+	// the SOURCE FILE, which is what raw_evidence.source_file_id has
+	// always recorded. Appending them AFTER the paired ones keeps every
+	// index below len(events) exactly where it was, so the positional
+	// contract is untouched.
+	for i := len(events); i < len(parsed.Raw); i++ {
+		r := parsed.Raw[i]
+		r.ID = uuid.NewString()
+		r.CaseID = caseID
+		r.SourceFileID = sourceFileID
+		raw = append(raw, r)
 	}
 	return ParsedFile{Events: events, Raw: raw}, nil
 }

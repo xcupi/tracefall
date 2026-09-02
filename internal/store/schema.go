@@ -221,7 +221,13 @@ CREATE TABLE IF NOT EXISTS analysis_runs (
 	event_count       INTEGER NOT NULL DEFAULT 0,
 	finding_count     INTEGER NOT NULL DEFAULT 0,
 	correlation_count INTEGER NOT NULL DEFAULT 0,
-	error             TEXT NOT NULL DEFAULT ''
+	error             TEXT NOT NULL DEFAULT '',
+	-- A completed run whose evidence was later deleted is INVALIDATED,
+	-- not removed: the row, its counts and the findings it produced are
+	-- all retained for audit, and none of them is ever presented as
+	-- current again. Empty means the run still describes the evidence.
+	invalidated_at      TEXT NOT NULL DEFAULT '',
+	invalidation_reason TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_analysis_runs_case ON analysis_runs(case_id, started_at);
 
@@ -233,7 +239,9 @@ CREATE TABLE IF NOT EXISTS correlations (
 	description   TEXT NOT NULL,
 	event_ids_json TEXT NOT NULL DEFAULT '[]',
 	first_seen    TEXT NOT NULL,
-	last_seen     TEXT NOT NULL
+	last_seen     TEXT NOT NULL,
+	-- The run that produced this correlation, mirroring findings.
+	analysis_run_id TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_correlations_case ON correlations(case_id);
 

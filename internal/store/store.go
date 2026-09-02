@@ -808,6 +808,37 @@ func (s *Store) RepointEventProvenance(eventID, collectionID, sourceFileID, rawE
 // from one source file -- safe once every event/observation that could
 // have referenced it has already been deleted or repointed elsewhere
 // (see Service.deleteSourceFileEvidence, which does so in that order).
+// ListRawEvidenceBySourceFile returns the raw records one evidence file
+// produced, newest-insertion-order, bounded by limit.
+//
+// It exists because a parser may produce records with NO event -- an
+// NTFS $LogFile, a browser-cache container, a Recycle Bin $R file whose
+// content is the evidence itself. Those records were previously reachable
+// only through an event that, by definition, does not exist for them, so
+// a perfectly good forensic record was stored and never shown.
+func (s *Store) ListRawEvidenceBySourceFile(sourceFileID string, limit int) ([]model.RawEvidence, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	rows, err := s.db.Query(
+		`SELECT id, case_id, source_file_id, source_reference, raw
+		 FROM raw_evidence WHERE source_file_id = ? ORDER BY rowid LIMIT ?`, sourceFileID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := make([]model.RawEvidence, 0)
+	for rows.Next() {
+		var r model.RawEvidence
+		if err := rows.Scan(&r.ID, &r.CaseID, &r.SourceFileID, &r.SourceReference, &r.Raw); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
 func (s *Store) DeleteRawEvidenceBySourceFile(sourceFileID string) error {
 	_, err := s.db.Exec(`DELETE FROM raw_evidence WHERE source_file_id = ?`, sourceFileID)
 	return err
@@ -937,6 +968,13 @@ func (s *Store) ReplaceAnalysis(caseID string, findings []model.Finding, correla
 	}
 	defer tx.Rollback()
 
+	// Clears every finding and correlation for the case, invalidated ones
+	// included. Finding and correlation IDs are CONTENT-DERIVED
+	// (model.StableID): the same finding recomputed after a deletion has
+	// the same primary key as the retained one, so old and new rows
+	// cannot coexist. Retaining them would make re-analysis fail on a
+	// key collision -- which is why the retained historical record is
+	// the analysis RUN, not its output. See Store.InvalidateAnalysis.
 	if _, err := tx.Exec(`DELETE FROM findings WHERE case_id = ?`, caseID); err != nil {
 		return fmt.Errorf("clearing prior findings: %w", err)
 	}
@@ -962,15 +1000,16 @@ func (s *Store) ReplaceAnalysis(caseID string, findings []model.Finding, correla
 	}
 
 	corrStmt, err := tx.Prepare(`INSERT INTO correlations
-		(id, case_id, type, title, description, event_ids_json, first_seen, last_seen)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
+		(id, case_id, type, title, description, event_ids_json, first_seen, last_seen, analysis_run_id)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
 	if err != nil {
 		return err
 	}
 	defer corrStmt.Close()
 	for _, c := range correlations {
 		idsJSON, _ := json.Marshal(c.EventIDs)
-		if _, err := corrStmt.Exec(c.ID, c.CaseID, c.Type, c.Title, c.Description, string(idsJSON), fmtTime(c.FirstSeen), fmtTime(c.LastSeen)); err != nil {
+		if _, err := corrStmt.Exec(c.ID, c.CaseID, c.Type, c.Title, c.Description, string(idsJSON),
+			fmtTime(c.FirstSeen), fmtTime(c.LastSeen), c.AnalysisRunID); err != nil {
 			return fmt.Errorf("saving correlation: %w", err)
 		}
 	}
@@ -1026,7 +1065,67 @@ func scanFinding(row interface{ Scan(...any) error }) (model.Finding, error) {
 
 const findingCols = `id, case_id, rule_id, title, severity, confidence, description, supporting_events_json, techniques_json, first_seen, last_seen, created_at, analysis_run_id`
 
+// currentAnalysisFilter excludes rows produced by an invalidated run.
+//
+// InvalidateAnalysis already removes those rows, so in a consistent
+// database this filter matches everything. It is kept as the enforcement
+// point anyway: it makes "no result from an invalidated run is ever
+// current" an invariant of the QUERY rather than of one write path, so a
+// row that survives a partial failure, an older database, or some future
+// code path that forgets, still cannot be presented as a current result.
+//
+// This is the enforcement point for the whole invalidation lifecycle. It
+// lives in the QUERY, not in a caller, because every current view --
+// summary counts, findings, correlations, investigations, activity
+// chains, ATT&CK coverage -- reads through these two list methods. A
+// rule applied anywhere higher could be forgotten by the next view
+// somebody adds, and the failure mode is a case reporting findings for
+// evidence it no longer holds.
+//
+// Legacy rows carrying no run id are excluded once ANY run for the case
+// has been invalidated. Such a row predates run attribution, so it
+// cannot be tied to a surviving run -- and leaving it visible would be
+// exactly the orphaned "current" finding this exists to prevent.
+const currentAnalysisFilter = `
+	AND analysis_run_id NOT IN (
+		SELECT id FROM analysis_runs WHERE case_id = ? AND status = 'invalidated'
+	)
+	AND NOT (
+		analysis_run_id = '' AND EXISTS (
+			SELECT 1 FROM analysis_runs WHERE case_id = ? AND status = 'invalidated'
+		)
+	)`
+
+// ListFindings returns a case's CURRENT findings: those still describing
+// the evidence the case holds. Findings from an invalidated run are
+// retained in the database and excluded here -- see
+// ListFindingsIncludingInvalidated for the audit view.
 func (s *Store) ListFindings(caseID string) ([]model.Finding, error) {
+	rows, err := s.db.Query(`SELECT `+findingCols+` FROM findings WHERE case_id = ?`+
+		currentAnalysisFilter+` ORDER BY first_seen ASC`, caseID, caseID, caseID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []model.Finding
+	for rows.Next() {
+		f, err := scanFinding(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, f)
+	}
+	return out, rows.Err()
+}
+
+// ListFindingsIncludingInvalidated returns every finding a case has ever
+// retained, including those from invalidated runs.
+//
+// For audit and export only. Nothing that presents CURRENT results may
+// call it: the whole point of the distinction is that an invalidated
+// finding is history, not a result.
+func (s *Store) ListFindingsIncludingInvalidated(caseID string) ([]model.Finding, error) {
 	rows, err := s.db.Query(`SELECT `+findingCols+` FROM findings WHERE case_id = ? ORDER BY first_seen ASC`, caseID)
 	if err != nil {
 		return nil, err
@@ -1075,19 +1174,16 @@ func (s *Store) SaveCorrelations(correlations []model.Correlation) error {
 	return tx.Commit()
 }
 
-func (s *Store) ListCorrelations(caseID string) ([]model.Correlation, error) {
-	rows, err := s.db.Query(`SELECT id, case_id, type, title, description, event_ids_json, first_seen, last_seen
-		FROM correlations WHERE case_id = ? ORDER BY first_seen ASC`, caseID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
+const correlationCols = `id, case_id, type, title, description, event_ids_json, first_seen, last_seen, analysis_run_id`
 
+func scanCorrelations(rows *sql.Rows) ([]model.Correlation, error) {
+	defer rows.Close()
 	var out []model.Correlation
 	for rows.Next() {
 		var c model.Correlation
 		var idsJSON, first, last string
-		if err := rows.Scan(&c.ID, &c.CaseID, &c.Type, &c.Title, &c.Description, &idsJSON, &first, &last); err != nil {
+		if err := rows.Scan(&c.ID, &c.CaseID, &c.Type, &c.Title, &c.Description, &idsJSON,
+			&first, &last, &c.AnalysisRunID); err != nil {
 			return nil, err
 		}
 		_ = json.Unmarshal([]byte(idsJSON), &c.EventIDs)
@@ -1095,6 +1191,125 @@ func (s *Store) ListCorrelations(caseID string) ([]model.Correlation, error) {
 		out = append(out, c)
 	}
 	return out, rows.Err()
+}
+
+// ListCorrelations returns a case's CURRENT correlations. Correlations
+// from an invalidated run are retained and excluded, exactly as findings
+// are -- a correlation describes a set of events, and when those events
+// are deleted it no longer describes anything the case holds.
+func (s *Store) ListCorrelations(caseID string) ([]model.Correlation, error) {
+	rows, err := s.db.Query(`SELECT `+correlationCols+` FROM correlations WHERE case_id = ?`+
+		currentAnalysisFilter+` ORDER BY first_seen ASC`, caseID, caseID, caseID)
+	if err != nil {
+		return nil, err
+	}
+	return scanCorrelations(rows)
+}
+
+// ListCorrelationsIncludingInvalidated is the audit counterpart of
+// ListFindingsIncludingInvalidated.
+func (s *Store) ListCorrelationsIncludingInvalidated(caseID string) ([]model.Correlation, error) {
+	rows, err := s.db.Query(`SELECT `+correlationCols+` FROM correlations WHERE case_id = ? ORDER BY first_seen ASC`, caseID)
+	if err != nil {
+		return nil, err
+	}
+	return scanCorrelations(rows)
+}
+
+// InvalidateAnalysis marks a case's completed analysis runs as no longer
+// describing its evidence, and reports what stopped being current.
+//
+// Nothing is deleted. The runs, their findings and their correlations
+// are all retained: an investigator must be able to see that analysis
+// WAS run, what it produced, and that the evidence behind it was
+// subsequently removed. What changes is that none of it is returned by a
+// current-results query ever again.
+//
+// Idempotent: a run already invalidated keeps its original timestamp and
+// reason, because the first invalidation is the one that describes what
+// happened.
+func (s *Store) InvalidateAnalysis(caseID string, at time.Time, reason string) (runs, findings, correlations int, err error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	defer tx.Rollback()
+
+	// Count first: after the update these rows are no longer current, so
+	// the counts have to be taken while they still are.
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM analysis_runs WHERE case_id = ? AND status = ?`,
+		caseID, model.AnalysisRunCompleted).Scan(&runs); err != nil {
+		return 0, 0, 0, err
+	}
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM findings WHERE case_id = ?`, caseID).Scan(&findings); err != nil {
+		return 0, 0, 0, err
+	}
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM correlations WHERE case_id = ?`, caseID).Scan(&correlations); err != nil {
+		return 0, 0, 0, err
+	}
+
+	if _, err := tx.Exec(`UPDATE analysis_runs
+		SET status = ?, invalidated_at = ?, invalidation_reason = ?
+		WHERE case_id = ? AND status = ?`,
+		model.AnalysisRunInvalidated, fmtTime(at), reason, caseID, model.AnalysisRunCompleted); err != nil {
+		return 0, 0, 0, fmt.Errorf("invalidating analysis runs: %w", err)
+	}
+
+	// The RUN is the retained historical record; its output is removed.
+	//
+	// This is the one place the "retain everything" instinct has to give
+	// way to the schema: finding and correlation IDs are content-derived
+	// (model.StableID), so a finding recomputed after the deletion
+	// collides with the retained copy of itself on the primary key, and
+	// re-analysis fails outright. Keeping the rows would therefore trade
+	// a working re-analysis for an audit trail -- and the audit trail is
+	// not lost: the invalidated run row records which run it was, when
+	// it ran, on which build, how many findings and correlations it
+	// produced, when it was invalidated and why. That is what
+	// ListAnalysisRuns and the case's audit log both surface.
+	if _, err := tx.Exec(`DELETE FROM findings WHERE case_id = ?`, caseID); err != nil {
+		return 0, 0, 0, fmt.Errorf("removing invalidated findings: %w", err)
+	}
+	if _, err := tx.Exec(`DELETE FROM correlations WHERE case_id = ?`, caseID); err != nil {
+		return 0, 0, 0, fmt.Errorf("removing invalidated correlations: %w", err)
+	}
+
+	// A case whose analysis has been invalidated has no valid analysis
+	// for its current evidence, so it is no longer "analyzed" and has no
+	// analysis timestamp. The run history retains when it happened; the
+	// case must not keep claiming a current result it does not have.
+	if _, err := tx.Exec(`UPDATE cases SET analyzed_at = '', updated_at = ? WHERE id = ?`,
+		fmtTime(at), caseID); err != nil {
+		return 0, 0, 0, fmt.Errorf("clearing case analysis timestamp: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return 0, 0, 0, err
+	}
+	return runs, findings, correlations, nil
+}
+
+// AnalysisInvalidatedWithoutReplacement reports the specific state that
+// makes a case "not analyzed" rather than "never analyzed": its analysis
+// was invalidated by an evidence deletion and nothing has replaced it.
+//
+// It is deliberately NOT "has this case ever had an invalidation". An
+// invalidated run is retained forever, so that question stays true for
+// the rest of the case's life -- and a case re-analyzed after a deletion
+// has a perfectly current analysis that must not be labelled otherwise.
+// Invalidation marks every completed run, so "an invalidated run exists
+// and no completed one does" is exactly the state with no valid result.
+func (s *Store) AnalysisInvalidatedWithoutReplacement(caseID string) (bool, error) {
+	var invalidated, completed int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM analysis_runs WHERE case_id = ? AND status = ?`,
+		caseID, model.AnalysisRunInvalidated).Scan(&invalidated); err != nil {
+		return false, err
+	}
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM analysis_runs WHERE case_id = ? AND status = ?`,
+		caseID, model.AnalysisRunCompleted).Scan(&completed); err != nil {
+		return false, err
+	}
+	return invalidated > 0 && completed == 0, nil
 }
 
 // ---------- Case deletion ----------
@@ -1163,13 +1378,14 @@ func (s *Store) DeleteCase(caseID string) error {
 // stays fixed even though the findings it produced can be replaced by a
 // later run.
 
-const analysisRunCols = `id, case_id, started_at, completed_at, status, tool_version, event_count, finding_count, correlation_count, error`
+const analysisRunCols = `id, case_id, started_at, completed_at, status, tool_version, event_count, finding_count, correlation_count, error, invalidated_at, invalidation_reason`
 
 func scanAnalysisRun(row interface{ Scan(...any) error }) (model.AnalysisRun, error) {
 	var r model.AnalysisRun
-	var started, completed string
+	var started, completed, invalidated string
 	err := row.Scan(&r.ID, &r.CaseID, &started, &completed, &r.Status, &r.ToolVersion,
-		&r.EventCount, &r.FindingCount, &r.CorrelationCount, &r.Error)
+		&r.EventCount, &r.FindingCount, &r.CorrelationCount, &r.Error,
+		&invalidated, &r.InvalidationReason)
 	if err != nil {
 		return model.AnalysisRun{}, err
 	}
@@ -1181,15 +1397,20 @@ func scanAnalysisRun(row interface{ Scan(...any) error }) (model.AnalysisRun, er
 		t := parseTime(completed)
 		r.CompletedAt = &t
 	}
+	if invalidated != "" {
+		t := parseTime(invalidated)
+		r.InvalidatedAt = &t
+	}
 	return r, nil
 }
 
 // CreateAnalysisRun records a run that has just started.
 func (s *Store) CreateAnalysisRun(r model.AnalysisRun) error {
 	_, err := s.db.Exec(`INSERT INTO analysis_runs (`+analysisRunCols+`)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		r.ID, r.CaseID, fmtTime(r.StartedAt), fmtOptionalTime(r.CompletedAt), r.Status, r.ToolVersion,
-		r.EventCount, r.FindingCount, r.CorrelationCount, r.Error)
+		r.EventCount, r.FindingCount, r.CorrelationCount, r.Error,
+		fmtOptionalTime(r.InvalidatedAt), r.InvalidationReason)
 	return err
 }
 

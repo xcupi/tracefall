@@ -509,12 +509,11 @@ func TestNative_CorruptArtifactDoesNotBreakTheImport(t *testing.T) {
 // catalog.
 func importAllFrom(t *testing.T, mux http.Handler, caseID string, disc DiscoverResult) ImportResult {
 	t.Helper()
-	var ids []string
-	for _, sf := range disc.SourceFiles {
-		if sf.Supported && sf.ImportStatus == model.SourceFileDiscovered {
-			ids = append(ids, sf.ID)
-		}
-	}
+	// The ids endpoint, not disc.SourceFiles: discovery returns only the
+	// FIRST PAGE of the catalog, so selecting from it would silently cap
+	// every "import everything" at one page and leave later files
+	// untouched while the test still looked like it imported the lot.
+	ids := getEvidenceIDs(t, mux, caseID, disc.Collection.ID, nil)
 	if len(ids) == 0 {
 		t.Fatal("nothing selectable in the catalog")
 	}

@@ -38,6 +38,48 @@ contains far more files than Tracefall has parsers for.
 | `internal/parsers/pecmd` | Prefetch | PECmd CSV | same |
 | `internal/parsers/recmd` | Registry Run keys | RECmd batch CSV | same |
 | `internal/parsers/scheduledtasks` | Scheduled Tasks | raw Task Scheduler XML (UTF-16LE) | KAPE collects this directly; simple enough to parse natively |
+| `internal/parsers/browsercache` | Browser cache entries | Chromium Simple Cache and blockfile `data_1`; Firefox cache2 and cache1 `_CACHE_00x_` | four generations, one artifact type -- the claim is identical, the layout is not |
+| `internal/parsers/browsercacheindex` | Browser cache containers | Chromium blockfile `index`; Firefox `_CACHE_MAP_` | a *different artifact type*: containers hold no cache keys, so they yield no URLs and no events |
+| `internal/parsers/lnk` | Windows shortcuts | Shell Link Binary File Format | one event per recorded target timestamp; content-only detection |
+| `internal/parsers/recyclebin` | Recycle Bin `$I` records | versions 1 and 2 | content-only detection; the paired `$R` file is stat'd, never read |
+| `internal/parsers/recyclebincontent` | Recycle Bin `$R` content | the deleted file's bytes | the only parser that reads a SECOND file: a `$R` is meaningless without its `$I` |
+| `internal/parsers/jumplist` | Jump Lists | OLE compound files and concatenated shell links | TWO parsers in one package, over `internal/olecf` and `internal/shelllink` -- nothing about either format is reimplemented |
+
+**Two parsers must not share a `Name()`.** Import re-resolves a file's
+parser by name (`api.findParserFor`), so two parsers reporting the same
+name send every file to whichever registered first. The Jump List
+parsers learned this the hard way: every Custom Destinations file was
+handed to the Automatic parser and refused for having the wrong
+container.
+
+**`FilePath` is part of an event's dedup identity**
+(`model.Event.ComputeDedupHash`). A parser that emits several events per
+file must put something DISTINGUISHING there -- the target, not the
+artifact -- or two events sharing a timestamp will collapse into one and
+lose evidence.
+
+Those last two are the reference for three patterns worth copying:
+
+**One file, many events.** `browsercache` returns one `model.Event` per
+record found in a `data_1` or `_CACHE_00x_` file, plus a single
+`browsercache:parse-report` raw record carrying blocks scanned, entries
+emitted, and entries skipped by reason. A parse report is how a
+zero-entry file stays distinguishable from a failed one -- ingestion
+carries raw records that have no matching event, so a report survives
+even when the file produced nothing.
+
+**Two parsers, two artifact types, one reader package.** `ArtifactType()`
+returns a single constant, so evidence that deserves its own capability
+row needs its own parser. Both of these are thin wrappers over
+`internal/browsercache`; the format knowledge lives in one place and
+neither parser can claim the other's file.
+
+**Filename detection, when and only when the format leaves no choice.**
+`browsercache.Detect` matches exactly three names -- `_CACHE_001_`,
+`_CACHE_002_`, `_CACHE_003_` -- because those files open with a 4096-byte
+allocation bitmap and put no signature in the 512-byte sniff window.
+Everything else it reads is content-detected. If you find yourself
+matching a name, say in a comment why the structure could not be used.
 
 `evtxcsv` is the most instructive example of the "one parser, several
 event types" pattern: EvtxECmd's CSV shape is identical regardless of

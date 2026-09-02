@@ -19,6 +19,11 @@
 //   - service_chain (Phase 4): a service installation into the service's
 //     process actually starting, into any network connection that
 //     process made. See service_chain.go.
+//   - web_resource (Phase 14): the same web host observed in two
+//     independent browser artifacts -- a recorded visit in browser
+//     history and a stored response in the browser cache. See
+//     web_resource.go, which is explicit that the two make different
+//     claims and that cache is not evidence of navigation.
 //
 // Correlation is independent of internal/detect: it runs over the same
 // normalized events and does not require or depend on findings, so it
@@ -49,6 +54,7 @@ func Run(caseID string, events []model.Event) []model.Correlation {
 	out = append(out, BuildActivityChains(caseID, events)...)
 	out = append(out, BuildCredentialChains(caseID, events)...)
 	out = append(out, BuildServiceChains(caseID, events)...)
+	out = append(out, BuildWebResourceCorrelations(caseID, events)...)
 
 	for i := range out {
 		out[i].CaseID = caseID

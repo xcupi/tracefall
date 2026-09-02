@@ -38,6 +38,7 @@ import (
 	"tracefall/internal/ad1"
 	"tracefall/internal/archive"
 	"tracefall/internal/attck"
+	"tracefall/internal/browsercache"
 	"tracefall/internal/casefiles"
 	"tracefall/internal/correlate"
 	"tracefall/internal/detect"
@@ -45,6 +46,7 @@ import (
 	"tracefall/internal/ingest"
 	"tracefall/internal/investigate"
 	"tracefall/internal/model"
+	"tracefall/internal/ntfs"
 	"tracefall/internal/parsers"
 	"tracefall/internal/parsers/browserhistory"
 	"tracefall/internal/parsers/pshistory"
@@ -326,6 +328,16 @@ type Summary struct {
 	// extra store cost.
 	Investigations              int            `json:"investigations"`
 	InvestigationSeverityCounts map[string]int `json:"investigation_severity_counts"`
+	// AnalysisInvalidated reports that this case retains analysis whose
+	// evidence was deleted.
+	//
+	// It exists to separate two states that every count above renders
+	// identically as zero: a case that has never been analyzed, and one
+	// that WAS analyzed and whose results stopped being current when its
+	// evidence went. Calling the second "never analyzed" would be false,
+	// and calling it "stale" would be worse -- stale means results still
+	// describe evidence that exists.
+	AnalysisInvalidated bool `json:"analysis_invalidated"`
 }
 
 func (s *Service) CaseSummary(id string) (Summary, error) {
@@ -365,6 +377,11 @@ func (s *Service) CaseSummary(id string) (Summary, error) {
 		}
 	}
 
+	invalidated, err := s.store.AnalysisInvalidatedWithoutReplacement(id)
+	if err != nil {
+		return Summary{}, err
+	}
+
 	investigations := investigate.Run(id, events, findings, correlations)
 	invSevCounts := map[string]int{model.SeverityCritical: 0, model.SeverityHigh: 0, model.SeverityMedium: 0, model.SeverityLow: 0}
 	for _, inv := range investigations {
@@ -382,6 +399,7 @@ func (s *Service) CaseSummary(id string) (Summary, error) {
 		TechniqueCount:              len(techniques),
 		Investigations:              len(investigations),
 		InvestigationSeverityCounts: invSevCounts,
+		AnalysisInvalidated:         invalidated,
 	}, nil
 }
 
@@ -1021,14 +1039,27 @@ func (s *Service) caseHasAnalyzableHistory(caseID string) (bool, error) {
 	if len(collections) > 0 {
 		return true, nil
 	}
-	findings, err := s.store.ListFindings(caseID)
+	// HISTORY views, deliberately. This asks "did this case ever hold
+	// analyzable evidence?", and evidence deletion invalidates the
+	// current results without erasing the fact that they existed. Asking
+	// the current views would answer "no" for exactly the case this
+	// check exists to allow: one whose evidence was just deleted and
+	// which now needs a re-analysis to produce its empty snapshot.
+	runs, err := s.store.ListAnalysisRuns(caseID)
+	if err != nil {
+		return false, err
+	}
+	if len(runs) > 0 {
+		return true, nil
+	}
+	findings, err := s.store.ListFindingsIncludingInvalidated(caseID)
 	if err != nil {
 		return false, err
 	}
 	if len(findings) > 0 {
 		return true, nil
 	}
-	correlations, err := s.store.ListCorrelations(caseID)
+	correlations, err := s.store.ListCorrelationsIncludingInvalidated(caseID)
 	if err != nil {
 		return false, err
 	}
@@ -1595,6 +1626,9 @@ type DeletedEvidenceResult struct {
 	EventsRemoved      int          `json:"events_removed"`  // events with no remaining observation -- deleted entirely
 	EventsRetained     int          `json:"events_retained"` // events that lost this observation but survive via another
 	Skipped            []ImportSkip `json:"skipped,omitempty"`
+	// AnalysisInvalidated reports the analysis this deletion stopped
+	// being current, if any. Nil when the case had never been analyzed.
+	AnalysisInvalidated *AnalysisInvalidation `json:"analysis_invalidated,omitempty"`
 }
 
 // DeletedCollectionResult summarizes a collection deletion.
@@ -1614,6 +1648,25 @@ type DeletedCollectionResult struct {
 	// AnalysisStale reports that derived results no longer describe the
 	// current evidence and the case needs re-analysis.
 	AnalysisStale bool `json:"analysis_stale"`
+	// AnalysisInvalidated reports what stopped being current because
+	// this deletion removed the evidence it was derived from. The
+	// records themselves are retained as history; see
+	// Service.invalidateAnalysisAfterDeletion.
+	AnalysisInvalidated *AnalysisInvalidation `json:"analysis_invalidated,omitempty"`
+}
+
+// AnalysisInvalidation reports an analysis that stopped describing a
+// case because the evidence behind it was deleted.
+//
+// It names counts rather than a boolean because an investigator needs to
+// know the SIZE of what was invalidated: "1,520 findings are no longer
+// current" is a materially different message from "3 are".
+type AnalysisInvalidation struct {
+	Runs         int `json:"runs"`
+	Findings     int `json:"findings"`
+	Correlations int `json:"correlations"`
+	// Reason is the same sentence written onto every invalidated run.
+	Reason string `json:"reason"`
 }
 
 // DeleteCollection permanently removes an entire evidence collection.
@@ -1690,6 +1743,18 @@ func (s *Service) DeleteCollection(caseID, collectionID string) (DeletedCollecti
 	}
 
 	res.AnalysisStale = true
+	if len(ids) == 0 {
+		// A collection with no live files still removes evidence from the
+		// case, so any analysis that included it is no longer current.
+		// The delegated DeleteSourceFiles call above never ran, so the
+		// invalidation is done here.
+		if inv, err := s.invalidateAnalysisAfterDeletion(caseID,
+			"An evidence collection was deleted from this case."); err != nil {
+			return DeletedCollectionResult{}, err
+		} else {
+			res.AnalysisInvalidated = inv
+		}
+	}
 	s.audit(caseID, model.AuditEvidenceDeleted, model.TargetCollection, collectionID,
 		fmt.Sprintf("Collection %q deleted: %d discovered file(s), %d imported, %d event(s) removed, %d retained via another collection",
 			label, discovered, imported, res.EventsRemoved, res.EventsRetained))
@@ -1782,6 +1847,18 @@ func (s *Service) DeleteSourceFiles(caseID string, sourceFileIDs []string) (Dele
 	}
 
 	if len(res.DeletedSourceFiles) > 0 {
+		// Evidence changed, so any analysis derived from it stopped
+		// describing this case. This MUST happen before the status
+		// update below: the case's analysis timestamp is cleared as part
+		// of it, and the two together are what make the case report "not
+		// analyzed" instead of "stale".
+		inv, err := s.invalidateAnalysisAfterDeletion(caseID,
+			fmt.Sprintf("%d evidence file(s) were deleted from this case.", len(res.DeletedSourceFiles)))
+		if err != nil {
+			return DeletedEvidenceResult{}, err
+		}
+		res.AnalysisInvalidated = inv
+
 		remaining, err := s.store.ListEvents(caseID)
 		if err != nil {
 			return DeletedEvidenceResult{}, fmt.Errorf("checking remaining events: %w", err)
@@ -1800,6 +1877,46 @@ func (s *Service) DeleteSourceFiles(caseID string, sourceFileIDs []string) (Dele
 				len(res.DeletedSourceFiles), res.EventsRemoved, res.EventsRetained))
 	}
 	return res, nil
+}
+
+// invalidateAnalysisAfterDeletion is the lifecycle rule that stops
+// deleted evidence from leaving live analysis behind it.
+//
+// # Why the whole run, and not just the affected findings
+//
+// A finding could be checked against its own supporting events, and the
+// query layer does exactly that as a backstop. But correlations,
+// activity chains, investigations and ATT&CK coverage are derived from
+// the event set AS A WHOLE: a temporal cluster computed over 2,000
+// events does not become "partly right" when 400 of them are deleted,
+// and an investigation assembled from findings and correlations is only
+// as valid as its inputs. So the unit of invalidation is the run, which
+// is also the unit the existing schema already attributes results to.
+//
+// # Why nothing is deleted
+//
+// The run row, its findings and its correlations are all retained. An
+// investigator has to be able to answer "was analysis ever run, what did
+// it say, and what happened to the evidence?" -- and an audit trail that
+// erases itself when evidence is removed answers none of that. What the
+// invalidation controls is presentation: no current view returns any of
+// it, ever again (see store.currentAnalysisFilter).
+func (s *Service) invalidateAnalysisAfterDeletion(caseID, reason string) (*AnalysisInvalidation, error) {
+	runs, findings, correlations, err := s.store.InvalidateAnalysis(caseID, time.Now().UTC(), reason)
+	if err != nil {
+		return nil, fmt.Errorf("invalidating analysis: %w", err)
+	}
+	if runs == 0 && findings == 0 && correlations == 0 {
+		// Nothing had been analyzed. Not an error, and not worth an
+		// audit entry that says nothing happened.
+		return nil, nil
+	}
+	inv := &AnalysisInvalidation{Runs: runs, Findings: findings, Correlations: correlations, Reason: reason}
+	s.audit(caseID, model.AuditAnalysisInvalidated, model.TargetCase, caseID,
+		fmt.Sprintf("Analysis invalidated: %d run(s), %d finding(s) and %d correlation(s) are no longer current. %s "+
+			"The records are retained as history and excluded from all current results.",
+			runs, findings, correlations, reason))
+	return inv, nil
 }
 
 // deleteSourceFileEvidence removes sf's contribution to the case's
@@ -2007,6 +2124,12 @@ func (s *Service) AnalyzeCase(caseID string) (AnalyzeResultSummary, error) {
 	// run tracking.
 	for i := range findings {
 		findings[i].AnalysisRunID = run.ID
+	}
+	// The same for correlations, so both halves of an analysis can be
+	// excluded together when the run is invalidated. A correlation with
+	// no run id could not be tied to the run whose evidence was deleted.
+	for i := range correlations {
+		correlations[i].AnalysisRunID = run.ID
 	}
 
 	// ReplaceAnalysis is one atomic transaction (clear + save + mark
@@ -2477,6 +2600,24 @@ func classifyParseError(err error) (category, message string) {
 		return ParseFailureCorrupt, "This PowerShell history file is not readable as UTF-8 or UTF-16 text."
 	case errors.Is(err, evtx.ErrCorrupt), errors.Is(err, regf.ErrCorrupt), errors.Is(err, ad1.ErrCorrupt), errors.Is(err, prefetch.ErrCorrupt):
 		return ParseFailureCorrupt, "The file is corrupt, truncated, or structurally invalid, so it could not be parsed."
+	case errors.Is(err, browsercache.ErrUnsupportedVersion):
+		return ParseFailureUnsupported, "This browser cache file declares a format version Tracefall does not decode. Chromium Simple Cache and blockfile entries, and Firefox cache2 and cache1 entries, are supported at the versions listed in docs/evidence-triage.md."
+	case errors.Is(err, browsercache.ErrNotCacheEntry):
+		return ParseFailureUnsupported, "This file is not a browser cache entry in a format Tracefall reads. Cache container files (a Chromium blockfile index or a Firefox _CACHE_MAP_) are read separately as cache index evidence; cached response bodies (f_######) hold no metadata and are not read."
+	case errors.Is(err, browsercache.ErrCorrupt):
+		return ParseFailureCorrupt, "This browser cache entry is corrupt or truncated, so it could not be parsed."
+	case errors.Is(err, ntfs.ErrNotUSN):
+		return ParseFailureUnsupported, "This file is not an NTFS USN change journal despite being cataloged as one."
+	case errors.Is(err, ntfs.ErrNotLogFile):
+		return ParseFailureUnsupported, "This file is not an NTFS $LogFile despite being cataloged as one."
+	case errors.Is(err, ntfs.ErrUnsupportedUSNVersion):
+		return ParseFailureUnsupported, "This USN change journal uses a record version Tracefall does not decode."
+	case errors.Is(err, ntfs.ErrNotMFT):
+		return ParseFailureUnsupported, "This file is not an NTFS $MFT despite being cataloged as one."
+	case errors.Is(err, ntfs.ErrCorrupt):
+		return ParseFailureCorrupt, "The NTFS $MFT is corrupt or truncated, so it could not be parsed."
+	case errors.Is(err, ntfs.ErrLimitExceeded):
+		return ParseFailureUnsupported, "This NTFS $MFT exceeds Tracefall's size or record limits and was not parsed."
 	case errors.Is(err, prefetch.ErrNotPrefetch):
 		return ParseFailureUnsupported, "This file is not a Windows Prefetch file despite being cataloged as one."
 	case errors.Is(err, evtx.ErrNotEVTX):

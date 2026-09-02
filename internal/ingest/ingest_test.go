@@ -1,9 +1,11 @@
 package ingest
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"tracefall/internal/model"
 	"tracefall/internal/parsers"
@@ -166,4 +168,90 @@ func TestParseFile_SyntheticCase(t *testing.T) {
 	if !sawHost {
 		t.Error("expected at least the EvtxECmd file's events to carry a host natively")
 	}
+}
+
+// Raw evidence a parser produces beyond its events must survive import.
+//
+// ParseFile pairs raw[i] to events[i] positionally. Anything past that
+// index was silently dropped, which lost two real things: a parser's own
+// analysis report (appended after its events), and the ENTIRE output of
+// a parser that deliberately produces no events -- the NTFS $LogFile
+// parser validates the transaction log and emits metadata only, so
+// every record it produced was discarded.
+func TestParseFile_KeepsRawEvidenceBeyondTheEventCount(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "sample.bin")
+	if err := os.WriteFile(path, []byte("content"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	parsed, err := ParseFile("case-1", "coll-1", "sf-1", dir, "sample.bin", &extraRawParser{events: 2, extraRaw: 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(parsed.Events) != 2 {
+		t.Fatalf("got %d events, want 2", len(parsed.Events))
+	}
+	if len(parsed.Raw) != 5 {
+		t.Fatalf("got %d raw records, want 5 (2 paired + 3 unpaired)", len(parsed.Raw))
+	}
+	// The paired ones keep their link.
+	for i := 0; i < 2; i++ {
+		if parsed.Events[i].RawEvidenceID != parsed.Raw[i].ID {
+			t.Errorf("event %d is not linked to raw[%d]", i, i)
+		}
+	}
+	// The extras are scoped to the source file and carry no event link.
+	for i := 2; i < 5; i++ {
+		if parsed.Raw[i].SourceFileID != "sf-1" {
+			t.Errorf("unpaired raw %d lost its source file", i)
+		}
+		if parsed.Raw[i].CaseID != "case-1" {
+			t.Errorf("unpaired raw %d lost its case", i)
+		}
+		if parsed.Raw[i].ID == "" {
+			t.Errorf("unpaired raw %d was given no id", i)
+		}
+	}
+
+	// A parser with NO events keeps all of its raw evidence.
+	metaOnly, err := ParseFile("case-1", "coll-1", "sf-1", dir, "sample.bin", &extraRawParser{events: 0, extraRaw: 4})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(metaOnly.Events) != 0 {
+		t.Fatalf("got %d events, want 0", len(metaOnly.Events))
+	}
+	if len(metaOnly.Raw) != 4 {
+		t.Fatalf("a parser producing no events kept %d of 4 raw records", len(metaOnly.Raw))
+	}
+}
+
+// extraRawParser emits a chosen number of events plus unpaired raw.
+type extraRawParser struct {
+	events   int
+	extraRaw int
+}
+
+func (extraRawParser) Name() string         { return "extraraw@1" }
+func (extraRawParser) ArtifactType() string { return "test_artifact" }
+func (extraRawParser) Detect(string) bool   { return true }
+
+func (p *extraRawParser) Parse(string) (parsers.ParseResult, error) {
+	var res parsers.ParseResult
+	for i := 0; i < p.events; i++ {
+		res.Events = append(res.Events, model.Event{
+			Timestamp: time.Unix(int64(1700000000+i), 0).UTC(),
+			EventType: "test_event", SourceReference: fmt.Sprintf("evt:%d", i),
+		})
+		res.Raw = append(res.Raw, model.RawEvidence{
+			SourceReference: fmt.Sprintf("evt:%d", i), Raw: `{"paired":true}`,
+		})
+	}
+	for i := 0; i < p.extraRaw; i++ {
+		res.Raw = append(res.Raw, model.RawEvidence{
+			SourceReference: fmt.Sprintf("report:%d", i), Raw: `{"unpaired":true}`,
+		})
+	}
+	return res, nil
 }
