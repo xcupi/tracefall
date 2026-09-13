@@ -92,6 +92,56 @@ func (c *Container) entryAt(off int64) (rawFileEntry, error) {
 // entry must be one produced by this same Container's Walk (it carries
 // an internal offset Walk resolved) -- calling Extract with an Entry from
 // a different Container is a programming error, not a data error.
+// ExtractPrefix returns at most n leading bytes of entry's decompressed
+// content, decompressing only as many chunks as that needs -- normally
+// exactly one.
+//
+// It exists so cataloging can identify an entry by its CONTENT without
+// paying to decompress the whole file. A registry hive renamed inside a
+// triage image is otherwise invisible: AD1 cataloging cannot stat a file
+// or read a header the way directory ingestion can, so it had only the
+// name to go on, and a renamed hive was catalogued as unsupported.
+func (c *Container) ExtractPrefix(entry Entry, n int) ([]byte, error) {
+	if entry.IsDir || entry.rawSize == 0 || n <= 0 {
+		return nil, nil
+	}
+	var buf bytes.Buffer
+	// The writer stops accepting once it has n bytes, so Extract's chunk
+	// loop ends after the first chunk for any sane n.
+	_, err := c.Extract(entry, &prefixWriter{buf: &buf, limit: n})
+	if buf.Len() > 0 {
+		// A short read is still a usable header; the error (if any) is
+		// about the REST of the file, which this call does not want.
+		return buf.Bytes(), nil
+	}
+	if errors.Is(err, errPrefixFull) {
+		return buf.Bytes(), nil
+	}
+	return nil, err
+}
+
+var errPrefixFull = errors.New("ad1: prefix complete")
+
+// prefixWriter accepts up to limit bytes and then refuses, which stops
+// Extract's chunk loop without it needing to know about prefixes.
+type prefixWriter struct {
+	buf   *bytes.Buffer
+	limit int
+}
+
+func (w *prefixWriter) Write(p []byte) (int, error) {
+	room := w.limit - w.buf.Len()
+	if room <= 0 {
+		return 0, errPrefixFull
+	}
+	if len(p) > room {
+		w.buf.Write(p[:room])
+		return len(p), errPrefixFull
+	}
+	w.buf.Write(p)
+	return len(p), nil
+}
+
 func (c *Container) Extract(entry Entry, w io.Writer) (int64, error) {
 	if entry.IsDir {
 		return 0, fmt.Errorf("%w: %q is a directory", ErrCorrupt, entry.Path)

@@ -120,10 +120,7 @@ claim a file — see `parsers.ContentDetector`.)
 | WMI repository (`OBJECTS.DATA`) | **Critical** | No WMI repository parser. |
 | Memory image, full capture (`hiberfil.sys`, `memory.dmp`) | **Critical** | No memory analysis. |
 | Event Log, legacy `.evt` | **Critical** | Only the modern EVTX format is parsed. |
-| Amcache hive | High | Hive format is read, but there is no Amcache-specific extraction. |
-| SRUM database | High | No ESE database parser. |
-| ShellBags / `UsrClass.dat` | High | Hive is read; no ShellBags extraction. |
-| Windows Timeline (`ActivitiesCache.db`) | High | No ActivitiesCache parser. |
+| SRUM database | High | No ESE database parser — see the note below. |
 | PowerShell transcript | High | No transcript parser; console history *is* parsed. |
 | USB / device install log (SetupAPI) | High | No SetupAPI log parser. |
 | Antimalware detection log | High | No antimalware log parser. |
@@ -152,6 +149,36 @@ claim a file — see `parsers.ContentDetector`.)
 | XML (not a Scheduled Task) | Low | Only Task Scheduler XML under a `Tasks` directory is parsed. |
 | Windows Error Report (`.wer`) | Low | No WER parser. |
 | Documentation / notes | Low | Not forensic evidence. |
+
+**Amcache and Windows Timeline moved off this list.** Both are parsed as
+of Phase 16 — `Amcache.hve` by the registry parser (which already claims
+the hive by its REGF signature) and `ActivitiesCache.db` by
+`internal/parsers/activitiescache`. Before that they were classified
+*supported* while producing no events, which is the least useful
+combination for an analyst.
+
+**SRUM stays unparsed, and the reason is worth stating.** `SRUDB.dat` is
+an ESE/JET database — paged B-trees, a catalog of table and column
+definitions, tagged and multi-valued columns, long-value trees. A reader
+that handled the straightforward pages and guessed at the rest would
+return plausible-looking but wrong rows, and SRUM's rows attribute
+network bytes and resource usage to named applications. Wrong numbers
+there are worse than no numbers. The same gap covers `WebCacheV01.dat`
+and `Windows.edb`, which are also ESE.
+
+### ShellBags and UserAssist are no longer in this table
+
+Both were listed here as recognized-but-unparsed. They are now
+extracted from `NTUSER.DAT` and `UsrClass.dat` by the hive parser, and
+produce their own event and artifact types -- so the row that said
+"no ShellBags extraction" has been removed rather than left to go stale.
+
+The hive FILE is still classified as a Windows Registry Hive, which is
+what it is. What changed is that the structures inside it now become
+events an analyst can filter, search and trace. See
+[windows-artifacts.md](windows-artifacts.md) for what each of them
+proves, and for the per-user MRU structures in the same hive that are
+still not read.
 
 Anything matching no rule is classified **Unrecognized / Unknown
 priority**, with a reason saying so. Nothing is guessed.
@@ -895,7 +922,163 @@ design. This is handled consistently rather than hidden:
 
 ---
 
+## Credential evidence (Windows SAM)
+
+Tracefall extracts Windows **local account** records from a SAM hive:
+the account name, its RID, its account-control flags, its stored logon
+and password timestamps, and its **NTLM password hash**. Full detail is
+in [windows-artifacts.md](windows-artifacts.md#windows-sam); what triage
+needs to know is here.
+
+**Tracefall does not crack passwords.** There is no wordlist, no brute
+force, and no integration with Hashcat, John the Ripper or anything
+comparable. The hash is the evidence and the hash is where it stops.
+
+**An NTLM hash is not the plaintext password.** It is a one-way function
+of one and it is not reversible. A report must say "the account's stored
+NTLM hash is X", never "the password is X".
+
+**A SAM hash is credential evidence, not malicious activity.** Every
+Windows machine has local accounts and most of them have password
+hashes. Tracefall raises **no finding** and starts **no investigation**
+because a hash exists, and SAM events are kept out of the correlation
+engine — an account record is not an execution, a logon or a persistence
+mechanism.
+
+**Collect SYSTEM with SAM.** The hash is wrapped under the machine boot
+key, which lives in the SYSTEM hive and not in the SAM. Without SYSTEM,
+every account is still reported — name, RID, flags, every timestamp —
+with its hash marked `encrypted_system_hive_missing` and the reason
+stated on the event. That is a different statement from "this account has
+no password", and Tracefall never conflates the two.
+
+The key is derived **once per collection**, before any file in an import
+is parsed, and the SYSTEM hive does not have to be selected for import —
+being catalogued in the same collection is enough. Every account event
+records which file supplied the key (`boot_key_source`), its hash, and
+which control set it came from.
+
+**"Encrypted" is not "not available".** An encrypted hash is material
+that is present in the evidence and needs a key; a missing hash is an
+account that stores none. Those are different findings with different
+next steps, so they never render alike:
+
+| State | What it means | What you do |
+| --- | --- | --- |
+| `decoded` | the hash was recovered | nothing; it is in the event |
+| `not_stored` | the account stores no NT hash | nothing to recover |
+| `encrypted_system_hive_missing` | hash present, no SYSTEM hive | collect `Windows\System32\config\SYSTEM` |
+| `encrypted_system_hive_unusable` | hash present, SYSTEM hive will not do | it is damaged, or from another machine |
+| `encrypted_data_unavailable` | hash present, its bytes are unreadable | the SAM record is damaged |
+| `unsupported` | hash present, wrapping not decoded by this build | reported, never guessed |
+
+**Anything it cannot decode safely, it reports.** A SAM structure in a
+format this build does not read, a record that is truncated, or a boot
+key that fails the domain-key checksum all produce an explicit status
+and a sentence — never a guessed value. Specifically, an account that
+stores no NT hash is reported as `not_stored`; the constant
+`31d6cfe0d16ae931b73c59d7e0c089c0` that some tools print in that
+position is the hash of the empty string, a convention rather than a
+reading, and Tracefall does not emit it.
+
+**Where the hash appears.** In the event's own detail view only, in a
+labelled panel, displayed truncated with a reveal control and a Copy
+button that copies the complete value. It is not in the timeline row,
+not in the Detail column, and not in the free-text search index.
+
+## Recognized is not parsed
+
+Three classes of file are now catalogued as **what they are** and
+explicitly not parsed. Nothing is extracted from any of them — no event,
+no timestamp, no URL, no hash — and none of them is counted as a parser
+failure, because nothing failed:
+
+| Artifact | What it is |
+| --- | --- |
+| `unsupported_browser_artifact` | A browser database that is not history: cookies, saved logins, favicons, autofill, media state, quota bookkeeping |
+| `registry_transaction_log` | A hive's `.LOG1`/`.LOG2` companion |
+| `browser_cache_body`, `browser_cache_payload`, … | A cached response body and the cache's own bookkeeping files |
+
+### Why detection was narrowed
+
+Classification used to be far too broad, and the cost was a page of parse
+errors about evidence that was perfectly intact. In one real image:
+
+- **25 SQLite databases** from browser profiles were catalogued as
+  "Browser history (Chromium / Firefox)" and failed with *"not a browser
+  history schema"*. A browser profile holds a dozen databases and exactly
+  one of them is history. Content detection accepted **any** SQLite file,
+  so Cookies, Favicons, Login Data, Web Data, Media History, Top Sites,
+  Shortcuts, Network Action Predictor, QuotaManager, Reporting and NEL,
+  Safe Browsing Cookies — and `wpndatabase.db` and `queue.sqlite3` from
+  outside any browser — were all claimed as history.
+- **20 registry transaction logs** were catalogued as "Windows Registry
+  Hive" and failed with *"this is a registry transaction log, not a
+  hive"*. A transaction log **is** a REGF file and carries the same
+  signature; the base block's file-type field at offset 28 is what
+  separates them, and it sits inside the 512-byte window discovery
+  already reads.
+- **7 application-compatibility databases** (`AgGlGlobalHistory.db`,
+  `ResPriHMStaticDb.ebd` and siblings) were catalogued as "Prefetch"
+  because they share the MAM compression container. MAM is a general
+  Windows compression wrapper, not a Prefetch format.
+
+Browser history and Windows Timeline are now claimed by **name**,
+confirmed against the bytes. The honest cost is that a *renamed* history
+or Timeline database is no longer detected — but the previous behaviour
+did not detect renamed history either. It claimed everything and let the
+parser sort it out at import, turning a classification question into a
+page of errors.
+
+Hives and Prefetch keep content detection, because both have a structure
+that actually proves what they are.
+
+### A renamed hive is still a hive
+
+Cataloging identifies a file by **name and content**, and both ingestion
+paths — a walked directory or ZIP, and an AD1 image — make that decision
+in one shared place (`ingest.MatchParser`). An AD1 previously matched on
+the filename alone, so a hive renamed inside a triage image was
+catalogued unsupported and never importable, while the same file in a
+folder was recognized fine. Reading a bounded 512-byte prefix of each
+entry costs about **0.6 seconds over a 7,000-entry, 720 MB image** —
+measured, not estimated — and finds them.
+
+### A file named SAM is not a SAM
+
+A filename is a hint, never a verdict. A parser whose `Detect` matches
+on a name must confirm it against the file's first bytes
+(`parsers.ContentConfirmer`), so a text file called `SAM`, `SYSTEM` or
+`NTUSER.DAT` is reported as **unrecognized** rather than claimed as a
+hive and then failed at import. The old behaviour told an analyst their
+hive was corrupt when no hive was ever there. A genuinely renamed hive
+is still found — by content, which is what content detection is for.
+
+---
+
 ## Parse errors
+
+An import can leave a file in one of several states, and they are not the
+same problem. Three of them mean the **evidence is intact**:
+
+| State | Meaning | Is the evidence damaged? |
+| --- | --- | --- |
+| `unsupported_format` | Tracefall does not read this artifact | No |
+| `unsupported_compression` | The artifact is supported and present; its container's compression is not implemented | No |
+| `misclassified` | The file is not the artifact it was cataloged as | No |
+| `empty` | The file has no content | No — there is nothing to parse |
+| `corrupt_or_truncated` | The evidence itself is damaged | **Yes** |
+| `limit_exceeded` | A safety ceiling stopped the parse | No |
+| `unreadable` | Could not be read from storage | Unknown |
+| `internal_error` | Tracefall failed unexpectedly | No |
+
+The UI names the state on every row and explains what it means for the
+evidence, because "parse error" told an analyst nothing about which of
+these they were looking at.
+
+An artifact that is correctly identified as unsupported never reaches a
+parser at all, so it is never counted as a failure — it is catalogued as
+recognized-and-unsupported and does not appear in this list.
 
 Each failure is reported structurally, not as a raw error string:
 
@@ -962,9 +1145,68 @@ clearly labelled as unverified.
 
 ---
 
+## Connection and media evidence
+
+Two artifact classes added in Phase 20 sit outside the execution/registry
+families and are worth a triage note each. Full detail is in
+[windows-artifacts.md](windows-artifacts.md).
+
+### FileZilla server entries
+
+`recentservers.xml` and `sitemanager.xml` name a remote host, port,
+protocol and username an FTP client on this machine was configured for —
+often the only record on disk of where data was staged or sent.
+
+**They record no time.** The events carry none, and the file's mtime is
+not substituted. On a timeline these appear under "No timestamp", which
+is what the artifact supports.
+
+**A stored password is never extracted.** The value is not read out of
+the source file at all; only `password_present` and the storage encoding
+are recorded. As with the SAM, the useful fact is that a saved FTP
+credential exists in this profile — the secret is not needed to state it.
+
+**An entry is not a connection.** `recentservers.xml` says a connection
+was *attempted* from this profile. The Site Manager says only that a site
+was *saved*. Neither says anything succeeded.
+
+### Image metadata and embedded location
+
+Every JPEG in a collection is catalogued and its EXIF read, without
+decoding the picture. Two events come out of one image: the metadata, and
+— only when a full coordinate is present — the location.
+
+**A coordinate is not a sighting.** It is a position the file *carries*.
+Metadata travels with a copied file and can be edited or fabricated, so
+this places the writer's claimed position, not necessarily a device or a
+person.
+
+**The country is derived, not observed.** It comes from an offline
+point-in-polygon test against a bundled boundary dataset, performed by
+Tracefall. The UI keeps observed and derived under separate headings for
+exactly this reason, and every GPS event names the dataset and version
+that produced its answer.
+
+**Check the coordinate's precision before relying on it.** Many devices
+store rounded positions. A coordinate written as whole degrees locates a
+point to within about 111 km, and the event says so — a country
+determination made from one inherits that uncertainty.
+
+**Neither raises a finding.** An FTP server entry, a coordinate and a
+country are observations. Nothing here is treated as a detection.
+
+**Located photos are plotted on the case's Photo Map**, where the image
+itself can be viewed and traced back to its evidence record — see
+[photo-map.md](photo-map.md). Images without a coordinate never appear
+there at a guessed position.
+
+---
+
 ## Adding a parser later
 
-1. Implement `parsers.ArtifactParser` (optionally `ContentDetector`).
+1. Implement `parsers.ArtifactParser` (optionally `ContentDetector`, and
+   `PathScopedDetector` if that detector is broad enough to need a path
+   scope).
 2. Register it in `ingest.Registry()`.
 3. Add one entry to `supportedTypeInfo` in `internal/artifacts` with the
    label, family and priority.

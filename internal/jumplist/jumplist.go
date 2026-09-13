@@ -228,11 +228,30 @@ func SniffCustom(data []byte) bool {
 	if limit > 1024 {
 		limit = 1024
 	}
-	return findLinkHeader(data[:limit], 1) > 0
+	if findLinkHeader(data[:limit], 1) > 0 {
+		return true
+	}
+	// An empty Custom Destinations list has no embedded shortcut and is
+	// still one. Recognized by its footer signature.
+	return hasCustomFooter(data)
 }
 
 // sniffCustom is the internal spelling used by Parse.
 func sniffCustom(data []byte) bool { return SniffCustom(data) }
+
+// customFooter terminates a Custom Destinations file. Its presence is
+// what lets an EMPTY list be told apart from an unrelated file.
+const customFooter = 0xBABFFBAB
+
+// hasCustomFooter reports whether data ends with the Custom Destinations
+// footer signature and is long enough to be a header plus that footer.
+func hasCustomFooter(data []byte) bool {
+	const minCustom = 8
+	if len(data) < minCustom {
+		return false
+	}
+	return binary.LittleEndian.Uint32(data[len(data)-4:]) == customFooter
+}
 
 // findLinkHeader returns the offset of the next shell link header at or
 // after from, or -1.
@@ -497,6 +516,21 @@ func parseCustom(data []byte, lim Limits) (JumpList, error) {
 
 	pos := findLinkHeader(data, 0)
 	if pos < 0 {
+		// No embedded shortcut. That is not automatically "not a Jump
+		// List": Windows writes a Custom Destinations file with a header
+		// and the footer signature and NO destinations at all, and three
+		// such files in one real image were reported as unparseable when
+		// they are simply empty. An empty artifact is evidence too --
+		// the application registered a custom list and recorded nothing
+		// in it -- and calling it corrupt overstates what is known.
+		//
+		// The footer is what distinguishes an empty list from an
+		// unrelated file, so it is required rather than assumed.
+		if hasCustomFooter(data) {
+			jl.Warnings = append(jl.Warnings,
+				"this Custom Destinations list contains no destinations; the container is well-formed and empty")
+			return jl, nil
+		}
 		return JumpList{}, ErrNotJumpList
 	}
 	if pos > 0 {

@@ -204,6 +204,21 @@ Both logs are **append-only from the application layer**: the store
 exposes only create, there is no update or per-row delete, and no route
 accepts a mutation. Tests assert both.
 
+### Case deletion
+
+Deleting a case removes that case's entire `audit_log`, because those
+rows are part of the case. The deletion itself is therefore recorded in
+the **`security_log`**, which is system-wide and survives: action
+`case_deleted`, with the acting username, the case id and the case name.
+
+That is the one record of the case that outlives it, and it is
+deliberate — "this case existed and this person destroyed it" is exactly
+the kind of fact a security log is for. It contains no evidence, no
+event data and no findings.
+
+Deletion is admin-only (every `DELETE` is; see the role table above) and
+requires a valid CSRF token like any other state-changing request.
+
 ### Never logged
 
 Passwords, password hashes, session tokens, CSRF tokens, uploaded file

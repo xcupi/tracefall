@@ -1,6 +1,7 @@
 package registry_test
 
 import (
+	"encoding/binary"
 	"os"
 	"path/filepath"
 	"testing"
@@ -294,21 +295,52 @@ func TestDetect(t *testing.T) {
 	if p.Detect("EvtxECmd/out.csv") {
 		t.Error("Detect claimed a CSV")
 	}
-	// Content detection is what finds a hive under any other name.
-	if !p.DetectContent([]byte("regf....")) {
-		t.Error("DetectContent missed a REGF header")
+	// Content detection is what finds a hive under any other name. It
+	// needs a real base block: the signature alone is shared with
+	// registry TRANSACTION LOGS, and matching on it catalogued 20 of
+	// those as hives in one image and failed every one at import.
+	if !p.DetectContent(primaryHiveHeader()) {
+		t.Error("DetectContent missed a primary hive header")
 	}
 	if p.DetectContent([]byte("ElfFile\x00")) {
 		t.Error("DetectContent accepted an event log as a hive")
 	}
+	for _, ft := range []uint32{1, 2, 6} {
+		if p.DetectContent(transactionLogHeader(ft)) {
+			t.Errorf("DetectContent accepted a transaction log (file type %d) as a hive", ft)
+		}
+	}
+	// The name match must be confirmed by the bytes too, so SAM.LOG1 is
+	// not claimed on its name either.
+	if p.ConfirmContent(transactionLogHeader(6)) {
+		t.Error("ConfirmContent accepted a transaction log")
+	}
+	if !p.ConfirmContent(primaryHiveHeader()) {
+		t.Error("ConfirmContent rejected a primary hive")
+	}
+}
+
+// primaryHiveHeader is a base block whose file type says primary hive.
+func primaryHiveHeader() []byte {
+	b := make([]byte, 512)
+	copy(b[0:4], "regf")
+	return b
+}
+
+// transactionLogHeader is the same block with a transaction-log file
+// type, which is what SAM.LOG1 and its siblings actually carry.
+func transactionLogHeader(fileType uint32) []byte {
+	b := primaryHiveHeader()
+	binary.LittleEndian.PutUint32(b[28:32], fileType)
+	return b
 }
 
 // A hive whose name is meaningless must still be found by content, and
 // still classified correctly from its embedded name.
 func TestParse_RenamedHiveIsStillRecognized(t *testing.T) {
 	path := writeHive(t, "blob.bin", systemHive())
-	if !parser.New().DetectContent([]byte("regf")) {
-		t.Fatal("DetectContent should match on the signature alone")
+	if !parser.New().DetectContent(primaryHiveHeader()) {
+		t.Fatal("DetectContent should match a primary hive base block")
 	}
 	events := parseHive(t, path)
 	if len(events) == 0 {

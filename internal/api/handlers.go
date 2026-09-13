@@ -69,6 +69,15 @@ func NewRouterWithAuth(svc *Service, logger *slog.Logger, maxUploadBytes int64, 
 	mux.HandleFunc("GET /api/cases/{id}", h.getCase)
 	mux.HandleFunc("PATCH /api/cases/{id}", h.updateCaseMetadata)
 	mux.HandleFunc("DELETE /api/cases/{id}", h.deleteCase)
+	// Progress for a deletion that is CURRENTLY RUNNING. Reads an
+	// in-memory record and never touches the database -- the store holds
+	// a single connection, so a poll that queried would queue behind the
+	// deletion it is reporting on (see deleteprogress.go).
+	mux.HandleFunc("GET /api/cases/{id}/deletion-progress", h.deletionProgress)
+	// How much evidence this case stores on disk. Measured on demand
+	// (while a deletion confirmation is being prepared), never as part of
+	// the case payload every page view loads.
+	mux.HandleFunc("GET /api/cases/{id}/evidence-size", h.evidenceSize)
 	mux.HandleFunc("POST /api/cases/{id}/ingest", h.discoverEvidencePath)
 	mux.HandleFunc("POST /api/cases/{id}/evidence", h.discoverEvidenceUpload)
 	mux.HandleFunc("GET /api/cases/{id}/evidence", h.listCollections)
@@ -102,7 +111,29 @@ func NewRouterWithAuth(svc *Service, logger *slog.Logger, maxUploadBytes int64, 
 	// unambiguously rather than by declaration order.
 	mux.HandleFunc("DELETE /api/cases/{id}/collections/{collectionID}", h.deleteCollection)
 	mux.HandleFunc("GET /api/cases/{id}/sources", h.sources)
+	// The forensic timeline (Phase 14). Registered on the SAME mux as
+	// every other route, so withSecurity's authentication, CSRF and role
+	// checks apply to it automatically -- a new route is protected by
+	// default rather than by remembering to protect it.
+	//
+	// "facets" is a literal segment and therefore matches ahead of the
+	// {eventID} wildcard below it; event ids are UUIDs, so the two can
+	// never collide.
+	mux.HandleFunc("GET /api/cases/{id}/events", h.eventSearch)
+	mux.HandleFunc("GET /api/cases/{id}/events/facets", h.eventFacets)
 	mux.HandleFunc("GET /api/cases/{id}/events/{eventID}", h.eventProvenance)
+	// Phase 21: the Photo Map. geo/photos is a second VIEW of the
+	// image_gps events the EXIF parser already produced -- it creates no
+	// event and parses no image. The two image routes are the only place
+	// a browser's input reaches evidence bytes; both take an opaque
+	// source file ID, never a path, and both are authorized against the
+	// case in the URL (see Service.imagePath).
+	mux.HandleFunc("GET /api/cases/{id}/geo/photos", h.geoPhotos)
+	mux.HandleFunc("GET /api/cases/{id}/images/{sourceFileID}/content", h.imageContent)
+	mux.HandleFunc("GET /api/cases/{id}/images/{sourceFileID}/thumbnail", h.imageThumbnail)
+	// World geography, not evidence, so it is not case-scoped -- but it
+	// sits behind the same authentication as everything else under /api.
+	mux.HandleFunc("GET /api/geo/basemap", h.basemap)
 	// Phase 11: provenance and integrity. Read-only except
 	// verify-integrity, which writes only an audit entry recording that
 	// the check ran. Scoped under the existing /api/cases/{id}/... shape
@@ -250,6 +281,36 @@ func (h *handlers) deleteCase(w http.ResponseWriter, r *http.Request) {
 // deleteCases bulk-deletes cases (see Service.DeleteCases), reporting
 // exactly which succeeded and which failed rather than treating the
 // batch as all-or-nothing.
+// deletionProgress answers how far a running case deletion has got.
+//
+// 404 means nothing is being tracked for this case, which is the normal
+// answer whenever a deletion is not in flight. It is deliberately NOT an
+// error state for the caller: a poll that arrives before the deletion
+// registers, or long after it finished, gets the same honest "no
+// deletion in progress".
+//
+// Deliberately NOT behind the case-exists check the other case routes
+// use: by the time a deletion reaches its final stage the case is gone,
+// and a progress endpoint that started 404ing at exactly the moment the
+// answer became interesting would be useless.
+func (h *handlers) deletionProgress(w http.ResponseWriter, r *http.Request) {
+	prog, ok := h.as(r).DeletionProgressFor(r.PathValue("id"))
+	if !ok {
+		writeError(w, http.StatusNotFound, "no deletion is in progress for this case")
+		return
+	}
+	writeJSON(w, http.StatusOK, prog)
+}
+
+// evidenceSize reports the on-disk size of a case's stored evidence.
+func (h *handlers) evidenceSize(w http.ResponseWriter, r *http.Request) {
+	size, err := h.as(r).EvidenceSizeFor(r.PathValue("id"))
+	if h.fail(w, err) {
+		return
+	}
+	writeJSON(w, http.StatusOK, size)
+}
+
 func (h *handlers) deleteCases(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		CaseIDs []string `json:"case_ids"`
@@ -641,6 +702,39 @@ func (h *handlers) sources(w http.ResponseWriter, r *http.Request) {
 		sources = []TriagedSourceFile{}
 	}
 	writeJSON(w, http.StatusOK, sources)
+}
+
+// eventSearch answers one forensic timeline query: filters in, one page
+// of normalized events out, with the true total.
+//
+// A bad date is a 400 with the reason, never a silently-dropped filter
+// -- showing the whole case to an analyst who believes they are looking
+// at one day is the failure this refuses to produce.
+func (h *handlers) eventSearch(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	loc, err := h.as(r).displayLocation()
+	if h.fail(w, err) {
+		return
+	}
+	req, err := parseEventSearch(r, id, loc)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	res, err := h.as(r).SearchEvents(req)
+	if h.fail(w, err) {
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
+// eventFacets returns the filter vocabulary this case's events support.
+func (h *handlers) eventFacets(w http.ResponseWriter, r *http.Request) {
+	facets, err := h.as(r).EventFacets(r.PathValue("id"))
+	if h.fail(w, err) {
+		return
+	}
+	writeJSON(w, http.StatusOK, facets)
 }
 
 func (h *handlers) eventProvenance(w http.ResponseWriter, r *http.Request) {

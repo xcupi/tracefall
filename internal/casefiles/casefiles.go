@@ -71,6 +71,70 @@ func (s *Store) EvidenceDir(caseID, collectionID string) string {
 	return filepath.Join(s.CollectionDir(caseID, collectionID), "evidence")
 }
 
+// DerivedDir returns where DISPLAY ARTIFACTS Tracefall generated for a
+// case live -- currently image thumbnails.
+//
+// It sits beside the collections rather than inside one, and crucially
+// OUTSIDE every EvidenceDir. That placement is the guarantee that a
+// generated file can never be catalogued as evidence, walked by
+// discovery, included in a collection's integrity hash, or mistaken for
+// something the machine under investigation produced. Everything here is
+// reproducible from the evidence and is safe to delete at any time.
+//
+//	<root>/cases/<caseID>/derived/thumbnails/<sourceFileID>.jpg
+func (s *Store) DerivedDir(caseID string) string {
+	return filepath.Join(s.CaseDir(caseID), "derived")
+}
+
+// ThumbnailPath returns where one source file's generated preview is
+// cached. Keyed by source file ID, so it is removed with that file (see
+// RemoveThumbnail) and with the case (RemoveCaseDir deletes the whole
+// case directory, derived files included).
+//
+// The ID is validated rather than trusted: it reaches this function from
+// a URL, and a value containing a path separator would otherwise place
+// the cache file wherever the caller liked.
+func (s *Store) ThumbnailPath(caseID, sourceFileID string) (string, error) {
+	if !safeIdentifier(caseID) {
+		return "", fmt.Errorf("casefiles: %q is not a valid case identifier", caseID)
+	}
+	if !safeIdentifier(sourceFileID) {
+		return "", fmt.Errorf("casefiles: %q is not a valid source file identifier", sourceFileID)
+	}
+	return filepath.Join(s.DerivedDir(caseID), "thumbnails", sourceFileID+".jpg"), nil
+}
+
+// RemoveThumbnail deletes one source file's cached preview. Missing is
+// not an error: a preview is only ever generated on demand, so most
+// files never have one.
+func (s *Store) RemoveThumbnail(caseID, sourceFileID string) error {
+	path, err := s.ThumbnailPath(caseID, sourceFileID)
+	if err != nil {
+		return err
+	}
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
+// safeIdentifier accepts only the shape of the UUIDs Tracefall generates
+// for cases and source files: nothing that could traverse a directory,
+// name a hidden file, or escape the cache tree.
+func safeIdentifier(id string) bool {
+	if id == "" || len(id) > 128 {
+		return false
+	}
+	for _, r := range id {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 // MetadataPath returns where a collection's self-describing metadata
 // sidecar lives -- see WriteMetadata.
 func (s *Store) MetadataPath(caseID, collectionID string) string {

@@ -73,6 +73,11 @@ type Key struct {
 	LastWrite time.Time
 	Values    []Value
 	Subkeys   []*Key
+	// Class is the key's class name, stored UTF-16LE in its own cell.
+	// Almost no real key has one, but the four keys holding the SysKey
+	// do -- and they hold it ONLY there, with no values at all -- so a
+	// SYSTEM fixture cannot exercise boot-key extraction without it.
+	Class string
 }
 
 // NewKey is a small convenience for building trees inline in a test.
@@ -84,6 +89,12 @@ func NewKey(name string, subkeys ...*Key) *Key {
 // written as one expression.
 func (k *Key) WithValues(values ...Value) *Key {
 	k.Values = append(k.Values, values...)
+	return k
+}
+
+// WithClass sets a key's class name. See Key.Class.
+func (k *Key) WithClass(c string) *Key {
+	k.Class = c
 	return k
 }
 
@@ -143,6 +154,15 @@ func (b *builder) writeKey(k *Key, parentOffset uint32, isRoot bool) uint32 {
 		valueListOffset = b.alloc(list)
 	}
 
+	// The class name, if any, lives in its own cell like a value's data.
+	var classOffset uint32 = 0xffffffff
+	var classLen int
+	if k.Class != "" {
+		enc := utf16LE(k.Class)
+		classLen = len(enc)
+		classOffset = b.alloc(enc)
+	}
+
 	// Reserve this key's nk cell before writing children, so children can
 	// record a correct parent offset. The cell is filled in afterwards.
 	nameBytes := []byte(k.Name) // ASCII names (KEY_COMP_NAME), as Windows does for ordinary keys
@@ -187,8 +207,9 @@ func (b *builder) writeKey(k *Key, parentOffset uint32, isRoot bool) uint32 {
 	binary.LittleEndian.PutUint32(nk[36:40], uint32(len(valueOffsets)))
 	binary.LittleEndian.PutUint32(nk[40:44], valueListOffset)
 	binary.LittleEndian.PutUint32(nk[44:48], 0xffffffff) // security key
-	binary.LittleEndian.PutUint32(nk[48:52], 0xffffffff) // class name
+	binary.LittleEndian.PutUint32(nk[48:52], classOffset)
 	binary.LittleEndian.PutUint16(nk[72:74], uint16(len(nameBytes)))
+	binary.LittleEndian.PutUint16(nk[74:76], uint16(classLen))
 	copy(nk[76:], nameBytes)
 	return nkOffset
 }
@@ -326,6 +347,13 @@ func MakeTransactionLog(hive []byte) []byte {
 }
 
 // ---------- helpers ----------
+
+// utf16LE encodes without a NUL terminator. A class name's length field
+// is exact, so a terminator would be two bytes of the value rather than
+// a terminator -- unlike a REG_SZ, which encodeUTF16 handles.
+func utf16LE(s string) []byte {
+	return uint16sToBytes(utf16.Encode([]rune(s)))
+}
 
 func encodeUTF16(s string) []byte {
 	u := utf16.Encode([]rune(s))

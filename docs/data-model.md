@@ -258,6 +258,74 @@ happens to hold evidence with an identical archive/source hash (hash
 uniqueness is scoped per case, never global — see "Duplicate evidence
 collections" above).
 
+## Case deletion
+
+Deleting a case destroys the case and everything belonging to it. It is
+**synchronous**: the HTTP response is written only after every row and
+the case's own storage are gone. There is no background job, and nothing
+in the UI reports completion earlier than the server does.
+
+### What is deleted
+
+Database, in one transaction (`store.DeleteCase`), in dependency order:
+
+`event_observations`, `raw_evidence`, `events`, `findings`,
+`correlations`, `source_files`, `collections`, `notes`, `tags`,
+`analyst_status`, `audit_log`, `analysis_runs`, and finally `cases`.
+
+Filesystem (`Service.DeleteCase` → `casefiles.RemoveCaseDir`): the
+case's whole directory — the original uploaded ZIP or AD1, the staged
+upload, every extracted evidence file, and collection metadata.
+
+Derived views need no deletion because they are not stored:
+**investigations** and **ATT&CK mappings** are computed from findings,
+correlations and events at request time, so they cease to exist the
+moment those do.
+
+### What is retained, and why
+
+| Kept | Reason |
+| --- | --- |
+| `security_log` rows naming the case | System-wide record of who used the SYSTEM. A denied request against a case still says which case it concerned, and deleting the case must not erase the record that someone was refused access to it. Its `case_id` is deliberately unconstrained. See [security.md](security.md). |
+| Evidence ingested from a **local folder** | It is the investigator's own data, not storage Tracefall owns. Only the case's own directory is removed. |
+
+The deletion itself is recorded in the `security_log` — not in the
+case's `audit_log`, which is part of the case and is deleted with it. An
+entry written there would erase itself.
+
+### Ordering, and what happens when it fails
+
+The database transaction commits first, then the filesystem removal.
+The two cannot be atomic across a database and a disk, so the failure is
+pushed into the direction that stays honest: storage may outlive its
+record, but a case never lists evidence it no longer has.
+
+A filesystem failure therefore returns an error that says the rows were
+deleted and the directory was not fully removed — never "the files are
+still there", because removal is depth-first and a partial failure
+leaves an unknown mixture. **Repeating the delete request completes the
+cleanup**: the operation is idempotent, and a case whose rows are gone
+but whose directory remains is recognized and finished rather than
+refused with "not found". A case that never existed is still refused.
+
+### Cost
+
+Deletion is `DELETE ... WHERE case_id = ?` against an indexed column,
+plus one `RemoveAll`. Measured on this build:
+
+| Events | Case-owned rows | Time |
+| ---: | ---: | ---: |
+| 1,000 | 3,017 | 23 ms |
+| 10,000 | 30,017 | 204 ms |
+| 100,000 | 300,017 | 2.4 s |
+
+A real 1,353-file case with 7,642 events, 8,832 raw records and 220 MB
+of extracted evidence deleted in **485 ms end to end** through the HTTP
+API. It is fast because the work is genuinely small, not because it was
+deferred.
+
+---
+
 ## `RawEvidence`
 
 The untouched original record a parser read — a CSV row (as JSON) or an

@@ -14,6 +14,7 @@ import (
 	_ "modernc.org/sqlite"
 
 	"tracefall/internal/model"
+	"tracefall/internal/parsers"
 	"tracefall/internal/parsers/browserhistory"
 )
 
@@ -101,11 +102,33 @@ func TestDetect(t *testing.T) {
 	if p.Detect("Security.evtx") {
 		t.Error("Detect claimed an event log")
 	}
-	if !p.DetectContent([]byte("SQLite format 3\x00extra")) {
-		t.Error("DetectContent missed the SQLite signature")
+	// Content detection is deliberately GONE. It used to accept any
+	// SQLite database, which claimed every cookie store, favicon cache,
+	// autofill database and saved-login store in a browser profile as
+	// browser history and then failed each at import -- 25 files of
+	// intact evidence reported as broken in one real image.
+	if _, ok := any(p).(parsers.ContentDetector); ok {
+		t.Error("browser history claims files by content again; any SQLite database would be claimed as history")
 	}
-	if p.DetectContent([]byte("regf....")) {
-		t.Error("DetectContent accepted a registry hive")
+	// The NAME match is confirmed against the bytes, so a file called
+	// "History" that is not a database is not claimed.
+	if !p.ConfirmContent([]byte("SQLite format 3\x00extra")) {
+		t.Error("ConfirmContent rejected a SQLite database")
+	}
+	if p.ConfirmContent([]byte("regf....")) {
+		t.Error("ConfirmContent accepted a registry hive as browser history")
+	}
+	// The databases that are NOT history must not be claimed at all.
+	for _, name := range []string{
+		"Cookies", "Login Data", "Favicons", "Web Data", "Media History",
+		"Top Sites", "Shortcuts", "Network Action Predictor", "QuotaManager",
+		"Reporting and NEL", "Safe Browsing Cookies", "cookies.sqlite",
+		"formhistory.sqlite", "wpndatabase.db", "queue.sqlite3",
+	} {
+		full := "Users/jdoe/AppData/Local/Google/Chrome/User Data/Default/" + name
+		if p.Detect(full) {
+			t.Errorf("Detect claimed %q as browser history", name)
+		}
 	}
 }
 

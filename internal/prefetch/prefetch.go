@@ -81,10 +81,23 @@ const (
 	// mamMagic is the three-byte container tag; the fourth header byte
 	// is the compression method, not part of the tag.
 	mamMagic = "MAM"
+	// mamCRCFlag, when set in the format byte, says a 4-byte CRC32 of
+	// the decompressed data follows the size field -- so the header is
+	// 12 bytes rather than 8.
+	//
+	// Verified against real Windows evidence rather than assumed: the
+	// seven MAM\x84 containers in one image each decompressed to
+	// EXACTLY their declared byte count when the stream was read from
+	// offset 12, and to nothing at all from offset 8. Producing the
+	// declared length by chance is not plausible.
+	mamCRCFlag = 0x80
+	// mamMethodMask isolates the compression method from the flags.
+	mamMethodMask = 0x0F
 	// mamXpressHuffman is the only compression method Windows uses for
 	// Prefetch.
 	mamXpressHuffman = 0x04
-	// mamHeaderSize is the tag, method byte, and uncompressed size.
+	// mamHeaderSize is the tag, format byte, and uncompressed size. A
+	// container with the CRC flag set adds four more; see mamHeaderLen.
 	mamHeaderSize = 8
 )
 
@@ -177,7 +190,26 @@ func Sniff(header []byte) bool {
 	if IsCompressed(header) {
 		return true
 	}
-	// The signature sits at offset 4, after the version.
+	return SniffUncompressed(header)
+}
+
+// SniffUncompressed reports whether header is a PLAIN Prefetch file --
+// the SCCA signature at offset 4, after the version.
+//
+// This is the check content-based classification uses, and the
+// distinction from Sniff matters. MAM is a general Windows compression
+// container, not a Prefetch format: Windows wraps the application
+// compatibility databases that live in the same directory
+// (AgGlGlobalHistory.db, ResPriHMStaticDb.ebd and their siblings) in
+// exactly the same container. Treating "MAM" as proof of Prefetch
+// catalogued seven of those as Prefetch files in one real image and then
+// failed every one of them, reporting an unsupported compression method
+// for files that were never Prefetch to begin with.
+//
+// A compressed Prefetch file is still recognized -- by its .pf name,
+// which is what actually distinguishes it -- and what is inside the
+// container is checked after decompression, where it can be.
+func SniffUncompressed(header []byte) bool {
 	return len(header) >= 8 && string(header[4:8]) == signature
 }
 
@@ -190,6 +222,26 @@ func IsCompressed(header []byte) bool {
 	return len(header) >= 4 && string(header[:3]) == mamMagic
 }
 
+// MAMHeaderLen returns the length of a MAM container's header, which
+// depends on whether the format byte sets the CRC flag. Exported so a
+// caller reading MAM containers directly does not have to re-derive it
+// -- getting it wrong feeds the decompressor four bytes of CRC as if
+// they were compressed data, which fails in a way that looks like a
+// corrupt stream rather than a misread header.
+func MAMHeaderLen(header []byte) int {
+	if len(header) < 4 {
+		return mamHeaderSize
+	}
+	return mamHeaderLen(header[3])
+}
+
+func mamHeaderLen(format byte) int {
+	if format&mamCRCFlag != 0 {
+		return mamHeaderSize + 4
+	}
+	return mamHeaderSize
+}
+
 // decompressMAM unwraps a MAM container into the SCCA bytes inside it.
 //
 // The declared uncompressed size in the header is attacker-controlled,
@@ -199,14 +251,18 @@ func decompressMAM(data []byte, lim Limits) ([]byte, error) {
 	if len(data) < mamHeaderSize {
 		return nil, fmt.Errorf("%w: MAM header is %d bytes, need %d", ErrCorrupt, len(data), mamHeaderSize)
 	}
-	if method := data[3]; method != mamXpressHuffman {
+	if method := data[3] & mamMethodMask; method != mamXpressHuffman {
 		return nil, fmt.Errorf("%w: method 0x%02x", ErrUnsupportedCompression, method)
+	}
+	hdr := mamHeaderLen(data[3])
+	if len(data) < hdr {
+		return nil, fmt.Errorf("%w: MAM header is %d bytes, need %d", ErrCorrupt, len(data), hdr)
 	}
 	declared := int(binary.LittleEndian.Uint32(data[4:8]))
 	if int64(declared) > lim.MaxFileBytes {
 		return nil, fmt.Errorf("%w: MAM header declares %d decompressed bytes", ErrLimitExceeded, declared)
 	}
-	out, err := lzxpress.HuffmanDecompress(data[mamHeaderSize:], declared, int(lim.MaxFileBytes))
+	out, err := lzxpress.HuffmanDecompress(data[hdr:], declared, int(lim.MaxFileBytes))
 	if err != nil {
 		if errors.Is(err, lzxpress.ErrLimitExceeded) {
 			return nil, fmt.Errorf("%w: %v", ErrLimitExceeded, err)

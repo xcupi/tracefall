@@ -141,19 +141,45 @@ func TestParser_CompressionIsNotASignal(t *testing.T) {
 	}
 }
 
-// The parser must still detect and parse both containers by content.
+// Both containers are still recognized, by the route appropriate to
+// each: an uncompressed file by its SCCA signature, a compressed one by
+// its .pf name confirmed against the MAM tag.
+//
+// Content detection deliberately no longer accepts a bare MAM container.
+// MAM is a general Windows compression wrapper, and the application
+// compatibility databases in the same directory use it too -- accepting
+// it here catalogued seven of those as Prefetch in one real image and
+// failed every one of them.
 func TestParser_DetectsBothContainers(t *testing.T) {
 	p := prefetchraw.New()
 	plain := scca(t)
+	compressed := prefetchgen.CompressMAM(plain)
+
 	if !p.DetectContent(plain[:16]) {
 		t.Error("uncompressed Prefetch not detected by content")
 	}
-	if !p.DetectContent(prefetchgen.CompressMAM(plain)[:16]) {
-		t.Error("MAM Prefetch not detected by content")
+	if p.DetectContent(compressed[:16]) {
+		t.Error("a bare MAM container was detected as Prefetch by content alone")
 	}
 	if p.DetectContent([]byte("this is not prefetch at all yeah")) {
 		t.Error("arbitrary bytes detected as Prefetch")
 	}
+
+	// The .pf name, confirmed by the bytes, is what claims a compressed
+	// Prefetch file.
+	if !p.Detect("Windows/Prefetch/NOTEPAD.EXE-D8414F97.pf") {
+		t.Error(".pf name not detected")
+	}
+	if !p.ConfirmContent(compressed[:16]) {
+		t.Error("a .pf name was not confirmed by MAM content")
+	}
+	if !p.ConfirmContent(plain[:16]) {
+		t.Error("a .pf name was not confirmed by SCCA content")
+	}
+	if p.ConfirmContent([]byte("this is not prefetch at all yeah")) {
+		t.Error("a .pf name was confirmed against unrelated bytes")
+	}
+
 	if p.ArtifactType() != model.ArtifactPrefetch {
 		t.Errorf("artifact type = %q", p.ArtifactType())
 	}

@@ -80,6 +80,38 @@ func Normalize(ev *model.Event, in Input) bool {
 		ev.Extra["workstation_name"] = payload["WorkstationName"]
 		return true
 
+	// 4634 (session logoff) and 4647 (user-initiated logoff) close a
+	// session that 4624 opened. Both are added in Phase 15 because a
+	// logon with no logoff leaves "who was at this machine, and for how
+	// long" open-ended, and the LogonId is what ties the pair together.
+	//
+	// The two are DISTINCT events on the same normalized type: 4647 says
+	// the user chose to log off, 4634 says the session ended, and a
+	// session can end without the user asking. logoff_kind keeps that
+	// difference visible rather than flattening it.
+	case channel == "security" && eventID == "4634":
+		ev.EventType = model.EventLogoff
+		ev.User = firstNonEmpty(payload["TargetUserName"], ev.User)
+		ev.Extra["logon_type"] = payload["LogonType"]
+		ev.Extra["target_user_sid"] = payload["TargetUserSid"]
+		ev.Extra["target_domain"] = payload["TargetDomainName"]
+		ev.Extra["logon_id"] = payload["TargetLogonId"]
+		ev.Extra["logoff_kind"] = "session logoff (Security 4634)"
+		ev.Extra["evidence_meaning"] = "a logon session ended. Pair it with the 4624 carrying the same logon_id " +
+			"to bound the session; a session can end without the user initiating it."
+		return true
+
+	case channel == "security" && eventID == "4647":
+		ev.EventType = model.EventLogoff
+		ev.User = firstNonEmpty(payload["TargetUserName"], ev.User)
+		ev.Extra["target_user_sid"] = payload["TargetUserSid"]
+		ev.Extra["target_domain"] = payload["TargetDomainName"]
+		ev.Extra["logon_id"] = payload["TargetLogonId"]
+		ev.Extra["logoff_kind"] = "user-initiated logoff (Security 4647)"
+		ev.Extra["evidence_meaning"] = "the user initiated a logoff. Stronger than 4634 about intent: this " +
+			"records the user asking to log off, not merely the session ending."
+		return true
+
 	case channel == "security" && eventID == "4688":
 		ev.EventType = model.EventProcessCreate
 		newProc := firstNonEmpty(payload["NewProcessName"], payload["NewProcessId"])

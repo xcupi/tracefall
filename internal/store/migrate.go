@@ -92,6 +92,19 @@ func migrate(db *sql.DB) error {
 	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_events_case_dedup ON events(case_id, dedup_hash)`); err != nil {
 		return fmt.Errorf("creating events dedup index: %w", err)
 	}
+	// Phase 14: idx_events_case_ts (case_id, timestamp) is now a strict
+	// PREFIX of idx_events_case_ts_id (case_id, timestamp, id), which
+	// schema.go creates. Keeping both would make every event insert
+	// maintain two B-trees to answer one question, so the superseded one
+	// is dropped here rather than left behind.
+	//
+	// Dropping an index is safe in a way that dropping a column is not:
+	// no data lives in it, every query that used it is served by the
+	// wider index, and re-running this on a database that has already
+	// been migrated is a no-op. Deliberately the only DROP in this file.
+	if _, err := db.Exec(`DROP INDEX IF EXISTS idx_events_case_ts`); err != nil {
+		return fmt.Errorf("dropping superseded events timestamp index: %w", err)
+	}
 	if err := backfillLegacyCollections(db); err != nil {
 		return fmt.Errorf("backfilling legacy collections: %w", err)
 	}

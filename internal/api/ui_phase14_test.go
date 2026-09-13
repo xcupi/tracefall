@@ -1131,16 +1131,20 @@ func TestUI_InvalidatedAnalysisReportsNotAnalyzed(t *testing.T) {
 // thing.
 func TestUI_RecycleBinHalvesAreLabelledDistinctly(t *testing.T) {
 	src := string(appJS(t))
+	// The $I half is named "Recycle Bin" as of the UI-exposure pass: it
+	// is what an analyst looks for in the Artifact filter, and the $I
+	// detail lives on the event rather than in the filter option. The $R
+	// half keeps its own name -- the two must never read as one artifact.
 	for _, want := range []string{
-		`recycle_bin_metadata: "Recycle Bin metadata ($I)"`,
-		`recycle_bin_content: "Recovered deleted content ($R)"`,
+		`recycle_bin_metadata: "Recycle Bin"`,
+		`recycle_bin_content: "Recycle Bin content ($R)"`,
 	} {
 		if !strings.Contains(src, want) {
 			t.Errorf("app.js is missing %s", want)
 		}
 	}
-	if strings.Contains(src, `recycle_bin_content: "Windows Recycle Bin $I metadata"`) {
-		t.Error("the $R half is labelled as an $I metadata record")
+	if strings.Contains(src, `recycle_bin_content: "Recycle Bin"`) {
+		t.Error("the $R half is labelled identically to the $I record")
 	}
 }
 

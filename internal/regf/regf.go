@@ -163,13 +163,62 @@ type Key struct {
 	// SubkeyCount is what the record claims, which is worth reporting
 	// separately from how many were actually walked.
 	SubkeyCount int
+	// Class is the key's class name, a UTF-16 string almost no key
+	// carries. It matters because Windows hides the SysKey there:
+	// HKLM\SYSTEM\ControlSet00N\Control\Lsa\{JD,Skew1,GBG,Data} store
+	// their share of the boot key as class-name hex digits and hold no
+	// values at all, so a reader that only looks at values cannot see
+	// them. Empty when the key has no class, which is the normal case.
+	Class string
 }
 
-// Sniff reports whether header looks like a registry hive. Content-based
-// so a hive named "ntuser.dat.bak", or an .evtx renamed to SYSTEM, is
-// classified by what it IS.
+// Sniff reports whether header looks like a PRIMARY registry hive.
+// Content-based, so a hive named "ntuser.dat.bak", or an .evtx renamed
+// to SYSTEM, is classified by what it IS.
+//
+// The magic alone is not enough, and that mattered in practice. A
+// registry TRANSACTION LOG -- SAM.LOG1, SYSTEM.LOG2, and so on -- is
+// also a REGF file and carries the same four-byte signature. Matching on
+// the signature alone catalogued every one of them as a registry hive
+// and then failed each at import with "this is a registry transaction
+// log, not a hive": twenty files in one real image, each reported as
+// broken evidence when nothing was broken at all.
+//
+// The base block's FILE TYPE field at offset 28 is what distinguishes
+// them. Zero is a primary hive; a transaction log carries 1, 2 or 6.
+// The field is inside the 512-byte window discovery reads, so this costs
+// nothing and moves the decision from parse time to classification time,
+// where it belongs. See SniffTransactionLog for the other side of it.
 func Sniff(header []byte) bool {
-	return len(header) >= 4 && string(header[:4]) == regfSignature
+	t, ok := fileTypeOf(header)
+	return ok && t == FileTypePrimary
+}
+
+// SniffTransactionLog reports whether header is a REGF transaction log
+// rather than a primary hive. Catalogers use it to classify these files
+// as what they are instead of leaving them unrecognized.
+func SniffTransactionLog(header []byte) bool {
+	t, ok := fileTypeOf(header)
+	return ok && t != FileTypePrimary
+}
+
+// FileTypePrimary is the base-block file type of a primary hive -- the
+// one with a usable key tree. Transaction logs use other values.
+const FileTypePrimary = 0
+
+// fileTypeOf returns the base block's file type, and whether header is a
+// REGF file at all.
+func fileTypeOf(header []byte) (uint32, bool) {
+	if len(header) < 4 || string(header[:4]) != regfSignature {
+		return 0, false
+	}
+	if len(header) < 32 {
+		// A REGF signature with no readable file type. Reported as not
+		// classifiable rather than assumed to be a primary hive: the
+		// point of this check is to stop guessing.
+		return 0, false
+	}
+	return binary.LittleEndian.Uint32(header[28:32]), true
 }
 
 // Open validates a hive's base block and returns a handle for read-only
@@ -199,6 +248,11 @@ func Open(path string, lim Limits) (*Hive, error) {
 	if _, err := io.ReadFull(io.NewSectionReader(f, 0, baseBlockSize), base); err != nil {
 		f.Close()
 		return nil, fmt.Errorf("%w: reading base block: %v", ErrCorrupt, err)
+	}
+	if SniffTransactionLog(base) {
+		f.Close()
+		t, _ := fileTypeOf(base)
+		return nil, fmt.Errorf("%w: this is a registry transaction log (file type %d), not a hive", ErrNotHive, t)
 	}
 	if !Sniff(base) {
 		f.Close()
@@ -297,6 +351,8 @@ type namedKey struct {
 	subkeyList  uint32
 	valueCount  uint32
 	valueList   uint32
+	classOffset uint32
+	classLength uint16
 }
 
 func (h *Hive) readNamedKey(offset uint32) (namedKey, error) {
@@ -333,7 +389,34 @@ func (h *Hive) readNamedKey(offset uint32) (namedKey, error) {
 		subkeyList:  binary.LittleEndian.Uint32(cell[28:32]),
 		valueCount:  binary.LittleEndian.Uint32(cell[36:40]),
 		valueList:   binary.LittleEndian.Uint32(cell[40:44]),
+		// Class name offset (48) and length (74) in the nk record. Both
+		// are read but the cell they point at is only fetched when a
+		// class actually exists -- see readClass.
+		classOffset: binary.LittleEndian.Uint32(cell[48:52]),
+		classLength: binary.LittleEndian.Uint16(cell[74:76]),
 	}, nil
+}
+
+// readClass returns a key's class name, or "" when it has none. Almost
+// no key does, so the guard below is what keeps this free for the
+// overwhelming majority of a walk: no class means no extra cell read.
+//
+// A class that cannot be read is reported as absent rather than as an
+// error. It is optional metadata on a key whose values were read fine,
+// and failing the whole key over it would lose evidence that is
+// perfectly good.
+func (h *Hive) readClass(nk namedKey) string {
+	if nk.classLength == 0 || nk.classOffset == 0xffffffff {
+		return ""
+	}
+	if int(nk.classLength) > h.lim.MaxNameBytes {
+		return ""
+	}
+	cell, err := h.readCell(nk.classOffset)
+	if err != nil || len(cell) < int(nk.classLength) {
+		return ""
+	}
+	return utf16String(cell[:nk.classLength])
 }
 
 // readValues reads a key's value list. Unreadable individual values are
@@ -547,6 +630,7 @@ func (h *Hive) Root() (Key, error) {
 		LastWrite:   nk.lastWrite,
 		Values:      h.readValues(nk),
 		SubkeyCount: int(nk.subkeyCount),
+		Class:       h.readClass(nk),
 	}, nil
 }
 
@@ -667,6 +751,7 @@ func (h *Hive) keyFrom(nk namedKey, path string) Key {
 		LastWrite:   nk.lastWrite,
 		Values:      h.readValues(nk),
 		SubkeyCount: int(nk.subkeyCount),
+		Class:       h.readClass(nk),
 	}
 }
 
@@ -685,6 +770,39 @@ func (h *Hive) Subkeys(path string) ([]string, error) {
 			continue
 		}
 		out = append(out, child.name)
+	}
+	return out, nil
+}
+
+// ChildKeys returns a key's immediate children as fully-read Keys --
+// name, last-write time and values -- in one pass over the subkey list.
+//
+// # Why this exists alongside Subkeys and OpenKey
+//
+// Enumerating children with Subkeys and then calling OpenKey on each is
+// the obvious pattern and is QUADRATIC: OpenKey restarts at the root and
+// linearly scans siblings at every level, so a key with N children costs
+// O(N) per child and O(N^2) overall. On a real Amcache hive -- one key
+// with tens of thousands of children -- that was measured at 9 minutes
+// and 30 GiB of allocation for 20,000 entries, against 6 seconds and
+// 1 GiB here.
+//
+// Callers that walk a WIDE key should use this. OpenKey remains right
+// for reaching one known path.
+func (h *Hive) ChildKeys(path string) ([]Key, error) {
+	nk, err := h.namedKeyAt(path)
+	if err != nil {
+		return nil, err
+	}
+	offsets := h.subkeyOffsets(nk.subkeyList)
+	out := make([]Key, 0, len(offsets))
+	for _, off := range offsets {
+		child, err := h.readNamedKey(off)
+		if err != nil {
+			// One unreadable child must not discard its siblings.
+			continue
+		}
+		out = append(out, h.keyFrom(child, joinPath(path, child.name)))
 	}
 	return out, nil
 }

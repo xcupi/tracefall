@@ -1,9 +1,11 @@
 package regf_test
 
 import (
+	"encoding/binary"
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -38,15 +40,80 @@ func sampleHive() []byte {
 	return regfgen.Build(`\??\C:\Users\jdoe\NTUSER.DAT`, root)
 }
 
+// baseBlockWithFileType builds a 512-byte REGF base block carrying one
+// file-type value, which is the field that separates a primary hive from
+// a transaction log.
+func baseBlockWithFileType(t uint32) []byte {
+	b := make([]byte, 512)
+	copy(b[0:4], "regf")
+	binary.LittleEndian.PutUint32(b[28:32], t)
+	return b
+}
+
 func TestSniff(t *testing.T) {
-	if !regf.Sniff([]byte("regf....")) {
-		t.Error("Sniff rejected a valid REGF signature")
+	if !regf.Sniff(baseBlockWithFileType(regf.FileTypePrimary)) {
+		t.Error("Sniff rejected a primary hive")
 	}
 	if regf.Sniff([]byte("ElfFile\x00")) {
 		t.Error("Sniff accepted an EVTX file as a hive")
 	}
 	if regf.Sniff([]byte("re")) {
 		t.Error("Sniff accepted a too-short header")
+	}
+	// A header with the signature but no readable file type settles
+	// nothing, and must not be assumed to be a primary hive.
+	if regf.Sniff([]byte("regf....")) {
+		t.Error("Sniff accepted a header too short to carry a file type")
+	}
+}
+
+// A registry TRANSACTION LOG is a REGF file with the same signature.
+// Classifying one as a hive catalogued it as evidence and then failed it
+// at import with "not a hive" -- twenty such files in one real image,
+// every one reported as broken when nothing was broken.
+func TestSniff_TransactionLogIsNotAHive(t *testing.T) {
+	// 1, 2 and 6 are the file types real transaction logs carry; the
+	// image this was found in uses 6.
+	for _, ft := range []uint32{1, 2, 6} {
+		header := baseBlockWithFileType(ft)
+		if regf.Sniff(header) {
+			t.Errorf("Sniff accepted a transaction log (file type %d) as a hive", ft)
+		}
+		if !regf.SniffTransactionLog(header) {
+			t.Errorf("SniffTransactionLog did not recognize file type %d", ft)
+		}
+	}
+	// And the primary hive is not mistaken for a log.
+	if regf.SniffTransactionLog(baseBlockWithFileType(regf.FileTypePrimary)) {
+		t.Error("SniffTransactionLog claimed a primary hive")
+	}
+	// Neither classifies a non-REGF file.
+	for _, h := range [][]byte{[]byte("ElfFile\x00"), []byte("SQLite format 3\x00"), nil} {
+		if regf.Sniff(h) || regf.SniffTransactionLog(h) {
+			t.Errorf("a non-REGF header was classified: %q", h)
+		}
+	}
+}
+
+// Opening a transaction log directly must still say what it is.
+func TestOpen_TransactionLogIsRejectedWithItsRealNature(t *testing.T) {
+	// Padded to a full hive header: the size check runs first, and this
+	// test is about the file-type check, not that one.
+	log := make([]byte, 4096)
+	copy(log, baseBlockWithFileType(6))
+	p := filepath.Join(t.TempDir(), "SYSTEM.LOG1")
+	if err := os.WriteFile(p, log, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := regf.Open(p, regf.Limits{})
+	if err == nil {
+		t.Fatal("a transaction log opened as a hive")
+	}
+	if !errors.Is(err, regf.ErrNotHive) {
+		t.Errorf("error is %v, want ErrNotHive", err)
+	}
+	if !strings.Contains(err.Error(), "transaction log") {
+		t.Errorf("the error does not say what the file actually is: %v", err)
 	}
 }
 

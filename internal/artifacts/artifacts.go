@@ -119,7 +119,17 @@ const (
 	FamilyBrowser       Family = "browser"
 	FamilyMemory        Family = "memory"
 	FamilyLog           Family = "log"
-	FamilyOther         Family = "other"
+	// FamilyNetwork covers artifacts describing connections to remote
+	// hosts -- clients' saved servers, transfer history, and the like.
+	// Distinct from FamilyLog because these are CONFIGURATION records
+	// that name an endpoint, not observations of traffic.
+	FamilyNetwork Family = "network"
+	// FamilyMedia covers metadata carried inside user documents and
+	// media files: EXIF and the embedded location that comes with it.
+	// Distinct from FamilyFileSystem because the evidence is the file's
+	// CONTENT, not the volume's record of it.
+	FamilyMedia Family = "media"
+	FamilyOther Family = "other"
 )
 
 // FamilyLabels renders a family for display. One place, so the UI never
@@ -135,6 +145,8 @@ var FamilyLabels = map[Family]string{
 	FamilyBrowser:       "Browser",
 	FamilyMemory:        "Memory",
 	FamilyLog:           "Application Log",
+	FamilyNetwork:       "Network & Transfer",
+	FamilyMedia:         "Media & Document Metadata",
 	FamilyOther:         "Other",
 }
 
@@ -251,6 +263,119 @@ var supportedTypeInfo = map[string]typeInfo{
 		label: "Windows Registry Hive", family: FamilyRegistry, priority: PriorityCritical,
 		why: "Holds persistence, configuration, execution and account data, and survives the deletion of what it describes.",
 	},
+	model.ArtifactUserAssist: {
+		label: "UserAssist", family: FamilyExecution, priority: PriorityHigh,
+		why: "Per-user record of what the shell launched, with a run count and a last-activity time, attributed to one account.",
+		note: "Records only launches performed THROUGH Explorer. A program started by a script, service or command line " +
+			"leaves no entry, so absence is not evidence of absence -- and presence is not a process-creation record.",
+	},
+	model.ArtifactShellBags: {
+		label: "ShellBags", family: FamilyRegistry, priority: PriorityHigh,
+		why: "Reconstructs which folders a user browsed, including removable and network volumes, and survives their deletion.",
+		note: "Evidence that Explorer recorded a folder, not that a file was opened or anything was executed. " +
+			"The event time is the registry key's last-write time; the shell item's own date fields are local-time " +
+			"readings with no timezone and are reported as metadata.",
+	},
+	model.ArtifactAmcache: {
+		label: "Amcache", family: FamilyExecution, priority: PriorityHigh,
+		why: "Records a binary's full path, SHA-1, size and publisher, and survives deletion of the binary itself.",
+		note: "Windows catalogues a binary here on installation, on inventory scans and on execution alike, so " +
+			"an entry is application-presence evidence with strong identifying metadata -- not a process-creation " +
+			"record, and the key's write time is not an execution time.",
+	},
+	model.ArtifactRecentDocs: {
+		label: "RecentDocs", family: FamilyRegistry, priority: PriorityHigh,
+		why: "Names the documents a user opened through the shell, per file type, in most-recent-first order.",
+		note: "The key's last-write time dates only the most recent entry; older entries in the same key were " +
+			"added at unrecorded times.",
+	},
+	model.ArtifactRunMRU: {
+		label: "Run dialog (RunMRU)", family: FamilyRegistry, priority: PriorityHigh,
+		why:  "Records commands a user typed into the Run dialog -- deliberate, user-attributed intent.",
+		note: "Evidence the command was TYPED and accepted, not that it executed successfully.",
+	},
+	model.ArtifactTypedPaths: {
+		label: "TypedPaths", family: FamilyRegistry, priority: PriorityMedium,
+		why:  "Records paths a user typed into the Explorer address bar, including UNC and removable locations.",
+		note: "Evidence of what was typed. Not that the path was opened, and not that it existed.",
+	},
+	model.ArtifactOpenSaveMRU: {
+		label: "Open/Save dialog (OpenSavePidlMRU)", family: FamilyRegistry, priority: PriorityHigh,
+		why:  "Names files a user chose in Open or Save dialogs, including on volumes no longer attached.",
+		note: "Evidence a file was chosen in a dialog. For a Save dialog it need not have existed beforehand.",
+	},
+	model.ArtifactMUICache: {
+		label: "MUICache", family: FamilyRegistry, priority: PriorityMedium,
+		why: "Names applications the shell has encountered, with their display names and publishers.",
+		note: "The shell caches these when it merely enumerates an executable, so this is presence evidence " +
+			"and not evidence that the program ran.",
+	},
+	model.ArtifactSAM: {
+		label: "Windows SAM", family: FamilyRegistry, priority: PriorityCritical,
+		why: "The machine's local account database: every local account, its RID, its account-control flags and " +
+			"its stored logon and password timestamps -- and, when the SYSTEM hive is collected alongside it, " +
+			"the account's stored NTLM password hash.",
+		note: "Credential EVIDENCE, not activity and not an alert. Every Windows machine has these records, so " +
+			"an account carrying a hash is normal and is never treated as a detection. An NTLM hash is a hash: " +
+			"it is not a password, it is not reversible into one, and Tracefall does not crack passwords. " +
+			"Without the SYSTEM hive the hashes stay encrypted and each account says so rather than being " +
+			"reported as having none.",
+	},
+	model.ArtifactUnsupportedBrowserDB: {
+		label: "Browser database (not parsed)", family: FamilyBrowser, priority: PriorityMedium,
+		why: "Names which browser database a file is -- cookies, saved logins, favicons, autofill, media " +
+			"state -- so an analyst can see it is present and decide whether to examine it with another tool.",
+		note: "RECOGNIZED, NOT PARSED. Tracefall extracts no events, timestamps or values from these files. " +
+			"They are listed because a browser profile holds many databases and only one of them is history; " +
+			"cataloguing the rest as history reported intact evidence as broken.",
+	},
+	model.ArtifactRegistryTransactionLog: {
+		label: "Registry transaction log", family: FamilyRegistry, priority: PriorityLow,
+		why: "Records that a hive's .LOG1/.LOG2 companion was collected, which is part of knowing how complete " +
+			"the registry evidence is.",
+		note: "RECOGNIZED, NOT PARSED. A transaction log is a REGF file with no key tree; replaying one into " +
+			"its hive is not something Tracefall does. It is never treated as a hive, and never reported as a " +
+			"broken one.",
+	},
+	model.ArtifactActivitiesCache: {
+		label: "Windows Timeline (ActivitiesCache)", family: FamilyExecution, priority: PriorityHigh,
+		why: "Records applications and documents a user focused, with start and end times and device context.",
+		note: "An activity record is not a process-creation record; it says the Activities provider logged " +
+			"application or document focus.",
+	},
+	model.ArtifactBrowserDownload: {
+		label: "Browser download", family: FamilyBrowser, priority: PriorityHigh,
+		why: "Records a file arriving on the machine from a named URL, with its local path and state.",
+		note: "Downloaded is not opened and is not executed. Corroboration from Prefetch, Amcache or a " +
+			"process-creation record is what establishes those.",
+	},
+	model.ArtifactFileZillaServer: {
+		label: "FileZilla server entry", family: FamilyNetwork, priority: PriorityHigh,
+		why: "Names a remote host, port, protocol and username an FTP client on this machine was configured " +
+			"for -- an exfiltration or staging destination, recorded in the user's own profile and surviving " +
+			"long after the transfer it was used for.",
+		note: "CONFIGURATION evidence, and it records no time. A recentservers.xml entry says a connection " +
+			"was ATTEMPTED from this profile; a Site Manager entry says only that a site was saved. Neither " +
+			"is evidence that a connection succeeded, that anyone authenticated, or that a file moved. " +
+			"Stored passwords are never extracted -- only their presence is reported.",
+	},
+	model.ArtifactImageMetadata: {
+		label: "Image metadata (EXIF)", family: FamilyMedia, priority: PriorityMedium,
+		why: "Records the device and software that produced an image and when the exposure was taken, which " +
+			"dates and attributes a file independently of the filesystem times that a copy resets.",
+		note: "EXIF is ordinary file CONTENT: a camera writes it and so does any editor, exporter or forger " +
+			"downstream. Make and Model name the device the metadata CLAIMS produced the image -- not proof " +
+			"of which device did, and nothing at all about who owned it. Not evidence the image was opened " +
+			"or viewed on this machine.",
+	},
+	model.ArtifactImageGPS: {
+		label: "Image location (EXIF GPS)", family: FamilyMedia, priority: PriorityHigh,
+		why: "Places an image at a coordinate, which can put a device -- or the file's origin -- somewhere " +
+			"no other artifact on the machine mentions.",
+		note: "The coordinate is what the image RECORDS, not a position Tracefall observed: metadata travels " +
+			"with a copied file and can be edited or fabricated. Any country shown is DERIVED from the " +
+			"coordinate by an offline boundary lookup and is not stored in the image.",
+	},
 	model.ArtifactRegistryRunKey: {
 		label: "Registry (RECmd export)", family: FamilyRegistry, priority: PriorityHigh,
 		why: "Autostart entries are a first-choice persistence mechanism and name the program that runs.",
@@ -330,14 +455,24 @@ var supportedTypeInfo = map[string]typeInfo{
 			"so it records no access times, access counts or most-recently-used order.",
 	},
 	model.ArtifactRecycleBinContent: {
-		label: "Recycle Bin recovered content ($R)", family: FamilyFileSystem, priority: PriorityMedium,
+		// Kept distinct from "Recycle Bin" and named for what it is: the
+		// $R half is SUPPORTING evidence for an $I record, produces no
+		// events of its own, and must never read as a second kind of
+		// deletion artifact.
+		label: "Recycle Bin content ($R)", family: FamilyFileSystem, priority: PriorityMedium,
 		why: "The deleted file's content. What it was and when it was deleted is in the paired $I record, not here.",
 		note: "The recovered content of a deleted file. Its original path, name and deletion time are read from " +
 			"the paired $I record; its size and SHA-256 are measured from this file. Produces no timeline events -- " +
 			"the deletion itself is timestamped by the $I record.",
 	},
 	model.ArtifactRecycleBin: {
-		label: "Windows Recycle Bin $I metadata", family: FamilyFileSystem, priority: PriorityHigh,
+		// "Recycle Bin", not "Windows Recycle Bin $I metadata". This is the
+		// label an analyst picks out of the Timeline's Artifact filter,
+		// and it has to be the name they are looking for. The $I detail
+		// belongs on the event -- where record_version, the paired $R
+		// status and the original path already are -- not in a filter
+		// option that then fails to match what anyone would search for.
+		label: "Recycle Bin", family: FamilyFileSystem, priority: PriorityHigh,
 		why: "Names a deleted file's original full path, its size and the moment of deletion -- deletion evidence with attribution.",
 		note: "Recycle Bin metadata records the deleted file's original path, size and deletion time. " +
 			"The $R file contains the deleted content when it is still available.",
@@ -681,26 +816,10 @@ var unsupportedRules = []unsupportedRule{
 
 	// ---- execution and user-activity artifacts ----
 	{
-		label: "Amcache hive", family: FamilyExecution, priority: PriorityHigh,
-		why:    "Records executables present on the system with SHA-1 and first-execution evidence, including binaries since deleted.",
-		reason: "Amcache records program execution and installation. Tracefall reads the hive format but has no Amcache-specific extraction yet, so no events are produced from it.",
-		match:  baseIs("amcache.hve"),
-	},
-	{
 		label: "SRUM database", family: FamilyExecution, priority: PriorityHigh,
 		why:    "Per-application network and resource usage over 30-60 days: what ran, and how much data it moved.",
 		reason: "The System Resource Usage Monitor database records per-application network and resource usage. Tracefall has no ESE database parser.",
 		match:  baseIs("srudb.dat"),
-	},
-	{
-		// HIGH, not medium: ShellBags reconstruct which folders a user
-		// opened, including on removable and network volumes, and they
-		// outlive the directories themselves. That is squarely "highly
-		// valuable for reconstructing user activity".
-		label: "ShellBags / UsrClass", family: FamilyRegistry, priority: PriorityHigh,
-		why:    "Reconstructs which folders a user browsed, including removable and network volumes, and survives their deletion.",
-		reason: "Tracefall reads this hive, but has no ShellBags-specific extraction, so only persistence locations produce events.",
-		match:  baseIs("usrclass.dat"),
 	},
 	{
 		// $MFT, $UsnJrnl and $LogFile are all PARSED now, so none of them
@@ -722,12 +841,6 @@ var unsupportedRules = []unsupportedRule{
 			"$Boot, $BadClus, $Volume",
 		},
 		match: baseIs("$secure", "$bitmap", "$quota", "$objid", "$reparse", "$boot", "$badclus", "$volume"),
-	},
-	{
-		label: "Windows Timeline (ActivitiesCache.db)", family: FamilyExecution, priority: PriorityHigh,
-		why:    "Records applications used and files opened per user with start and end times -- a ready-made activity timeline.",
-		reason: "Tracefall has no ActivitiesCache parser. It is a SQLite database with a Windows-specific schema.",
-		match:  baseIs("activitiescache.db"),
 	},
 	{
 		label: "PowerShell transcript", family: FamilyPowerShell, priority: PriorityHigh,
@@ -973,6 +1086,12 @@ type Registry struct {
 func NewRegistry(registered []parsers.ArtifactParser) *Registry {
 	r := &Registry{byType: map[string]Capability{}}
 
+	// Two passes. The first registers each parser's own FILE artifact
+	// type; the second adds the types its EVENTS carry (see
+	// parsers.EventArtifactTypeSource). File types are registered first
+	// so a parser that both reads a file type and emits it as an event
+	// type keeps the file-level registration, which names the parser
+	// that actually claims the file.
 	for _, p := range registered {
 		at := p.ArtifactType()
 		if _, seen := r.byType[at]; seen {
@@ -1001,6 +1120,34 @@ func NewRegistry(registered []parsers.ArtifactParser) *Registry {
 			Parser:         p.Name(),
 			PriorityReason: info.why,
 			Note:           info.note,
+		}
+	}
+
+	for _, p := range registered {
+		src, ok := p.(parsers.EventArtifactTypeSource)
+		if !ok {
+			continue
+		}
+		for _, at := range src.EventArtifactTypes() {
+			if _, seen := r.byType[at]; seen {
+				continue
+			}
+			info, ok := supportedTypeInfo[at]
+			if !ok {
+				info = typeInfo{label: humanize(at), family: FamilyOther, priority: PriorityMedium}
+			}
+			r.byType[at] = Capability{
+				ArtifactType:   at,
+				Label:          info.label,
+				Family:         info.family,
+				FamilyLabel:    FamilyLabels[info.family],
+				Priority:       info.priority,
+				Supported:      true,
+				Recognized:     true,
+				Parser:         p.Name(),
+				PriorityReason: info.why,
+				Note:           info.note,
+			}
 		}
 	}
 

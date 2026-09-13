@@ -45,6 +45,7 @@ import (
 	"tracefall/internal/evtx"
 	"tracefall/internal/ingest"
 	"tracefall/internal/investigate"
+	jumplist "tracefall/internal/jumplist"
 	"tracefall/internal/model"
 	"tracefall/internal/ntfs"
 	"tracefall/internal/parsers"
@@ -169,6 +170,9 @@ type Service struct {
 	// not survive a restart, must not be exported with a case, and must
 	// not add a database write per failed guess.
 	throttle *loginThrottle
+	// deletions tracks case deletions in progress, in memory only. See
+	// deleteprogress.go for why it must not be backed by the database.
+	deletions *deletionTracker
 	// actor is the identity behind the CURRENT request, set by
 	// WithActor on a per-request copy. The shared Service always has the
 	// zero value; only request-scoped copies carry an identity.
@@ -180,6 +184,7 @@ func NewService(s *store.Store, files *casefiles.Store) *Service {
 		store: s, files: files,
 		extractLimits: archive.DefaultLimits, ad1Limits: ad1.DefaultLimits,
 		jobs: newImportJobs(), throttle: newLoginThrottle(),
+		deletions: newDeletionTracker(),
 	}
 }
 
@@ -972,6 +977,26 @@ const (
 	ParseFailureLimit       = "limit_exceeded"       // hit a safety ceiling
 	ParseFailureUnsupported = "unsupported_format"   // recognized container, unusable contents
 	ParseFailureInternal    = "internal_error"       // anything else
+
+	// ParseFailureUnsupportedCompression is a genuinely supported
+	// artifact whose CONTAINER uses a compression method this build does
+	// not implement. Separated from unsupported_format because the
+	// answer is different: the artifact is fine and the tool is the
+	// limit, rather than the file being something Tracefall does not
+	// read at all.
+	ParseFailureUnsupportedCompression = "unsupported_compression"
+
+	// ParseFailureMisclassified is a file that is NOT the artifact it
+	// was catalogued as. The evidence is intact; the classification was
+	// wrong. Naming it separately is what lets an analyst tell "my
+	// evidence is damaged" from "Tracefall mislabelled this file", which
+	// were previously reported identically.
+	ParseFailureMisclassified = "misclassified"
+
+	// ParseFailureEmpty is a file with no content. Not damage and not a
+	// capability gap: a triage collection routinely contains zero-length
+	// entries, and calling one corrupt overstates what is known.
+	ParseFailureEmpty = "empty"
 )
 
 // Parse stages, matching where in the import a failure actually happened.
@@ -1129,6 +1154,44 @@ func (s *Service) importEvidence(caseID, collectionID string, sourceFileIDs []st
 	pending := make([]pendingImport, 0, len(sourceFileIDs))
 	prog.phase(PhaseParsing)
 	prog.setTotal(len(sourceFileIDs))
+
+	// Collection-scoped parse context, prepared ONCE before any file is
+	// parsed. Today it carries one thing: the machine boot key from this
+	// collection's SYSTEM hive, without which a SAM hive's NT hashes
+	// cannot be decoded.
+	//
+	// It has to happen here rather than inside the parser. For an AD1
+	// collection each entry is materialized immediately before its own
+	// parse (below), so a parser looking for the SYSTEM hive on disk at
+	// SAM-parse time is racing the extraction order -- and losing, since
+	// "SAM" sorts before "SYSTEM". See bootkey.go.
+	//
+	// The whole step is skipped when the batch holds no registry hive.
+	batchFiles, _ := s.store.GetSourceFiles(sourceFileIDs)
+	parseCtx := s.prepareBootKey(caseID, collectionID, collection, batchFiles)
+
+	// The AD1 image is opened and indexed ONCE for the whole batch.
+	//
+	// Each file used to be located by opening the container and walking
+	// the entire entry tree -- 1.55 s per file on a 720 MB image of 8,241
+	// entries, which made extraction alone ~22 minutes for 1,474 files
+	// and was by a wide margin the dominant cost of ingestion. The index
+	// turns that into one walk plus a map lookup per file. It holds
+	// entry METADATA only; content is still streamed one entry at a
+	// time, so the image is never loaded into memory.
+	//
+	// A collection that is not an AD1 never builds one.
+	var extractor *ad1Extractor
+	if collection.SourceType == model.SourceTypeAD1 {
+		var err error
+		extractor, err = s.newAD1Extractor(caseID, collectionID)
+		if err != nil {
+			return ImportResult{}, err
+		}
+		// Closed on every exit path, including cancellation and the
+		// error returns below, so a stopped import leaks no file handle.
+		defer extractor.Close()
+	}
 	// cancelled tracks whether the analyst stopped this import, and
 	// unprocessed counts what was consequently never reached. Both are
 	// reported; neither is inferred.
@@ -1181,7 +1244,7 @@ func (s *Service) importEvidence(caseID, collectionID string, sourceFileIDs []st
 			// every other collection type. This also computes and
 			// records Tracefall's own SHA-256 for the file, which isn't
 			// known until this point (see extractAD1Entry's doc comment).
-			if err := s.extractAD1Entry(caseID, collectionID, sf); err != nil {
+			if err := extractor.extract(sf); err != nil {
 				_ = s.store.MarkSourceFileFailed(id)
 				errs = append(errs, fmt.Sprintf("%s: %v", sf.Path, err))
 				failures = append(failures, parseFailure(sf, ParseStageExtract, err))
@@ -1190,7 +1253,26 @@ func (s *Service) importEvidence(caseID, collectionID string, sourceFileIDs []st
 			}
 		}
 
-		parsed, err := ingest.ParseFile(caseID, collectionID, id, collection.EvidenceDirectory, sf.Path, p)
+		// An EMPTY file is reported as empty, not handed to a parser
+		// that will call it corrupt. A triage collection routinely holds
+		// zero-length entries -- a file that was resident-only, purged,
+		// or recorded with no content -- and "this Prefetch file is
+		// corrupt" is a false statement about a file that simply has
+		// nothing in it.
+		if info, statErr := os.Stat(filepath.Join(collection.EvidenceDirectory, filepath.FromSlash(sf.Path))); statErr == nil && info.Size() == 0 {
+			_ = s.store.MarkSourceFileFailed(id)
+			failures = append(failures, ParseFailure{
+				SourceFileID: sf.ID, Path: sf.Path, Filename: sf.OriginalFilename,
+				ArtifactType: sf.ArtifactType, Parser: sf.Parser,
+				Stage:    ParseStageParse,
+				Category: ParseFailureEmpty,
+				Message:  "This file has no content. It was collected as a zero-length entry, so there is nothing to parse -- this is not damage and not an unsupported format.",
+			})
+			prog.fileParsed(0, true)
+			continue
+		}
+
+		parsed, err := ingest.ParseFileWithContext(caseID, collectionID, id, collection.EvidenceDirectory, sf.Path, p, parseCtx)
 		if err != nil {
 			_ = s.store.MarkSourceFileFailed(id)
 			errs = append(errs, fmt.Sprintf("%s: %v", sf.Path, err))
@@ -1709,24 +1791,62 @@ func (s *Service) DeleteCollection(caseID, collectionID string) (DeletedCollecti
 	discovered := collection.FileCount
 	imported := collection.ImportedFileCount
 
-	files, err := s.store.ListSourceFilesByCollection(collectionID)
+	res := DeletedCollectionResult{CollectionID: collectionID, Label: label}
+
+	// Which path can delete this collection.
+	//
+	// store.DeleteCollection already removes everything in FIVE bulk
+	// statements inside one transaction. The per-file path below exists
+	// for one reason only: an event observed by more than one collection
+	// must be re-pointed at a surviving observation before the bulk
+	// `DELETE FROM events WHERE collection_id = ?` runs, or evidence
+	// another collection independently recorded would go with this one.
+	//
+	// When no event here involves another collection -- which is every
+	// collection that was never overlapped by a second ingest, including
+	// every collection with nothing imported at all -- that work has
+	// nothing to do, and doing it anyway costs one pass of several
+	// queries and two durable writes PER CATALOG ROW. On a pending
+	// collection of 7,074 discovered files with zero imported, that was
+	// measured at ~3 s against ~72 ms for the bulk statements over the
+	// same rows: ~97% of the deletion spent unpicking rows that the next
+	// statement deletes wholesale anyway.
+	//
+	// So the per-file path is kept, and taken only when it is load-bearing.
+	selfContained, err := s.store.CollectionEventsAreSelfContained(collectionID)
 	if err != nil {
 		return DeletedCollectionResult{}, err
 	}
-	ids := make([]string, 0, len(files))
-	for _, f := range files {
-		ids = append(ids, f.ID)
-	}
 
-	res := DeletedCollectionResult{CollectionID: collectionID, Label: label}
-	if len(ids) > 0 {
-		deleted, err := s.DeleteSourceFiles(caseID, ids)
+	var touchedEvidence bool
+	if selfContained {
+		removed, events, err := s.deleteCollectionInBulk(caseID, collectionID)
 		if err != nil {
 			return DeletedCollectionResult{}, err
 		}
-		res.SourceFilesRemoved = len(deleted.DeletedSourceFiles)
-		res.EventsRemoved = deleted.EventsRemoved
-		res.EventsRetained = deleted.EventsRetained
+		res.SourceFilesRemoved = removed
+		res.EventsRemoved = events
+		res.EventsRetained = 0
+		touchedEvidence = removed > 0
+	} else {
+		files, err := s.store.ListSourceFilesByCollection(collectionID)
+		if err != nil {
+			return DeletedCollectionResult{}, err
+		}
+		ids := make([]string, 0, len(files))
+		for _, f := range files {
+			ids = append(ids, f.ID)
+		}
+		if len(ids) > 0 {
+			deleted, err := s.DeleteSourceFiles(caseID, ids)
+			if err != nil {
+				return DeletedCollectionResult{}, err
+			}
+			res.SourceFilesRemoved = len(deleted.DeletedSourceFiles)
+			res.EventsRemoved = deleted.EventsRemoved
+			res.EventsRetained = deleted.EventsRetained
+			touchedEvidence = true
+		}
 	}
 
 	if err := s.store.DeleteCollection(collectionID); err != nil {
@@ -1743,11 +1863,10 @@ func (s *Service) DeleteCollection(caseID, collectionID string) (DeletedCollecti
 	}
 
 	res.AnalysisStale = true
-	if len(ids) == 0 {
+	if !touchedEvidence {
 		// A collection with no live files still removes evidence from the
 		// case, so any analysis that included it is no longer current.
-		// The delegated DeleteSourceFiles call above never ran, so the
-		// invalidation is done here.
+		// Nothing above invalidated it, so it is done here.
 		if inv, err := s.invalidateAnalysisAfterDeletion(caseID,
 			"An evidence collection was deleted from this case."); err != nil {
 			return DeletedCollectionResult{}, err
@@ -1759,6 +1878,85 @@ func (s *Service) DeleteCollection(caseID, collectionID string) (DeletedCollecti
 		fmt.Sprintf("Collection %q deleted: %d discovered file(s), %d imported, %d event(s) removed, %d retained via another collection",
 			label, discovered, imported, res.EventsRemoved, res.EventsRetained))
 	return res, nil
+}
+
+// deleteCollectionInBulk removes a collection's evidence WITHOUT walking
+// its catalog row by row.
+//
+// It is only ever reached when the collection's events involve no other
+// collection (see store.CollectionEventsAreSelfContained), which is what
+// makes the bulk statements in store.DeleteCollection equivalent to the
+// per-file path: every observation, event, raw record and catalog row
+// here belongs to this collection alone, so removing them by
+// collection_id removes exactly what the loop would have removed one at
+// a time.
+//
+// What it must still do itself, because the bulk statements cannot:
+//
+//   - COUNT what is about to go, for the result and the audit entry.
+//     The loop produced those counts as a side effect of doing the work;
+//     two aggregate queries produce the same numbers without it.
+//   - remove generated THUMBNAILS, which live outside the collection
+//     directory (casefiles.DerivedDir) and so are not covered by
+//     RemoveCollectionDir. Only image artifacts can have one, so only
+//     those are looked up rather than attempting a removal per file.
+//   - invalidate analysis and update the case status, which
+//     DeleteSourceFiles would otherwise have done.
+//
+// The evidence FILES themselves are not removed here: the caller's
+// RemoveCollectionDir takes the whole tree in one pass, which is both
+// correct and far cheaper than one removal per file.
+func (s *Service) deleteCollectionInBulk(caseID, collectionID string) (sourceFiles, events int, err error) {
+	sourceFiles, err = s.store.CountActiveSourceFilesByCollection(collectionID)
+	if err != nil {
+		return 0, 0, err
+	}
+	events, err = s.store.CountEventsByCollection(collectionID)
+	if err != nil {
+		return 0, 0, err
+	}
+	if sourceFiles == 0 {
+		// Nothing catalogued. The caller invalidates analysis for the
+		// empty case, exactly as before.
+		return 0, 0, nil
+	}
+
+	imageIDs, err := s.store.ListSourceFileIDsByCollectionArtifacts(collectionID,
+		[]string{model.ArtifactImageMetadata, model.ArtifactImageGPS})
+	if err != nil {
+		return 0, 0, err
+	}
+	for _, id := range imageIDs {
+		_ = s.files.RemoveThumbnail(caseID, id)
+	}
+
+	// The invalidation's own audit entry is written inside this call. Its
+	// return value is deliberately not put on the result: the per-file
+	// path did not surface it either when a collection had files, and
+	// changing that would change what the API reports.
+	if _, err := s.invalidateAnalysisAfterDeletion(caseID,
+		fmt.Sprintf("%d evidence file(s) were deleted from this case.", sourceFiles)); err != nil {
+		return 0, 0, err
+	}
+
+	// Counted, not loaded: the previous path read every event in the
+	// case into memory to ask whether any were left.
+	remaining, err := s.store.CountEvents(caseID)
+	if err != nil {
+		return 0, 0, fmt.Errorf("checking remaining events: %w", err)
+	}
+	status := model.CaseStatusIngested
+	if remaining-events <= 0 {
+		status = model.CaseStatusCreated
+	}
+	if err := s.store.UpdateCaseStatus(caseID, status); err != nil {
+		return 0, 0, fmt.Errorf("updating case status: %w", err)
+	}
+
+	s.audit(caseID, model.AuditEvidenceDeleted, model.TargetSourceFile, "",
+		fmt.Sprintf("%d source file(s) deleted with collection %s (%d event(s) removed, 0 retained via another observation)",
+			sourceFiles, collectionID, events))
+	return sourceFiles, events, nil
 }
 
 // collectionLabelFor names a collection that has no original filename,
@@ -1838,6 +2036,13 @@ func (s *Service) DeleteSourceFiles(caseID string, sourceFileIDs []string) (Dele
 			// one extracted copy of this specific deleted file.
 			_ = s.files.RemoveEvidenceFile(caseID, sf.CollectionID, sf.Path)
 		}
+
+		// A generated preview must not outlive the evidence it was
+		// derived from -- for ANY collection type, including the
+		// local-path case above where Tracefall does not own the
+		// evidence file itself. The thumbnail is the one file here
+		// Tracefall did create, so it is always Tracefall's to remove.
+		_ = s.files.RemoveThumbnail(caseID, id)
 	}
 
 	for collectionID := range touchedCollections {
@@ -1988,16 +2193,85 @@ func (s *Service) deleteSourceFileEvidence(sf model.SourceFile) (removedEvents, 
 // cleanup. Irreversible; the API/UI layer is responsible for requiring
 // explicit confirmation before calling this.
 func (s *Service) DeleteCase(caseID string) error {
-	if _, err := s.GetCase(caseID); err != nil {
+	c, err := s.GetCase(caseID)
+	switch {
+	case err == nil:
+		// Normal path.
+	case errors.Is(err, ErrCaseNotFound) && s.caseDirExists(caseID):
+		// The database rows are already gone but the case's evidence
+		// directory is still on disk. That is what an earlier deletion
+		// looks like when the database committed and the filesystem
+		// removal then failed -- a disappearing case whose evidence was
+		// still there, and which could never be cleaned up because every
+		// retry stopped here with "not found".
+		//
+		// Completing the cleanup makes the operation idempotent and, more
+		// importantly, RECOVERABLE. Reported as a normal success: from
+		// the caller's point of view the case is gone, which is now true
+		// of the disk as well as the database.
+	default:
 		return err
 	}
-	if err := s.store.DeleteCase(caseID); err != nil {
-		return fmt.Errorf("deleting case: %w", err)
+
+	// Progress is published as the deletion passes each phase. It costs
+	// a handful of map writes and adds no query: see deleteprogress.go
+	// for why stages -- rather than a per-record count -- are the only
+	// thing this implementation can honestly report.
+	s.deletions.begin(caseID)
+	var deleteErr error
+	defer func() { s.deletions.finish(caseID, deleteErr) }()
+
+	s.deletions.stage(caseID, DeletionStageRemovingRecords)
+	counts, err := s.store.DeleteCaseWithCounts(caseID)
+	if err != nil {
+		deleteErr = fmt.Errorf("deleting case: %w", err)
+		return deleteErr
 	}
+	// The transaction has committed, so these counts are now true. This
+	// is the first and only point at which any record can be reported as
+	// removed.
+	s.deletions.recordsRemoved(caseID, counts)
+	s.deletions.stage(caseID, DeletionStageRemovingFiles)
+
+	// Database first, then files, and the order matters. The reverse
+	// would remove the evidence and then possibly fail to remove the
+	// rows, leaving a case that still lists evidence it no longer has --
+	// a case lying about what it holds is worse than storage that
+	// outlives its record. The two cannot be made atomic across a
+	// database and a filesystem, so the failure is pushed into the
+	// direction that stays honest and can be retried.
 	if err := s.files.RemoveCaseDir(caseID); err != nil {
-		return fmt.Errorf("removing case files: %w", err)
+		// Deliberately not "the files are still on disk". Removal is
+		// depth-first, so a failure part way through leaves an unknown
+		// mixture: some files gone, some remaining, the directory
+		// itself still there. Claiming more than that would be a
+		// guess, and a deletion error is the last place to guess.
+		//
+		// Built once and used for both the caller's error and the
+		// progress record, so the modal and the response cannot describe
+		// the same failure differently.
+		deleteErr = fmt.Errorf("the case's database records were deleted, but its evidence directory %s could not be fully removed: %w -- "+
+			"some or all of its contents may remain on disk. Repeat the delete request to finish removing them, "+
+			"or remove the directory manually",
+			s.files.CaseDir(caseID), err)
+		return deleteErr
 	}
+	s.deletions.filesRemoved(caseID)
+
+	// Recorded in the SECURITY log, not the case audit log: a case's own
+	// audit_log rows are deleted along with the case (they are part of
+	// it), so an entry written there would erase itself. The security log
+	// is system-wide and survives, which is the only place a record of
+	// the deletion can outlive the thing deleted.
+	s.auditSecurity(caseID, model.AuditCaseDeleted, "case", caseID, s.auditActor(),
+		fmt.Sprintf("Deleted case %q and all of its evidence, events and analysis", c.Name))
 	return nil
+}
+
+// caseDirExists reports whether a case still has an on-disk directory.
+func (s *Service) caseDirExists(caseID string) bool {
+	info, err := os.Stat(s.files.CaseDir(caseID))
+	return err == nil && info.IsDir()
 }
 
 // BulkDeleteCasesResult reports exactly which of the requested cases
@@ -2279,6 +2553,30 @@ type EventProvenance struct {
 	// answer should not require the reader to know that a zero time is
 	// Tracefall's encoding of "no timestamp exists".
 	TimestampKnown bool `json:"timestamp_known"`
+
+	// ArtifactLabel names the artifact class in the same words the
+	// evidence triage view uses (Phase 14), so an analyst arriving here
+	// from the timeline does not have to map "ntfs_usnjrnl" back onto
+	// the evidence row they selected.
+	ArtifactLabel string `json:"artifact_label"`
+
+	// Findings and Investigations complete the chain UPWARDS (Phase 14).
+	// The rest of this struct answers "where did this event come from?";
+	// these answer "what, if anything, has been concluded from it?".
+	//
+	// Both are references, and both are routinely EMPTY. An event that
+	// no detection cites is the ordinary case, not a defect and not a
+	// statement that the event is uninteresting -- see the note on
+	// FindingRef, and the "No related finding" wording the dashboard
+	// uses, which says what is actually true: no current detection has
+	// associated one.
+	Findings       []FindingRef       `json:"findings"`
+	Investigations []InvestigationRef `json:"investigations"`
+
+	// Correlations are the activity chains and entity linkages that
+	// include this event -- the third way an event can be connected to
+	// analysis, alongside findings and investigations.
+	Correlations []CorrelationRef `json:"correlations"`
 }
 
 func (s *Service) EventProvenance(caseID, eventID string) (EventProvenance, error) {
@@ -2308,6 +2606,19 @@ func (s *Service) EventProvenance(caseID, eventID string) (EventProvenance, erro
 	out := EventProvenance{
 		Event: ev, RawEvidence: raw, SourceFile: sf, Observations: observations,
 		TimestampKnown: !ev.Timestamp.IsZero(),
+		ArtifactLabel:  eventArtifactLabel(ev.ArtifactType),
+		Findings:       []FindingRef{},
+		Investigations: []InvestigationRef{},
+		Correlations:   []CorrelationRef{},
+	}
+	// Reuse the timeline's own decoration rather than resolving findings
+	// a second way here: one definition of "which findings cite this
+	// event, and which investigations do those belong to" means the
+	// detail view can never disagree with the row the analyst clicked.
+	if decorated, derr := s.decorateEvents(caseID, []model.Event{ev}); derr == nil && len(decorated) == 1 {
+		out.Findings = decorated[0].Findings
+		out.Investigations = decorated[0].Investigations
+		out.Correlations = decorated[0].Correlations
 	}
 	if c, err := s.store.GetCollection(ev.CollectionID); err == nil && c.CaseID == caseID {
 		pc := provenanceCollection(c)
@@ -2333,10 +2644,6 @@ func (s *Service) EventProvenance(caseID, eventID string) (EventProvenance, erro
 // with a deterministic risk score, confidence, and narrative. See
 // internal/investigate for the grouping/scoring/narrative algorithms.
 func (s *Service) Investigations(caseID string) ([]model.Investigation, error) {
-	events, err := s.store.ListEvents(caseID)
-	if err != nil {
-		return nil, fmt.Errorf("loading events: %w", err)
-	}
 	findings, err := s.store.ListFindings(caseID)
 	if err != nil {
 		return nil, fmt.Errorf("loading findings: %w", err)
@@ -2345,7 +2652,76 @@ func (s *Service) Investigations(caseID string) ([]model.Investigation, error) {
 	if err != nil {
 		return nil, fmt.Errorf("loading correlations: %w", err)
 	}
+	// Load only the events investigations actually read.
+	//
+	// investigate.Run indexes the events it is given by id and then looks
+	// up exactly the ids that its groups reference -- and a group is
+	// built from findings and correlations alone (see
+	// internal/investigate.buildGroups). So an event no finding and no
+	// correlation cites cannot appear in any investigation, and reading
+	// it was always wasted work.
+	//
+	// It stopped being merely wasteful in Phase 14, which made this
+	// reachable from a timeline row: the previous ListEvents call read
+	// the WHOLE case, so on a 200,000-event case opening one event's
+	// detail spent about four seconds loading 199,000 events that could
+	// not affect the answer. The output is unchanged, and
+	// TestInvestigations_ScopedEventLoadMatchesFullLoad pins that.
+	events, err := s.store.EventsByIDs(investigationEventIDs(findings, correlations))
+	if err != nil {
+		return nil, fmt.Errorf("loading events: %w", err)
+	}
 	return investigate.Run(caseID, events, findings, correlations), nil
+}
+
+// investigationsFromAllEvents is the pre-Phase-14 implementation, kept
+// as the reference the scoped loader is checked against. It reads EVERY
+// event in the case, which is exactly what Investigations no longer
+// does.
+//
+// Test-only in practice, and deliberately living next to the code it
+// pins rather than in the test file: if someone changes what
+// investigate.Run reads, the reference has to change with it, and it
+// should be impossible to miss while doing so.
+func (s *Service) investigationsFromAllEvents(caseID string) ([]model.Investigation, error) {
+	events, err := s.store.ListEvents(caseID)
+	if err != nil {
+		return nil, err
+	}
+	findings, err := s.store.ListFindings(caseID)
+	if err != nil {
+		return nil, err
+	}
+	correlations, err := s.store.ListCorrelations(caseID)
+	if err != nil {
+		return nil, err
+	}
+	return investigate.Run(caseID, events, findings, correlations), nil
+}
+
+// investigationEventIDs is every event id referenced by a finding or a
+// correlation -- the complete set investigate.Run can resolve.
+func investigationEventIDs(findings []model.Finding, correlations []model.Correlation) []string {
+	seen := map[string]bool{}
+	var ids []string
+	add := func(id string) {
+		if id == "" || seen[id] {
+			return
+		}
+		seen[id] = true
+		ids = append(ids, id)
+	}
+	for _, f := range findings {
+		for _, id := range f.SupportingEvents {
+			add(id)
+		}
+	}
+	for _, c := range correlations {
+		for _, id := range c.EventIDs {
+			add(id)
+		}
+	}
+	return ids
 }
 
 // InvestigationAttackTechnique pairs one ATT&CK technique with exactly
@@ -2577,12 +2953,13 @@ func classifyParseError(err error) (category, message string) {
 	switch {
 	case errors.Is(err, prefetch.ErrUnsupportedCompression):
 		// Tracefall decompresses MAM/LZXPRESS-Huffman Prefetch natively,
-		// so reaching here means the container declared some OTHER
-		// compression method. Naming that is more useful than "could not
-		// be parsed", and it is a genuinely different situation from a
-		// corrupt stream.
-		return ParseFailureUnsupported,
-			"This Prefetch file is in a MAM container that uses a compression method Tracefall does not implement. Tracefall reads uncompressed Prefetch and Windows 10/11 LZXPRESS Huffman (MAM) Prefetch."
+		// including the CRC-header variant, so reaching here means the
+		// container declared some OTHER compression method. The artifact
+		// is present and supported; the compression is the limit, and
+		// that is a different fact from "this file is damaged" or "this
+		// artifact is not read".
+		return ParseFailureUnsupportedCompression,
+			"This is a Prefetch file, and it is present. Its MAM container uses a compression method Tracefall does not implement, so its contents could not be read. Tracefall reads uncompressed Prefetch and Windows 10/11 LZXPRESS Huffman (MAM) Prefetch, with or without the CRC header."
 	case errors.Is(err, prefetch.ErrDecompress):
 		// The container is the right kind and decompression still
 		// failed, which means the compressed stream itself is damaged --
@@ -2592,10 +2969,27 @@ func classifyParseError(err error) (category, message string) {
 	case errors.Is(err, prefetch.ErrUnsupportedVersion):
 		return ParseFailureUnsupported, "This Prefetch file uses a format version Tracefall does not read."
 	case errors.Is(err, browserhistory.ErrUnknownSchema):
-		return ParseFailureUnsupported,
-			"This SQLite database is not a browser history format Tracefall reads. Chromium (Chrome/Edge) History and Firefox places.sqlite are supported; other browser databases are not."
+		// The file is intact; it is simply not history. That is a
+		// classification error, not damaged evidence.
+		return ParseFailureMisclassified,
+			"This SQLite database was cataloged as browser history but does not carry a browser history schema. The file itself is intact. Chromium (Chrome/Edge) History and Firefox places.sqlite are the history databases Tracefall reads."
 	case errors.Is(err, browserhistory.ErrNotSQLite):
-		return ParseFailureUnsupported, "This file was cataloged as a browser history database but is not a SQLite database."
+		return ParseFailureMisclassified, "This file was cataloged as a browser history database but is not a SQLite database at all."
+	case errors.Is(err, prefetch.ErrNotPrefetch):
+		return ParseFailureMisclassified,
+			"This file was cataloged as Prefetch but does not contain a Prefetch (SCCA) record. MAM is a general Windows compression container and the application-compatibility databases in the Prefetch directory use it too."
+	case errors.Is(err, jumplist.ErrNotJumpList):
+		return ParseFailureMisclassified,
+			"This file was cataloged as a Jump List but does not contain a Jump List container. The file itself is intact."
+	case errors.Is(err, jumplist.ErrUnsupportedVersion):
+		return ParseFailureUnsupported, "This Jump List uses a DestList version Tracefall does not read."
+	case errors.Is(err, jumplist.ErrCorrupt):
+		return ParseFailureCorrupt, "This Jump List is corrupt or truncated."
+	case errors.Is(err, jumplist.ErrLimitExceeded):
+		return ParseFailureLimit, "This Jump List exceeds a safety limit and was not parsed."
+	case errors.Is(err, regf.ErrNotHive):
+		return ParseFailureMisclassified,
+			"This file was cataloged as a registry hive but is not a primary hive. Registry transaction logs (.LOG1/.LOG2) share the hive signature and are cataloged separately."
 	case errors.Is(err, pshistory.ErrEncoding):
 		return ParseFailureCorrupt, "This PowerShell history file is not readable as UTF-8 or UTF-16 text."
 	case errors.Is(err, evtx.ErrCorrupt), errors.Is(err, regf.ErrCorrupt), errors.Is(err, ad1.ErrCorrupt), errors.Is(err, prefetch.ErrCorrupt):
@@ -2618,12 +3012,8 @@ func classifyParseError(err error) (category, message string) {
 		return ParseFailureCorrupt, "The NTFS $MFT is corrupt or truncated, so it could not be parsed."
 	case errors.Is(err, ntfs.ErrLimitExceeded):
 		return ParseFailureUnsupported, "This NTFS $MFT exceeds Tracefall's size or record limits and was not parsed."
-	case errors.Is(err, prefetch.ErrNotPrefetch):
-		return ParseFailureUnsupported, "This file is not a Windows Prefetch file despite being cataloged as one."
 	case errors.Is(err, evtx.ErrNotEVTX):
 		return ParseFailureUnsupported, "This file is not a Windows Event Log despite being cataloged as one."
-	case errors.Is(err, regf.ErrNotHive):
-		return ParseFailureUnsupported, "This file is not a registry hive despite being cataloged as one."
 	case errors.Is(err, evtx.ErrLimitExceeded), errors.Is(err, regf.ErrLimitExceeded), errors.Is(err, ad1.ErrLimitExceeded),
 		errors.Is(err, prefetch.ErrLimitExceeded), errors.Is(err, pshistory.ErrTooLarge), errors.Is(err, browserhistory.ErrTooLarge):
 		return ParseFailureLimit, "The file exceeds a safety limit (size, record count, or nesting depth) and was not parsed."

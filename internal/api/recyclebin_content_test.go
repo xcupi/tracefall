@@ -56,10 +56,10 @@ func TestRBContent_BothHalvesAreDistinctSupportedArtifacts(t *testing.T) {
 	disc := discoverBinaryDir(t, mux, c.ID, files)
 
 	want := map[string]struct{ artifact, label string }{
-		rbDir + "$IA1B2C3.docx": {model.ArtifactRecycleBin, "Windows Recycle Bin $I metadata"},
-		rbDir + "$RA1B2C3.docx": {model.ArtifactRecycleBinContent, "Recycle Bin recovered content ($R)"},
-		rbDir + "$RC3D4E5.exe":  {model.ArtifactRecycleBinContent, "Recycle Bin recovered content ($R)"},
-		rbDir + "$RE5F6A7.txt":  {model.ArtifactRecycleBinContent, "Recycle Bin recovered content ($R)"},
+		rbDir + "$IA1B2C3.docx": {model.ArtifactRecycleBin, "Recycle Bin"},
+		rbDir + "$RA1B2C3.docx": {model.ArtifactRecycleBinContent, "Recycle Bin content ($R)"},
+		rbDir + "$RC3D4E5.exe":  {model.ArtifactRecycleBinContent, "Recycle Bin content ($R)"},
+		rbDir + "$RE5F6A7.txt":  {model.ArtifactRecycleBinContent, "Recycle Bin content ($R)"},
 	}
 	for path, w := range want {
 		sf, ok := sourceFileByPath(disc.SourceFiles, path)

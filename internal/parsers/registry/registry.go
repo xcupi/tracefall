@@ -47,6 +47,24 @@ func New() *Parser { return &Parser{limits: regf.DefaultLimits()} }
 func (Parser) Name() string         { return parserName }
 func (Parser) ArtifactType() string { return model.ArtifactRegistryHive }
 
+// EventArtifactTypes declares the artifact types this parser's EVENTS
+// carry beyond the type of the FILE itself.
+//
+// A hive file is classified as a registry hive, which is what it is. The
+// UserAssist and ShellBags structures inside it are separate artifacts
+// in every sense that matters to an analyst -- different evidence,
+// different meaning, different forensic weight -- so their events say
+// so, and the capability registry lists them as things Tracefall
+// supports. See parsers.EventArtifactTypes.
+func (Parser) EventArtifactTypes() []string {
+	return []string{
+		model.ArtifactUserAssist, model.ArtifactShellBags,
+		model.ArtifactAmcache, model.ArtifactRecentDocs, model.ArtifactRunMRU,
+		model.ArtifactTypedPaths, model.ArtifactOpenSaveMRU, model.ArtifactMUICache,
+		model.ArtifactSAM,
+	}
+}
+
 // hiveNames are the filenames Windows uses for the hives Tracefall
 // recognizes by name. This is only a fast path -- DetectContent finds a
 // hive whatever it is called, which matters because hives extracted from
@@ -59,6 +77,17 @@ var hiveNames = map[string]bool{
 func (Parser) Detect(relPath string) bool {
 	return hiveNames[strings.ToLower(filepath.Base(relPath))]
 }
+
+// ConfirmContent makes the filename match above a HINT rather than a
+// verdict: a file called SAM, SYSTEM or NTUSER.DAT is only claimed when
+// its bytes are actually a registry hive.
+//
+// Without this, any file that happened to carry one of those names was
+// claimed by this parser, counted as supported evidence, and then failed
+// at import -- so an analyst was told a hive was broken when in truth it
+// was never a hive. Unrecognized is the honest answer, and it is the one
+// ingest now gives. See parsers.ContentConfirmer.
+func (Parser) ConfirmContent(header []byte) bool { return regf.Sniff(header) }
 
 // DetectContent identifies a hive by its REGF signature, so
 // "SYSTEM.bak", "ntuser.dat.copy", or a hive with no extension at all is
@@ -81,6 +110,17 @@ const (
 // Parse walks the hive once, emitting an event for each targeted
 // artifact it finds.
 func (p Parser) Parse(absPath string) (parsers.ParseResult, error) {
+	return p.ParseWithContext(absPath, parsers.ParseContext{})
+}
+
+// ParseWithContext is Parse plus collection-scoped context. It exists
+// for one artifact: a SAM hive's NT hashes are encrypted under a key
+// that lives in the SYSTEM hive, so the SAM alone cannot decode them.
+// See parsers.ParseContext and samaccount.go.
+//
+// Every other artifact this parser reads ignores ctx entirely, and the
+// zero context reproduces Parse exactly.
+func (p Parser) ParseWithContext(absPath string, ctx parsers.ParseContext) (parsers.ParseResult, error) {
 	h, err := regf.Open(absPath, p.limits)
 	if err != nil {
 		return parsers.ParseResult{}, fmt.Errorf("registry: %w", err)
@@ -114,6 +154,39 @@ func (p Parser) Parse(absPath string) (parsers.ParseResult, error) {
 		out.Events = append(out.Events, ev)
 		out.Raw = append(out.Raw, raw)
 	}
+
+	// Phase 15: the two user-activity structures a per-user hive holds.
+	// Both are no-ops for a hive that does not contain them, and neither
+	// can fail the parse -- a SYSTEM hive with no UserAssist tree is a
+	// valid artifact with zero records of that kind, not an error. See
+	// useractivity.go.
+	uaEvents, uaRaw := p.userAssistEvents(h, hiveType, host, user)
+	out.Events = append(out.Events, uaEvents...)
+	out.Raw = append(out.Raw, uaRaw...)
+
+	sbEvents, sbRaw := p.shellBagEvents(h, hiveType, host, user)
+	out.Events = append(out.Events, sbEvents...)
+	out.Raw = append(out.Raw, sbRaw...)
+
+	// Phase 16: Amcache, and the per-user MRU structures. Both are
+	// no-ops for a hive that does not hold them -- an NTUSER.DAT has no
+	// Amcache tree and an Amcache.hve has no RunMRU, and neither absence
+	// is an error. See appactivity.go.
+	amEvents, amRaw := p.amcacheEvents(h, host)
+	out.Events = append(out.Events, amEvents...)
+	out.Raw = append(out.Raw, amRaw...)
+
+	mruEv, mruRaw := p.mruEvents(h, hiveType, host, user)
+	out.Events = append(out.Events, mruEv...)
+	out.Raw = append(out.Raw, mruRaw...)
+
+	// Phase 18: Windows local accounts and their NTLM hashes. Gated on
+	// the SAM account structures actually being present, not on the
+	// filename or on classifyHive's answer, so a hive that merely got
+	// called SAM contributes nothing here. See samaccount.go.
+	samEv, samRaw := p.samAccountEvents(h, absPath, hiveType, ctx)
+	out.Events = append(out.Events, samEv...)
+	out.Raw = append(out.Raw, samRaw...)
 
 	_, walkErr := h.Walk(func(k regf.Key) error {
 		for _, v := range k.Values {

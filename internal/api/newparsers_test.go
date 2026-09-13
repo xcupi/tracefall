@@ -247,7 +247,7 @@ func TestMAMCompressedPrefetchFailuresAreDistinguished(t *testing.T) {
 		wantWord     string
 	}{
 		{"undecodable stream", prefetchgen.Compressed(8192), ParseFailureCorrupt, "decompress"},
-		{"unknown method", prefetchgen.CompressedMethod(8192, 0x03), ParseFailureUnsupported, "compression method"},
+		{"unknown method", prefetchgen.CompressedMethod(8192, 0x03), ParseFailureUnsupportedCompression, "compression method"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

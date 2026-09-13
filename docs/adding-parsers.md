@@ -141,6 +141,196 @@ parser package.
    decoding (`decodeUTF16`) is the existing example of self-contained
    binary/encoding handling inside a parser package.
 
+## Making a new parser's events findable
+
+Nothing extra is required. The forensic timeline
+([docs/forensic-search.md](forensic-search.md)) queries the `events`
+table directly, and its filter dropdowns are built from the values a case
+actually contains, so a new parser's artifact type and event types appear
+as filter options as soon as the first file is imported.
+
+Two things are worth getting right so the events are searchable by what
+an analyst would actually type:
+
+- **Put values in typed columns where one exists.** `file_path`,
+  `process_name`, `command_line`, `network_dest` and the rest are what
+  free-text search and the field-scoped filters read.
+- **If a value has no typed column, check whether its `extra` key is one
+  free-text search already covers** — `url`, `page_title`,
+  `original_path`, `original_name`, `target_path`, `file_name`,
+  `application`, `executable_name`, `content_type`. Reusing an existing
+  key makes the value searchable immediately. Introducing a new key that
+  ought to be searchable means adding it to `freeTextJSONKeys` in
+  `internal/store/eventquery.go` AND to the table in
+  docs/forensic-search.md — a test fails if the two disagree.
+
+### Reading several artifacts out of one file
+
+Discovery assigns **exactly one parser per evidence file**, so a
+container that holds more than one artifact must be read by the parser
+that claims it. A registry hive is the standing example: `NTUSER.DAT`
+carries persistence values, UserAssist, ShellBags and five MRU
+structures, and `Amcache.hve` carries the application inventory — all
+read by `internal/parsers/registry`.
+
+Adding a competing parser for such a file does not work: the first
+match wins, and the loser never runs.
+
+The EVENTS still carry their own artifact types. Implement the optional
+`parsers.EventArtifactTypeSource` interface to declare them:
+
+```go
+func (Parser) EventArtifactTypes() []string {
+    return []string{model.ArtifactUserAssist, model.ArtifactAmcache}
+}
+```
+
+That tells the capability registry those types are supported, so they
+get real labels and priorities instead of a generated fallback. The
+FILE's classification is unchanged — an `Amcache.hve` is still reported
+as the registry hive it is, which is what was collected and hashed.
+
+### A filename match that needs confirming
+
+`Detect(relPath)` sees only a path. When the name a parser matches is
+also an ordinary word — `SAM`, `SYSTEM`, `NTUSER.DAT` — a name match
+alone will claim files that are not the artifact at all, mark them
+supported, and then fail at import. That reports *"your hive is
+corrupt"* about a file that was never a hive.
+
+Implement the optional `parsers.ContentConfirmer` so the name match has
+to be backed by the bytes:
+
+```go
+func (Parser) ConfirmContent(header []byte) bool { return regf.Sniff(header) }
+```
+
+Discovery then returns a refused file to content-based detection, and if
+nothing claims it there it is reported as **unrecognized** — which is
+what it is. A parser whose filenames are produced by a tool (the EZ
+Tools CSVs) should NOT implement this: those names really are proof.
+
+### A content detector that is too broad on its own
+
+`ContentConfirmer`'s mirror image. A signature can identify a **format**
+correctly and still be the wrong answer about the **artifact**.
+
+A JPEG signature says "this is a picture" and nothing more, so the image
+parser's content detector claims every JPEG in a collection — including
+the cached response bodies inside a Chromium cache directory, 84 of them
+on one real image. Those really are JPEGs. They are also already
+correctly catalogued as browser-cache evidence, and reclassifying them
+lost the context that made them meaningful.
+
+Implement the optional `parsers.PathScopedDetector` to say where your
+content detection should be consulted at all:
+
+```go
+func (Parser) DetectPath(relPath string) bool {
+	return !browsercache.InCacheDirectory("/" + strings.ToLower(relPath))
+}
+```
+
+Returning `false` skips `DetectContent` for that file and leaves it to
+whatever else claims or recognizes it. Returning `true` means *"ask the
+bytes"* — never *"this is the artifact"*. A parser that does not
+implement it is consulted for every file, exactly as before.
+
+Reach for this only when your detector really is that broad. A parser
+with a distinctive magic number does not need it.
+
+### A parser that needs a DIFFERENT file
+
+Parsing is file-local by design, and one artifact genuinely is not: a
+SAM hive's NT hashes are encrypted under a key stored in the SYSTEM
+hive. Implement `parsers.ContextualParser` and read what you need from
+`parsers.ParseContext`, which the import prepares **once per collection**
+before any file is parsed.
+
+Do not go looking on the filesystem for a sibling file. That was tried
+and it is wrong for AD1 images, where entries are materialized one at a
+time immediately before each is parsed — the SAM parser was scanning a
+directory the SYSTEM hive had not been written into yet, and reporting
+every hash as undecodable while the hive sat in the same collection.
+Anything a parser needs from outside its own file belongs in
+`ParseContext`, derived where the whole collection is in view.
+
+The zero `ParseContext` must always be handled: it means "no context
+available", and the parser still has to produce its best honest answer.
+
+### Reading credential material
+
+If a parser can extract credential material — `internal/parsers/registry`
+does, from the SAM hive — three rules apply, and the SAM tests in
+`internal/api/sam_integration_test.go` enforce all three:
+
+1. Keep it out of the **free-text search index**. `freeTextJSONKeys` is
+   an allowlist; do not add a credential key to it. Search must not
+   become a way to confirm a secret by guessing it.
+2. Keep it out of the **Detail column**, timeline rows, URLs and logs.
+   It belongs in the event's own detail view, with its own label.
+3. Never let its mere existence become a **finding** or a
+   **correlation**. Every Windows machine has account hashes; alerting
+   on that buries the alerts that matter.
+
+And extract only. Tracefall does not crack, and a parser must not turn
+a hash back into anything.
+
+### Enumerating a wide key
+
+Use `regf.Hive.ChildKeys` to read a key's children, not `Subkeys`
+followed by `OpenKey` on each name. `OpenKey` restarts at the hive root
+and scans siblings at every level, so the second pattern is quadratic:
+on a 20,000-entry Amcache inventory it was measured at **9 minutes and
+30 GiB of allocation**, against 1.7 seconds and 226 MiB with
+`ChildKeys`.
+
+A parser that deliberately produces no events (see the `$LogFile` and
+Recycle Bin `$R` parsers) needs nothing here, but should say so in its
+package comment: docs/forensic-search.md lists those cases explicitly so
+an analyst does not read "no events" as "nothing was found".
+
+## When one file holds several artifacts
+
+Discovery assigns exactly ONE parser per evidence file, so a container
+that holds more than one artifact cannot be split across parsers -- a
+second parser for the same file would simply never run. An `NTUSER.DAT`
+is the worked example: it is a registry hive, and it also holds
+UserAssist entries and a ShellBags tree.
+
+The pattern, implemented in `internal/parsers/registry`:
+
+- The parser claims the FILE and keeps the file's own artifact type.
+  That is what was collected, hashed and attested.
+- Its EVENTS carry their own `ArtifactType`, because an analyst
+  filtering a timeline is asking what an observation IS, not where it
+  was stored.
+- The parser implements `parsers.EventArtifactTypeSource` to declare
+  those extra types, which is what makes the capability registry list
+  them as supported with real labels and priorities.
+
+Reach for this only when the structures are genuinely different
+artifacts with different forensic meaning. Emitting several event TYPES
+from one artifact type is the ordinary case and needs none of it.
+
+## Say what the artifact proves
+
+Windows artifacts differ enormously in evidentiary strength, and the
+event model carries that distinction in three places. Fill all three:
+
+- The **event type** names what the artifact records
+  (`userassist_activity`, not `process_create`).
+- **`evidence_meaning`** states what the artifact does and does not
+  establish, in a sentence an analyst can quote.
+- **`timestamp_meaning`** states what the time IS. Where the artifact
+  records no time, leave `Timestamp` zero and set `timestamp_basis` --
+  never substitute the file's mtime, the key's last-write time, or any
+  other surrogate.
+
+`ProcessName` and `CommandLine` assert that a process existed. Do not
+populate them from an artifact that does not record one. See
+docs/windows-artifacts.md for how each existing artifact is placed.
+
 ## Regenerating or extending the synthetic test dataset
 
 `testdata/synthetic_case` is a hand-built, **clearly synthetic — not

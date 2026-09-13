@@ -66,19 +66,29 @@ func TestDecompress_RealWindowsCorpus(t *testing.T) {
 	}
 	sort.Strings(names)
 
-	var mam, decoded, multiChunk int
+	var mam, decoded, multiChunk, scca, withCRC int
 	var totalOut int
 	for _, name := range names {
 		raw, err := os.ReadFile(filepath.Join(dir, name))
-		if err != nil || len(raw) < 8 || string(raw[:3]) != "MAM" {
+		if err != nil || len(raw) < 12 || string(raw[:3]) != "MAM" {
 			continue
 		}
 		mam++
+		// The header length depends on the format byte's CRC flag. A
+		// fixed 8 fed four bytes of CRC to the decoder as if they were
+		// compressed data, which failed in a way that looked like a
+		// corrupt stream rather than a misread header -- see
+		// prefetch.MAMHeaderLen.
+		hdr := 8
+		if raw[3]&0x80 != 0 {
+			hdr = 12
+			withCRC++
+		}
 		declared := int(binary.LittleEndian.Uint32(raw[4:8]))
 		if declared > 65536 {
 			multiChunk++
 		}
-		out, err := lzxpress.HuffmanDecompress(raw[8:], declared, 64<<20)
+		out, err := lzxpress.HuffmanDecompress(raw[hdr:], declared, 64<<20)
 		if err != nil {
 			t.Errorf("%s: %v", name, err)
 			continue
@@ -87,24 +97,34 @@ func TestDecompress_RealWindowsCorpus(t *testing.T) {
 			t.Errorf("%s: produced %d bytes, header declares %d", name, len(out), declared)
 			continue
 		}
-		// The decisive check: the bytes must actually BE a Prefetch file.
-		// A decoder that merely produced the right NUMBER of bytes would
-		// pass a length check and fail this one.
-		if len(out) < 84 || string(out[4:8]) != "SCCA" {
-			t.Errorf("%s: decompressed output is not SCCA", name)
-			continue
-		}
 		decoded++
 		totalOut += len(out)
+
+		// MAM is a general Windows compression container, not a Prefetch
+		// format: this directory also holds the application
+		// compatibility databases, wrapped the same way. So SCCA is
+		// required of the .pf files and COUNTED for the rest -- a
+		// decoder that merely produced the right NUMBER of bytes would
+		// pass the length check and fail this one.
+		isPrefetchName := strings.EqualFold(filepath.Ext(name), ".pf")
+		if len(out) >= 84 && string(out[4:8]) == "SCCA" {
+			scca++
+		} else if isPrefetchName {
+			t.Errorf("%s: a .pf file decompressed to something that is not SCCA", name)
+		}
 	}
 	if mam == 0 {
-		t.Skip("corpus contains no MAM-compressed Prefetch files")
+		t.Skip("corpus contains no MAM-compressed files")
 	}
 	if decoded != mam {
-		t.Errorf("decoded %d of %d real MAM Prefetch files", decoded, mam)
+		t.Errorf("decoded %d of %d real MAM containers", decoded, mam)
 	}
-	t.Logf("decoded %d/%d real Windows MAM Prefetch files (%d multi-chunk, %d bytes)",
-		decoded, mam, multiChunk, totalOut)
+	if scca == 0 {
+		t.Error("no MAM container in the corpus decompressed to a Prefetch file")
+	}
+	t.Logf("decoded %d/%d real Windows MAM containers (%d Prefetch, %d non-Prefetch, "+
+		"%d with a CRC header, %d multi-chunk, %d bytes)",
+		decoded, mam, scca, mam-scca, withCRC, multiChunk, totalOut)
 }
 
 // The same evidence must decode identically every time.

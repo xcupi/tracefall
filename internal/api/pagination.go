@@ -51,7 +51,13 @@ var (
 	// remain for anyone who would rather scroll than page.
 	evidencePageSizes = []int{10, 25, 50, 100, 250}
 	recordPageSizes   = []int{10, 25, 50, 100}
-	timelinePageSizes = []int{10, 25, 50, 100, 250}
+	// timelinePageSizes is the forensic timeline's allow-list (Phase 14).
+	// Deliberately stops at 100: the timeline is now paged on the SERVER,
+	// so a larger page is a larger query, a larger response and a larger
+	// DOM for a view whose job is scanning rather than bulk reading. 250
+	// was offered while paging happened in the browser over an
+	// already-loaded set, where it cost nothing extra.
+	timelinePageSizes = []int{10, 25, 50, 100}
 )
 
 const (
@@ -61,6 +67,11 @@ const (
 	// visible.
 	defaultEvidencePageSize = 10
 	defaultRecordPageSize   = 10
+	// defaultTimelinePageSize is 10 for the same reason: ten forensic
+	// events with their time, artifact, type and detail is about what an
+	// analyst can actually read at once, and the pager is visible without
+	// scrolling past a wall of rows first.
+	defaultTimelinePageSize = 10
 )
 
 // parsePageRequest reads page/page_size from the query string.

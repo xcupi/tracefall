@@ -234,6 +234,8 @@ docs/                    architecture and engine documentation
 
 See also: [ARCHITECTURE.md](ARCHITECTURE.md),
 [docs/data-model.md](docs/data-model.md),
+[docs/forensic-search.md](docs/forensic-search.md),
+[docs/windows-artifacts.md](docs/windows-artifacts.md),
 [docs/detection-engine.md](docs/detection-engine.md),
 [docs/correlation-engine.md](docs/correlation-engine.md),
 [docs/adding-parsers.md](docs/adding-parsers.md),
@@ -257,6 +259,19 @@ See also: [ARCHITECTURE.md](ARCHITECTURE.md),
   system-wide security log survives.
 - Detection rules are a representative starter set (7 rules), not
   comprehensive coverage.
+- **No password cracking, ever.** Tracefall extracts Windows local
+  account records and their stored NTLM hashes from a SAM hive
+  ([docs/windows-artifacts.md](docs/windows-artifacts.md#windows-sam)),
+  and stops there. An NTLM hash is not the plaintext password and is not
+  reversible into one; there is no wordlist, no brute force, and no
+  integration with Hashcat, John the Ripper or anything comparable.
+  Decoding the hash requires the SYSTEM hive to be collected alongside
+  the SAM: the key it is wrapped under lives there, not in the SAM.
+  Without it every account is still reported, with its hash marked as
+  still encrypted (not "missing" — the material is there) and the reason
+  stated.
+- **SECURITY hive secrets** (LSA secrets, cached domain credentials) are
+  not extracted.
 - No LLM/AI anywhere in this phase, by design.
 
 See ARCHITECTURE.md's "Recommended Phase 2" section for what's next.

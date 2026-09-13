@@ -484,6 +484,99 @@ function esc(s) {
     .replace(/"/g, "&quot;");
 }
 
+// ---------------- Clipboard ----------------
+//
+// Tracefall is normally reached over plain HTTP on a LAN address, which
+// is NOT a secure context. navigator.clipboard is undefined there in
+// Chrome and rejects in Firefox, so the async Clipboard API cannot be
+// the only path -- a Copy button that only works on localhost is a
+// button that does not work where the tool is actually used.
+//
+// The secure-context check is deliberately made BEFORE any await. If we
+// awaited a clipboard promise that then rejected, the browser's
+// transient user activation from the click may already have expired by
+// the time execCommand runs, and the fallback would fail too. On plain
+// HTTP we therefore go straight to the synchronous fallback and keep
+// the gesture intact; the async API is still tried first wherever it
+// can actually succeed.
+
+// copyText copies the COMPLETE text and reports whether it worked. It
+// never reports success it did not get: a false return has to reach the
+// analyst, or they paste whatever was on the clipboard before into a
+// report believing it is the value they clicked.
+async function copyText(text) {
+  const value = text === null || text === undefined ? "" : String(text);
+  if (value === "") return false;
+  if (window.isSecureContext && navigator.clipboard && navigator.clipboard.writeText) {
+    try {
+      await navigator.clipboard.writeText(value);
+      return true;
+    } catch (_) {
+      // Permission denied or a non-focused document: fall through.
+    }
+  }
+  return copyTextFallback(value);
+}
+
+// copyTextFallback is the plain-HTTP path: a temporary off-screen
+// textarea holding the full value, selected and copied with the legacy
+// command, then removed again whatever the outcome. Focus is returned
+// to whatever had it so the page does not visibly jump.
+function copyTextFallback(value) {
+  const previous = document.activeElement;
+  const ta = document.createElement("textarea");
+  ta.value = value;
+  ta.setAttribute("readonly", "");
+  ta.setAttribute("aria-hidden", "true");
+  // position:fixed with a zero opacity keeps the textarea out of the
+  // layout and off the screen without using display:none or
+  // visibility:hidden, neither of which can be selected.
+  ta.style.position = "fixed";
+  ta.style.top = "0";
+  ta.style.left = "0";
+  ta.style.width = "1px";
+  ta.style.height = "1px";
+  ta.style.padding = "0";
+  ta.style.border = "none";
+  ta.style.opacity = "0";
+  document.body.appendChild(ta);
+  let ok = false;
+  try {
+    ta.focus();
+    ta.select();
+    // iOS Safari ignores select() on a readonly textarea.
+    if (ta.setSelectionRange) ta.setSelectionRange(0, value.length);
+    ok = document.execCommand("copy") === true;
+  } catch (_) {
+    ok = false;
+  } finally {
+    ta.remove();
+  }
+  if (previous && typeof previous.focus === "function") previous.focus();
+  return ok;
+}
+
+// flashCopyState shows the outcome on the button that was clicked and
+// restores its normal label afterwards. State lives on the button, so
+// several Copy buttons on one page never interfere with each other, and
+// a second click while a state is showing does not capture "Copied" as
+// the label to restore.
+function flashCopyState(btn, ok) {
+  if (btn.dataset.copyTimer) clearTimeout(Number(btn.dataset.copyTimer));
+  else btn.dataset.copyLabel = btn.textContent;
+  btn.textContent = ok ? "Copied" : "Copy failed";
+  btn.classList.toggle("copy-ok", ok);
+  btn.classList.toggle("copy-failed", !ok);
+  if (!ok) btn.title = "Could not write to the clipboard. Select the value and press Ctrl+C.";
+  const timer = setTimeout(() => {
+    btn.textContent = btn.dataset.copyLabel || "Copy";
+    btn.classList.remove("copy-ok", "copy-failed");
+    btn.removeAttribute("title");
+    delete btn.dataset.copyTimer;
+  }, ok ? 1500 : 2500);
+  btn.dataset.copyTimer = String(timer);
+}
+
 // fmtTime renders a timestamp with an explicit "UTC" label rather than
 // just an ISO "Z" suffix (Phase 6: "the investigator must be able to
 // distinguish event timestamp / collection timestamp / analysis
@@ -594,6 +687,52 @@ function tzParts(d, opts) {
   const parts = tzFormatter(displayTimezone, opts).formatToParts(d);
   const get = (t) => (parts.find((p) => p.type === t) || {}).value || "";
   return get;
+}
+
+// TZ_WALL_OPTS is TZ_DATE_TIME_OPTS pinned to the h23 hour cycle.
+//
+// hour12:false alone is not enough: some engines render midnight as
+// "24" under that setting, and an hour of 24 fed back into Date.UTC
+// silently becomes the next day. The wall-clock arithmetic below depends
+// on reading the hour back exactly as written, so it asks for h23
+// explicitly.
+const TZ_WALL_OPTS = { ...TZ_DATE_TIME_OPTS, hourCycle: "h23" };
+
+// zoneOffsetMs is the display zone's offset from UTC at instant ts.
+//
+// Derived by asking Intl what the wall clock reads there and subtracting
+// -- there is no direct offset API, and hardcoding one would be wrong
+// twice a year for every zone that observes daylight saving.
+function zoneOffsetMs(ts) {
+  const g = tzParts(new Date(ts), TZ_WALL_OPTS);
+  const hour = Number(g("hour")) % 24;
+  const asIfUTC = Date.UTC(
+    Number(g("year")), Number(g("month")) - 1, Number(g("day")),
+    hour, Number(g("minute")), Number(g("second"))
+  );
+  return asIfUTC - ts;
+}
+
+// wallTimeToInstant interprets a wall-clock reading in the DISPLAY
+// timezone and returns the instant it names.
+//
+// This is what makes a date filter mean what the analyst sees. Every
+// timestamp on screen is rendered in the configured display zone, so
+// "29 April, 00:00" typed into a date box has to mean midnight in that
+// same zone. Before this it was parsed with `new Date("2021-04-29T00:00")`,
+// which is midnight in the BROWSER's zone -- so an analyst in a UTC
+// browser reading Jakarta timestamps filtered a window seven hours away
+// from the one they were looking at, and quietly got the wrong day's
+// evidence.
+//
+// The offset is applied twice because the offset itself depends on the
+// instant: the first pass gets close enough to land in the right side of
+// a daylight-saving transition, and the second uses the offset actually
+// in force there.
+function wallTimeToInstant(y, month, day, hour, minute, second) {
+  const guess = Date.UTC(y, month - 1, day, hour, minute, second);
+  const first = guess - zoneOffsetMs(guess);
+  return new Date(guess - zoneOffsetMs(first));
 }
 
 function fmtTime(ts) {
@@ -708,26 +847,70 @@ const SOURCE_TYPE_LABELS = {
 // analyst less than "Windows Event Log (EVTX)" does, especially now that
 // the same artifact type can arrive either as a raw .evtx or as an
 // EvtxECmd CSV export of one.
+// ARTIFACT_TYPE_LABELS names an artifact type for the views that do NOT
+// receive a label from the server.
+//
+// The SERVER is authoritative: the forensic timeline reads
+// `artifact_label` off each event, which comes from the capability
+// registry (internal/artifacts), and the evidence views prefer
+// `type_label` for the same reason. This table exists only for the
+// endpoints that return a bare model.Event -- the investigation detail
+// view and the correlation cards -- and its values must match the
+// registry's, or the same artifact would be called two things in one
+// application.
+//
+// It is kept in step by TestUI_ArtifactLabelsMatchTheServerRegistry,
+// which fails if a supported artifact type is missing here or is named
+// differently from the registry.
 const ARTIFACT_TYPE_LABELS = {
   windows_event_log: "Windows Event Log (EVTX)",
   prefetch: "Prefetch",
   registry_run_key: "Registry (RECmd export)",
   registry_hive: "Windows Registry Hive",
-  scheduled_task: "Scheduled Task",
+  scheduled_task: "Scheduled Task XML",
+  powershell_history: "PowerShell console history",
+  browser_history: "Browser history (Chromium / Firefox)",
+  browser_download: "Browser download",
   ntfs_mft: "NTFS $MFT",
   ntfs_usnjrnl: "NTFS $UsnJrnl change journal",
   ntfs_logfile: "NTFS $LogFile transaction log",
   browser_cache: "Browser cache entry",
-  browser_cache_index: "Browser cache index",
+  browser_cache_index: "Browser cache container/index",
   windows_lnk: "Windows LNK shortcut",
-  jumplist_automatic: "Jump List (Automatic Destinations)",
-  jumplist_custom: "Jump List (Custom Destinations)",
-  recycle_bin_metadata: "Recycle Bin metadata ($I)",
-  recycle_bin_content: "Recovered deleted content ($R)",
+  jumplist_automatic: "Windows Jump List (Automatic Destinations)",
+  jumplist_custom: "Windows Jump List (Custom Destinations)",
+  recycle_bin_metadata: "Recycle Bin",
+  recycle_bin_content: "Recycle Bin content ($R)",
+  userassist: "UserAssist",
+  shellbags: "ShellBags",
+  amcache: "Amcache",
+  recent_docs: "RecentDocs",
+  run_mru: "Run dialog (RunMRU)",
+  typed_paths: "TypedPaths",
+  opensave_mru: "Open/Save dialog (OpenSavePidlMRU)",
+  muicache: "MUICache",
+  sam_account: "Windows SAM",
+  activities_cache: "Windows Timeline (ActivitiesCache)",
+  filezilla_server: "FileZilla server entry",
+  image_metadata: "Image metadata (EXIF)",
+  image_gps: "Image location (EXIF GPS)",
 };
+
+// artifactLabel names an artifact type for display.
+//
+// An unlisted type is HUMANIZED rather than shown raw. A new artifact
+// type reaching this path is a gap in the table above, and rendering
+// "recycle_bin_metadata" in a column an analyst reads is a worse way to
+// surface that gap than rendering "Recycle Bin Metadata" -- the test
+// catches the omission; the UI should not punish the reader for it.
 function artifactLabel(t) {
   if (!t) return "-";
-  return ARTIFACT_TYPE_LABELS[t] || t;
+  if (ARTIFACT_TYPE_LABELS[t]) return ARTIFACT_TYPE_LABELS[t];
+  return t
+    .split("_")
+    .filter(Boolean)
+    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+    .join(" ");
 }
 
 // ---------------- Investigation cross-referencing ----------------
@@ -808,6 +991,37 @@ const EVENT_CATEGORIES = {
   lnk_target_modified: "filesystem",
   lnk_target_accessed: "filesystem",
   recyclebin_deletion: "filesystem",
+  // Phase 15/16 artifacts. Each is bucketed by what the OBSERVATION is,
+  // not by where it was stored -- a UserAssist entry is user activity
+  // whether or not it lives in a registry hive. Leaving these unmapped
+  // dropped every one of them into "Other", which told an analyst
+  // scanning the Category column nothing at all.
+  userassist_activity: "execution",
+  amcache_application: "execution",
+  // An account record is not activity of any kind -- see
+  // model.EventSAMLocalAccount. Its own category so it can never be
+  // read off the timeline as a logon or an execution.
+  sam_local_account: "account",
+  activity_recorded: "execution",
+  shellbag_navigation: "user_activity",
+  recent_document: "user_activity",
+  run_mru_command: "user_activity",
+  typed_path: "user_activity",
+  opensave_mru: "user_activity",
+  muicache_entry: "other",
+  powershell_history_command: "execution",
+  browser_download: "browser_download",
+  logoff: "authentication",
+  // Phase 20. A FileZilla entry is a CONFIGURATION record naming a
+  // remote endpoint -- "network" is where an analyst looks for it, and
+  // the event's own evidence_meaning is what stops it reading as an
+  // observed connection.
+  filezilla_server_entry: "network",
+  // Image metadata is neither activity nor filesystem evidence: it is
+  // what a file CONTAINS. Its own category so it can never be read off
+  // the timeline as something having happened on this machine.
+  image_metadata_recorded: "image_metadata",
+  image_gps_recorded: "image_metadata",
 };
 const EVENT_CATEGORY_LABELS = {
   authentication: "Authentication",
@@ -818,6 +1032,18 @@ const EVENT_CATEGORY_LABELS = {
   filesystem_journal: "File System Journal",
   browser_history: "Browser History",
   browser_cache: "Browser Cache",
+  browser_download: "Browser Download",
+  // "User activity" covers the shell artifacts that record what a person
+  // did through Explorer -- navigation, recent documents, typed paths,
+  // dialog selections. Deliberately not "Execution": none of them
+  // records a process.
+  user_activity: "User Activity",
+  account: "Account / Credential",
+  // Metadata carried INSIDE a file, as opposed to anything the machine
+  // did. An EXIF timestamp is the writing device's clock, not this
+  // host's, and the category keeps that distinction visible in the
+  // column an analyst scans.
+  image_metadata: "Image Metadata",
   other: "Other",
 };
 function eventCategory(e) {
@@ -1023,6 +1249,12 @@ const FILTER_FIELD_LABELS = {
   family: "Artifact type",
   priority: "Priority",
   status: "Status",
+  // Phase 14 forensic timeline. "Artifact" and "Event type" are the
+  // model's own vocabularies (model.Artifact* / model.Event*), offered
+  // as the values the case actually contains -- not a UI-invented
+  // grouping over them.
+  artifact: "Artifact",
+  eventType: "Event type",
 };
 
 // filterStates holds ONE state object per filter bar (keyed by prefix).
@@ -1096,6 +1328,8 @@ function renderFilterBar(prefix, cfg) {
   if (cfg.severity) add("severity", SEVERITY_FILTER_OPTIONS);
   if (cfg.confidence) add("confidence", CONFIDENCE_FILTER_OPTIONS);
   add("category", cfg.category);
+  add("artifact", cfg.artifact);
+  add("eventType", cfg.eventType);
   add("host", cfg.host);
   add("user", cfg.user);
   add("process", cfg.process);
@@ -1139,6 +1373,17 @@ function renderFilterBar(prefix, cfg) {
     // matches it.
     hasSearch: !!cfg.search,
     q: prev ? prev.q || "" : "",
+    // searchFields, when given, turns the one search box into a
+    // field-scoped one: the analyst picks WHICH forensic field the term
+    // applies to. It is a select next to the box rather than seven
+    // separate inputs, because a forensic search is one term looked for
+    // in one place, and seven boxes would imply they combine.
+    searchFields: cfg.searchFields || null,
+    qField: prev && prev.searchFields ? prev.qField || "" : "",
+    // searchDebounceMs is longer for a bar that queries the SERVER on
+    // each change: 120ms is right for re-rendering an in-memory table
+    // and wrong for issuing a request per keystroke.
+    searchDebounceMs: cfg.searchDebounceMs || 120,
   };
   fields.forEach((f) => {
     const carried = prev && prev.sel[f.key] ? f.options.filter((o) => prev.sel[f.key].has(o.value)).map((o) => o.value) : [];
@@ -1160,8 +1405,17 @@ function renderFilterBar(prefix, cfg) {
   // The search box sits ABOVE the dropdown row: search is how an
   // investigator finds something they can already name, filters are how
   // they narrow a set they cannot. They reach for them in that order.
+  const fieldSelect = cfg.searchFields
+    ? `<select class="filter-q-field" id="${prefix}-f-qfield"
+               aria-label="Field to search">
+         ${cfg.searchFields
+           .map((f) => `<option value="${esc(f.value)}" ${f.value === state.qField ? "selected" : ""}>${esc(f.label)}</option>`)
+           .join("")}
+       </select>`
+    : "";
   const searchBox = cfg.search
     ? `<div class="filter-search-row">
+         ${fieldSelect}
          <input type="search" class="filter-q" id="${prefix}-f-q"
                 placeholder="${esc(cfg.search)}" aria-label="${esc(cfg.search)}" autocomplete="off"
                 value="${esc(state.q)}" />
@@ -1297,45 +1551,25 @@ function filterSearchApply(dd) {
   if (empty) empty.hidden = visible !== 0;
 }
 
-// browserUtcOffsetLabel renders the browser's CURRENT offset from UTC,
-// computed live (never hardcoded) so it's correct for the running
-// machine and for whichever side of a DST boundary today falls on.
-// getTimezoneOffset returns minutes BEHIND UTC, hence the negation.
-function browserUtcOffsetLabel() {
-  const mins = -new Date().getTimezoneOffset();
-  if (mins === 0) return "UTC";
-  const sign = mins > 0 ? "+" : "-";
-  const abs = Math.abs(mins);
-  const pad = (n) => String(n).padStart(2, "0");
-  return `UTC${sign}${pad(Math.floor(abs / 60))}:${pad(abs % 60)}`;
-}
-
-// True when the browser is already on UTC, in which case there is no
-// local-vs-UTC ambiguity to warn about and the extra wording is noise.
-function browserIsUTC() {
-  return new Date().getTimezoneOffset() === 0;
-}
-
 // The date range is entered through native date/time inputs, kept inside
 // a compact popover instead of stretched across the bar as four
 // full-width rows.
 //
-// The timezone line is the point of this popover's header: the Timeline
-// column displays timestamps in UTC, while these native inputs are read
-// in the browser's local zone (unchanged, deliberately -- see
-// readDateTime). Rather than silently converting either one, the two
-// readings are labelled so the investigator can see exactly which is
-// which.
+// The header states ONE zone, because since Phase 14 there is only one:
+// the bounds typed here are read as wall-clock readings in the display
+// timezone (readDateTime -> wallTimeToInstant), which is the same zone
+// every timestamp in the table is rendered in. Previously the inputs
+// were read in the browser's zone while the table showed another, and
+// the popover had to explain the mismatch rather than not have one.
 function renderDatePopover(prefix) {
-  const tz = browserUtcOffsetLabel();
   return `
     <div class="filter-pop filter-pop-date" id="${prefix}-f-date-pop" role="dialog" aria-label="Date range filter" hidden>
       <div class="filter-pop-head">
         <span class="filter-pop-title">Date range</span>
       </div>
       <p class="filter-tz-note small muted">
-        These inputs read in <strong>${esc(tz)}</strong>${browserIsUTC() ? "" : " (browser local)"}.
-        <br/>Timeline timestamps are displayed in <strong>${esc(displayTimezone)}</strong> (${esc(tzLabel())}).
+        Entered and displayed in <strong>${esc(displayTimezone)}</strong> (${esc(tzLabel())}),
+        the same zone as every timestamp shown.
       </p>
       <div class="filter-date-row">
         <label for="${prefix}-f-from-d">From</label>
@@ -1362,17 +1596,26 @@ function renderDatePopover(prefix) {
 // "Jan 15, 09:00". Uses the same local-time reading the input itself
 // shows (see readFilterBar's note on bound parsing).
 function fmtFilterDate(d) {
-  const month = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][d.getMonth()];
-  const pad = (n) => String(n).padStart(2, "0");
-  return `${month} ${d.getDate()}, ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  // Rendered in the DISPLAY timezone, matching how the bound was
+  // entered and how the table below shows its timestamps. Using the
+  // browser's zone here (as this did before Phase 14) put a chip on
+  // screen that disagreed with both.
+  //
+  // SECONDS are always shown. The filter resolves to second precision,
+  // so a chip reading "18:17 → 18:17" described a one-second range and a
+  // whole-minute range identically -- and the chip is the only place an
+  // analyst can see what a collapsed popover is still filtering by.
+  const g = tzParts(d, { ...TZ_WALL_OPTS, month: "short" });
+  return `${g("month")} ${Number(g("day"))}, ${g("hour")}:${g("minute")}:${g("second")}`;
 }
 
-// dateRangeLabel appends the offset the bounds were entered in whenever
-// that differs from UTC, so a range read off the filter bar can't be
-// mistaken for the UTC timestamps shown in the Timeline column. On a
-// UTC browser the suffix is omitted -- there's nothing to disambiguate.
+// dateRangeLabel names the zone the bounds are expressed in. It is shown
+// always, not only when it differs from UTC: a range with no zone on it
+// is exactly the thing that gets misread, and "Apr 29, 00:00" means two
+// different windows depending on an answer the chip would otherwise
+// leave to the reader.
 function dateRangeLabel(state) {
-  const tz = browserIsUTC() ? "" : ` (${browserUtcOffsetLabel()})`;
+  const tz = ` (${tzLabel()})`;
   if (state.from && state.to) return `Date: ${fmtFilterDate(state.from)} → ${fmtFilterDate(state.to)}${tz}`;
   if (state.from) return `Date: From ${fmtFilterDate(state.from)}${tz}`;
   if (state.to) return `Date: Until ${fmtFilterDate(state.to)}${tz}`;
@@ -1615,16 +1858,27 @@ function wireFilterBar(prefix, onChange) {
     refreshFilterBar(prefix, onChange);
   });
 
-  // Filtering is entirely client-side over data the tab already loaded,
-  // so there is no network call per keystroke. The debounce exists only
-  // to avoid re-rendering a large table on every character.
+  // The debounce keeps a keystroke from costing a full re-render -- and,
+  // for a server-driven bar like the forensic timeline, a full request.
+  // Its length comes from the bar's own config (searchDebounceMs) rather
+  // than being fixed here, because those two costs are not comparable.
   const qInput = document.getElementById(`${prefix}-f-q`);
   if (qInput) {
     let timer = null;
     qInput.addEventListener("input", () => {
       state.q = qInput.value;
       clearTimeout(timer);
-      timer = setTimeout(() => refreshFilterBar(prefix, onChange), 120);
+      timer = setTimeout(() => refreshFilterBar(prefix, onChange), state.searchDebounceMs);
+    });
+  }
+
+  // Changing WHICH field is searched re-runs the search immediately: the
+  // analyst has already typed the term and is telling us where to look.
+  const qField = document.getElementById(`${prefix}-f-qfield`);
+  if (qField) {
+    qField.addEventListener("change", () => {
+      state.qField = qField.value;
+      refreshFilterBar(prefix, onChange);
     });
   }
 
@@ -1634,8 +1888,11 @@ function wireFilterBar(prefix, onChange) {
     state.to = null;
     state.raw = {};
     state.q = "";
+    state.qField = "";
     const q = document.getElementById(`${prefix}-f-q`);
     if (q) q.value = "";
+    const qf = document.getElementById(`${prefix}-f-qfield`);
+    if (qf) qf.value = "";
 
     // Some screens own a search box OUTSIDE the filter bar -- the
     // evidence triage screen's #ev-search sits next to the bar rather
@@ -1688,14 +1945,51 @@ function readDateTime(prefix, which) {
   const d = (document.getElementById(`${prefix}-f-${which}-d`) || {}).value || "";
   const t = (document.getElementById(`${prefix}-f-${which}-t`) || {}).value || "";
   if (!d) return null;
-  const time = t || (which === "from" ? "00:00:00" : "23:59:59");
-  // Same construction the previous datetime-local control used: the
-  // string is parsed in the browser's local time zone and compared
-  // against each record's absolute timestamp, so bounds are entered in
-  // local time exactly as before. Deliberately unchanged -- see
-  // readFilterBar's note.
-  const parsed = new Date(`${d}T${time}`);
-  return isNaN(parsed.getTime()) ? null : parsed;
+
+  const [yy, mm, dd] = d.split("-").map(Number);
+  if (!yy || !mm || !dd) return null;
+
+  // The bound is read as a wall-clock reading in the DISPLAY timezone,
+  // not in the browser's -- see wallTimeToInstant for why that
+  // distinction is a correctness matter and not a nicety. The value
+  // returned is still a plain instant, so every comparison downstream is
+  // instant-against-instant.
+  //
+  // A `to` bound is extended to the END of whatever unit the analyst
+  // actually specified. Stored event times carry sub-second precision,
+  // so a range written [18:17:38, 18:17:38] and taken literally is one
+  // nanosecond wide and excludes an event at 18:17:38.900891 -- the
+  // range names the second the event is in, and returns nothing. The
+  // rule is uniform: no time given means the whole day, HH:MM means
+  // that whole minute, HH:MM:SS means that whole second.
+  const isEnd = which === "to";
+  if (!t) {
+    const start = wallTimeToInstant(yy, mm, dd, 0, 0, 0);
+    if (isNaN(start.getTime())) return null;
+    return isEnd ? endOfUnit(start, 24 * 3600 * 1000) : start;
+  }
+
+  const parts = t.split(":");
+  const hh = Number(parts[0]);
+  const mi = Number(parts[1]);
+  const hasSeconds = parts.length > 2 && parts[2] !== "";
+  const ss = hasSeconds ? Number(parts[2]) : 0;
+  if (Number.isNaN(hh) || Number.isNaN(mi) || Number.isNaN(ss)) return null;
+
+  const at = wallTimeToInstant(yy, mm, dd, hh, mi, ss);
+  if (isNaN(at.getTime())) return null;
+  if (!isEnd) return at;
+  return endOfUnit(at, hasSeconds ? 1000 : 60 * 1000);
+}
+
+// endOfUnit returns the last representable instant of a unit beginning
+// at start. One millisecond short of the next unit, because a JS Date
+// cannot hold anything finer -- the backend widens its own bounds to the
+// nanosecond, and this bound is sent as an instant, so the millisecond
+// granularity here only ever affects the client-side Findings filter,
+// where finding timestamps are second-resolution anyway.
+function endOfUnit(start, widthMs) {
+  return new Date(start.getTime() + widthMs - 1);
 }
 
 // readFilterBar returns the live state object for prefix. Fields this
@@ -1710,7 +2004,18 @@ function readDateTime(prefix, which) {
 function readFilterBar(prefix) {
   const state = filterStates.get(prefix);
   if (!state) return { from: null, to: null };
-  return { ...state.sel, from: state.from, to: state.to, q: (state.q || "").trim().toLowerCase() };
+  return {
+    ...state.sel,
+    from: state.from,
+    to: state.to,
+    q: (state.q || "").trim().toLowerCase(),
+    // qRaw preserves the analyst's own casing. Server-side search is
+    // case-insensitive in the database, so lowercasing before sending
+    // would only throw away what they typed -- which matters when the
+    // term is echoed back in a chip or an empty-state message.
+    qRaw: (state.q || "").trim(),
+    qField: state.qField || "",
+  };
 }
 
 // ---------------- Long-value rendering (findings UI fix) ----------------
@@ -1724,23 +2029,47 @@ function readFilterBar(prefix) {
 
 let cellIdCounter = 0;
 
-// detailCell renders a table-cell-safe value: short values render
-// as-is; long ones truncate with a toggle to reveal the full text and a
-// button to copy it, so the full value is always reachable even though
-// it isn't dumped as one unbounded line by default.
-function detailCell(value) {
-  if (!value) return "";
+// detailCell renders a table-cell-safe value. EVERY non-empty value
+// gets a Copy button, whatever its length: the Detail column is the
+// column an analyst pastes into a report, and a short browser URL or a
+// deleted file's original path is no less worth copying than a long
+// PowerShell command line. Only the truncation toggle is conditional,
+// because only a truncated value has anything to reveal.
+//
+// The two controls are independent. "Show full" changes what is
+// DISPLAYED; Copy always copies the complete original value, which is
+// carried on the button in data-copy and is never read back out of the
+// rendered text -- that text may be the truncated form ending in an
+// ellipsis, and copying it would silently hand the analyst a value that
+// is not the one on the event.
+const DETAIL_TRUNCATE_AT = 100;
+
+function detailCell(value, opts) {
+  if (value === null || value === undefined) return "";
   const str = String(value);
-  if (str.length <= 100) {
-    return `<span class="detail-cell">${esc(str)}</span>`;
-  }
+  if (str === "") return "";
+
+  // truncateAt is overridable so a value that should be shown shorter
+  // than a timeline cell -- a credential hash in the evidence panel --
+  // reuses this one Copy implementation instead of growing a second.
+  const at = (opts && opts.truncateAt) || DETAIL_TRUNCATE_AT;
+  const revealLabel = (opts && opts.revealLabel) || "Show full";
+  const long = str.length > at;
+  const short = str.slice(0, at);
   const id = `detail-${++cellIdCounter}`;
+  // A short value keeps its controls on the same line so a dense
+  // timeline does not double in height; a long one stacks them under
+  // the wrapped text.
+  const layout = long ? "detail-cell-long" : "detail-cell-inline";
+  const toggle = long
+    ? `<button type="button" class="secondary small detail-toggle-btn" data-target="${id}" data-full="${esc(str)}" data-short="${esc(short)}&hellip;" data-label="${esc(revealLabel)}">${esc(revealLabel)}</button>`
+    : "";
   return `
-    <div class="detail-cell detail-cell-long">
-      <span id="${id}" class="detail-text truncated">${esc(str.slice(0, 100))}&hellip;</span>
+    <div class="detail-cell ${layout}">
+      <span id="${id}" class="detail-text${long ? " truncated" : ""}">${long ? esc(short) + "&hellip;" : esc(str)}</span>
       <div class="detail-actions">
-        <button type="button" class="secondary small detail-toggle-btn" data-target="${id}" data-full="${esc(str)}" data-short="${esc(str.slice(0, 100))}&hellip;">Show full command</button>
-        <button type="button" class="secondary small detail-copy-btn" data-copy="${esc(str)}">Copy</button>
+        ${toggle}
+        <button type="button" class="secondary small detail-copy-btn" data-copy="${esc(str)}" title="Copy the full value">Copy</button>
       </div>
     </div>`;
 }
@@ -1760,8 +2089,11 @@ function wireDetailCells(root) {
         target.textContent = btn.dataset.full;
         btn.textContent = "Show less";
       } else {
-        target.innerHTML = btn.dataset.short.replace(/&hellip;/, "…");
-        btn.textContent = "Show full command";
+        // textContent, not innerHTML: the attribute value has already
+        // been decoded by the HTML parser, so re-parsing it would
+        // reinterpret any "&" the value legitimately contains.
+        target.textContent = btn.dataset.short;
+        btn.textContent = btn.dataset.label || "Show full";
       }
     });
   });
@@ -1770,14 +2102,10 @@ function wireDetailCells(root) {
     btn.dataset.wired = "1";
     btn.addEventListener("click", async (ev) => {
       ev.stopPropagation();
-      try {
-        await navigator.clipboard.writeText(btn.dataset.copy);
-        const original = btn.textContent;
-        btn.textContent = "Copied!";
-        setTimeout(() => (btn.textContent = original), 1500);
-      } catch (e) {
-        btn.textContent = "Copy failed";
-      }
+      // data-copy, never the cell's text: the cell may be showing the
+      // truncated form, and the toggle's state must not change what a
+      // copy produces.
+      flashCopyState(btn, await copyText(btn.dataset.copy));
     });
   });
 }
@@ -1792,7 +2120,1175 @@ function eventDetailValue(e) {
   // which .lnk file recorded it.
   const url = e.extra && e.extra.url;
   const target = e.extra && e.extra.target_path;
-  return e.command_line || e.registry_path || url || target || e.file_path || e.network_dest || "";
+
+  // The same argument covers the two artifacts a registry hive yields
+  // (Phase 15). A UserAssist row exists to say WHICH ITEM the shell
+  // launched, and a ShellBag row to say WHICH LOCATION Explorer
+  // recorded -- not to repeat the registry key both happen to live
+  // under, which is nearly identical on every row and pushes the one
+  // distinguishing value off the end of the cell. The key is still on
+  // the event, and the detail view still shows it.
+  const extra = e.extra || {};
+  const shellItem = extra.reconstructed_path;
+  const launched = extra.resolved_path || extra.decoded_name;
+
+  // Phase 16 extends the same rule to the application and MRU
+  // artifacts. Every one of them lives under a registry key that is
+  // nearly identical on every row of its kind, so falling through to
+  // registry_path filled the column with
+  // "HKCU\Software\...\Explorer\RecentDocs" repeated down the page
+  // while the value that actually distinguishes the rows was not shown.
+  //
+  // Selected by artifact_class rather than by reordering the fallbacks,
+  // so the detail shown for every OTHER kind of event -- a registry Run
+  // key in particular, where the key itself is the point -- is
+  // unchanged.
+  const p16 = {
+    amcache: extra.application_path || extra.application_name,
+    activities_cache: extra.display_text || extra.content_uri,
+    recent_docs: e.file_path,
+    muicache: extra.display_name || e.file_path,
+    typed_paths: e.file_path,
+    opensave_mru: e.file_path,
+    // Phase 18. The account is what distinguishes one SAM row from the
+    // next; the registry key differs only in the RID and would fill the
+    // column with HKLM\SAM\Domains\Account\Users repeated down the page.
+    //
+    // The NTLM hash is deliberately NOT here. The Detail column is
+    // rendered into every timeline row, is what the Copy button beside
+    // it copies by default, and is the column an analyst screenshots.
+    // Credential material belongs in the event's own detail view, where
+    // it has its own labelled field and its own Copy control.
+    sam_account: extra.account_name
+      ? `${extra.account_name} (RID ${extra.rid})`
+      : `RID ${extra.rid || "?"}`,
+    // Phase 20. The endpoint is the whole point of a FileZilla row --
+    // which host, over what, as whom. Falling through would have shown
+    // the source filename, identical on every entry in the file.
+    filezilla_server_entry: filezillaDetail(extra),
+    // An image row is identified by its file; a GPS row by the position
+    // it carries, which is the one value an analyst is scanning for.
+    image_metadata: e.file_path,
+    image_gps: extra.gps_coordinates
+      ? `${extra.gps_coordinates}${extra.country ? ` (${extra.country})` : ""} - ${e.file_path || ""}`.trim()
+      : e.file_path,
+  }[extra.artifact_class];
+
+  return e.command_line || shellItem || launched || p16 ||
+    e.registry_path || url || target || e.file_path || e.network_dest || "";
+}
+
+// filezillaDetail renders a FileZilla entry as the connection it
+// describes. The password is not part of it and never can be: the field
+// does not exist on the event -- see internal/filezilla.
+function filezillaDetail(extra) {
+  const host = extra.server_ipv4 || extra.server_ipv6 || extra.server_hostname || extra.server_host;
+  if (!host) return "";
+  const proto = extra.protocol && extra.protocol !== "unrecognized" ? extra.protocol : "";
+  const port = extra.server_port ? `:${extra.server_port}` : "";
+  const user = extra.server_username ? ` as ${extra.server_username}` : "";
+  return `${proto ? proto + " " : ""}${host}${port}${user}`;
+}
+
+
+// ---------------- Photo Map (Phase 21) ----------------
+//
+// A map of the images in this case whose EXIF recorded a coordinate.
+//
+// # It shows evidence, and says which part is which
+//
+// A marker's POSITION is observed: the latitude and longitude the image
+// itself carries. Its COUNTRY is derived -- an offline point-in-polygon
+// test Tracefall performed against a bundled boundary dataset, not
+// something the camera wrote. Every card and the lightbox header keep
+// the two apart, because a country name rendered beside a pin is exactly
+// the value an analyst will otherwise assume came out of the file.
+//
+// # It creates nothing
+//
+// Every marker IS an existing image_gps event. The map neither parses an
+// image nor derives a coordinate; it reads back what the EXIF parser
+// already produced, which is why "View timeline event" can go straight
+// to the same event rather than to a copy of it.
+//
+// # Why the map is drawn here rather than fetched
+//
+// The basemap is country outlines from the dataset already compiled into
+// the binary, drawn to a canvas. No tile server, no API key, no network
+// request -- and no third party learns which coordinates are being
+// investigated, which a tile request would disclose one tile at a time.
+// The trade is that this is a plain political outline rather than
+// streets and terrain; for placing a photograph in a country and
+// verifying a coordinate, that is what is needed.
+
+const GEO_MAP_MIN_ZOOM = 0;
+const GEO_MAP_MAX_ZOOM = 12;
+// Screen-space cell size for clustering. Markers are ~64px, so a cell
+// this size means two markers cluster exactly when they would overlap.
+const GEO_CLUSTER_CELL_PX = 76;
+
+// geoState holds the current map view and dataset. Module-level so
+// switching tabs and returning does not refetch the basemap, which is
+// the largest payload the UI ever requests.
+const geoState = {
+  caseId: null,
+  photos: [],
+  result: null,
+  basemap: null,
+  // View: the world-pixel centre and integer-ish zoom. Fractional zoom
+  // is allowed so wheel zooming is smooth.
+  zoom: 2,
+  centerLon: 0,
+  centerLat: 20,
+  sort: "time",
+  filters: { country: "", collection: "", filename: "", from: "", to: "" },
+  selected: null,
+  dragging: null,
+};
+
+// --- Web Mercator ---
+//
+// The standard projection for slippy maps, used here so the drawn
+// outlines and the markers share one coordinate system. Latitude is
+// clamped to the Mercator limit rather than allowed to run to infinity
+// at the poles.
+const GEO_MERCATOR_MAX_LAT = 85.05112878;
+
+function geoWorldSize(zoom) {
+  return 256 * Math.pow(2, zoom);
+}
+
+function geoLonToX(lon, zoom) {
+  return ((lon + 180) / 360) * geoWorldSize(zoom);
+}
+
+function geoLatToY(lat, zoom) {
+  const clamped = Math.max(-GEO_MERCATOR_MAX_LAT, Math.min(GEO_MERCATOR_MAX_LAT, lat));
+  const rad = (clamped * Math.PI) / 180;
+  const y = Math.log(Math.tan(Math.PI / 4 + rad / 2));
+  return (1 - y / Math.PI) / 2 * geoWorldSize(zoom);
+}
+
+function geoXToLon(x, zoom) {
+  return (x / geoWorldSize(zoom)) * 360 - 180;
+}
+
+function geoYToLat(y, zoom) {
+  const n = Math.PI * (1 - (2 * y) / geoWorldSize(zoom));
+  return (180 / Math.PI) * Math.atan(Math.sinh(n));
+}
+
+// geoViewport converts between screen pixels in the map element and
+// world pixels at the current zoom.
+function geoViewport(el) {
+  const rect = el.getBoundingClientRect();
+  const cx = geoLonToX(geoState.centerLon, geoState.zoom);
+  const cy = geoLatToY(geoState.centerLat, geoState.zoom);
+  return {
+    width: rect.width,
+    height: rect.height,
+    originX: cx - rect.width / 2,
+    originY: cy - rect.height / 2,
+    toScreen(lon, lat) {
+      return {
+        x: geoLonToX(lon, geoState.zoom) - this.originX,
+        y: geoLatToY(lat, geoState.zoom) - this.originY,
+      };
+    },
+  };
+}
+
+// currentCaseId reads the case out of the current route, for the few
+// places that build a cross-view link without having been handed one.
+function currentCaseId() {
+  return (window.location.hash.match(/^#\/cases\/([^/?]+)/) || [])[1] || "";
+}
+
+// geoFocusEvent is set by a "View on map" link so the map, once it
+// loads, selects and centres the photo the analyst came from.
+let geoFocusEvent = null;
+
+document.addEventListener("click", (e) => {
+  const link = e.target.closest("a[data-geo-focus]");
+  if (link) geoFocusEvent = link.dataset.geoFocus || null;
+});
+
+// geoAfterLayout runs fn once the browser has had a chance to lay the
+// page out.
+//
+// requestAnimationFrame alone is not enough: a frame callback does not
+// fire while the tab is not being composited (backgrounded, or a
+// non-visible embedded view), and the map then sat unrendered with a
+// default 300x150 canvas until the tab was looked at again. A timeout
+// still fires there, so whichever mechanism runs first wins and the
+// other becomes a no-op.
+function geoAfterLayout(fn) {
+  let done = false;
+  const run = () => {
+    if (done) return;
+    done = true;
+    fn();
+  };
+  requestAnimationFrame(run);
+  setTimeout(run, 0);
+}
+
+// ---------------- Tab ----------------
+
+async function renderGeoMapTab(content, caseId) {
+  content.innerHTML = `<p class="empty">Loading photo map...</p>`;
+
+  if (geoState.caseId !== caseId) {
+    geoState.caseId = caseId;
+    geoState.filters = { country: "", collection: "", filename: "", from: "", to: "" };
+    geoState.selected = null;
+    geoState.zoom = 2;
+    geoState.centerLon = 0;
+    geoState.centerLat = 20;
+    geoState.hasFitted = false;
+  }
+
+  let result;
+  try {
+    // The basemap is fetched once per session and reused: it is world
+    // geography, identical for every case.
+    const [photos, basemap] = await Promise.all([
+      api(`/cases/${caseId}/geo/photos${geoQueryString()}`),
+      geoState.basemap ? Promise.resolve(geoState.basemap) : api(`/geo/basemap`),
+    ]);
+    geoState.basemap = basemap;
+    result = photos;
+  } catch (e) {
+    content.innerHTML = errorBox(e);
+    return;
+  }
+
+  geoState.result = result;
+  geoState.photos = result.photos || [];
+
+  content.innerHTML = geoMapShell(result);
+  wireGeoMap(content, caseId);
+
+  // Fit and first paint after layout: both measure the map element, and
+  // measuring it in the same turn that created it can read a width the
+  // grid has not resolved yet.
+  geoAfterLayout(() => {
+    const live = document.querySelector(".geo-wrap");
+    if (!live) return;
+    if (geoState.photos.length > 0 && !geoState.hasFitted) {
+      geoFitToPhotos(live);
+      geoState.hasFitted = true;
+    }
+
+    // Arrived from a Timeline event's "View on map": select that exact
+    // photo rather than leaving the analyst to find it again.
+    if (geoFocusEvent) {
+      const target = geoFocusEvent;
+      geoFocusEvent = null;
+      if (geoState.photos.some((p) => p.event_id === target)) {
+        geoState.zoom = Math.max(geoState.zoom, 5);
+        geoSelect(live, target, { center: true });
+        return;
+      }
+    }
+    geoRender(live);
+  });
+
+
+}
+
+function geoQueryString() {
+  const f = geoState.filters;
+  const q = new URLSearchParams();
+  if (f.country) q.set("country", f.country);
+  if (f.collection) q.set("collection_id", f.collection);
+  if (f.filename) q.set("filename", f.filename);
+  if (f.from) q.set("from", f.from);
+  if (f.to) q.set("to", f.to);
+  const s = q.toString();
+  return s ? `?${s}` : "";
+}
+
+function geoMapShell(result) {
+  const total = result.total || 0;
+  const withoutGPS = result.images_without_gps || 0;
+
+  // The empty state must never be an empty map: a map with no markers
+  // and no explanation reads as "nothing was found here", which is a
+  // different claim from "no image in this case carries a coordinate".
+  if (total === 0 && !geoAnyFilterActive()) {
+    return `
+      <section class="geo-wrap">
+        ${geoIntro(result)}
+        <div class="empty-panel">
+          <h3>No geolocated photos found in this case.</h3>
+          <p>No image in this case's imported evidence carries a usable EXIF GPS coordinate.</p>
+          ${
+            withoutGPS > 0
+              ? `<p>${withoutGPS} image artifact${withoutGPS === 1 ? "" : "s"} ${
+                  withoutGPS === 1 ? "was" : "were"
+                } found and parsed, but ${
+                  withoutGPS === 1 ? "it records" : "they record"
+                } no coordinate. ${
+                  withoutGPS === 1 ? "It is" : "They are"
+                } in the Evidence and Timeline views; nothing is placed on the map at a guessed position.</p>`
+              : ""
+          }
+        </div>
+      </section>`;
+  }
+
+  return `
+    <section class="geo-wrap">
+      ${geoIntro(result)}
+      ${geoFilterBar(result)}
+      <div class="geo-layout">
+        <div class="geo-map" id="geo-map" tabindex="0" role="application"
+             aria-label="Map of photographs with EXIF GPS coordinates">
+          <canvas id="geo-canvas"></canvas>
+          <div class="geo-markers" id="geo-markers"></div>
+          <div class="geo-controls">
+            <button type="button" class="geo-btn" id="geo-zoom-in" aria-label="Zoom in">+</button>
+            <button type="button" class="geo-btn" id="geo-zoom-out" aria-label="Zoom out">&minus;</button>
+            <button type="button" class="geo-btn geo-btn-wide" id="geo-fit">Fit</button>
+          </div>
+          <div class="geo-attrib" id="geo-attrib"></div>
+        </div>
+        <aside class="geo-side" id="geo-side"></aside>
+      </div>
+    </section>`;
+}
+
+function geoIntro(result) {
+  const total = result.total || 0;
+  const withoutGPS = result.images_without_gps || 0;
+  return `
+    <div class="geo-intro">
+      <h2>Photo Map</h2>
+      <p class="geo-lede">
+        ${total} image${total === 1 ? "" : "s"} with an EXIF GPS coordinate${
+          withoutGPS > 0
+            ? ` &middot; ${withoutGPS} image${withoutGPS === 1 ? "" : "s"} in this case record${
+                withoutGPS === 1 ? "s" : ""
+              } no coordinate and ${withoutGPS === 1 ? "is" : "are"} not shown`
+            : ""
+        }
+      </p>
+      <p class="geo-note">${esc(result.note || "")}</p>
+    </div>`;
+}
+
+function geoAnyFilterActive() {
+  const f = geoState.filters;
+  return Boolean(f.country || f.collection || f.filename || f.from || f.to);
+}
+
+function geoFilterBar(result) {
+  const countries = result.countries || [];
+  const opt = (v, label, sel) =>
+    `<option value="${esc(v)}"${sel === v ? " selected" : ""}>${esc(label)}</option>`;
+  const f = geoState.filters;
+
+  return `
+    <div class="geo-filters">
+      <label class="geo-field">
+        <span>Country</span>
+        <select id="geo-f-country">
+          ${opt("", "All countries", f.country)}
+          ${countries.map((c) => opt(c, c, f.country)).join("")}
+        </select>
+      </label>
+      <label class="geo-field">
+        <span>Filename</span>
+        <input type="search" id="geo-f-filename" placeholder="contains..." value="${esc(f.filename)}">
+      </label>
+      <label class="geo-field">
+        <span>From</span>
+        <input type="text" id="geo-f-from" placeholder="YYYY-MM-DD" value="${esc(f.from)}">
+      </label>
+      <label class="geo-field">
+        <span>To</span>
+        <input type="text" id="geo-f-to" placeholder="YYYY-MM-DD" value="${esc(f.to)}">
+      </label>
+      <label class="geo-field">
+        <span>Sort</span>
+        <select id="geo-f-sort">
+          ${opt("time", "Chronological", geoState.sort)}
+          ${opt("filename", "Filename", geoState.sort)}
+          ${opt("country", "Country", geoState.sort)}
+        </select>
+      </label>
+      <button type="button" class="btn-secondary" id="geo-f-clear">Clear</button>
+      <span class="geo-gps-only" title="Images without a coordinate are never placed on the map">
+        Showing only images with GPS
+      </span>
+    </div>`;
+}
+
+// ---------------- Rendering ----------------
+
+function geoRender(root) {
+  const el = root.querySelector("#geo-map");
+  if (!el) return;
+
+  // A render is only as good as the measurement behind it. The first
+  // one after mounting can land before the grid has resolved its
+  // columns, which produced a 2px-wide canvas and markers projected off
+  // the left edge -- and, because the markers were then outside a 2px
+  // viewport, lazy-loaded thumbnails that never loaded at all.
+  //
+  // Rather than trust a suspicious rect, retry on the next frame. The
+  // ResizeObserver below is the steady-state mechanism; this is what
+  // stops a bad first measurement from being baked in before it runs.
+  const rect = el.getBoundingClientRect();
+  if (rect.width < 50 || rect.height < 50) {
+    if (!geoState.pendingFrame) {
+      geoState.pendingFrame = true;
+      geoAfterLayout(() => {
+        geoState.pendingFrame = false;
+        const live = document.querySelector(".geo-wrap");
+        if (live) geoRender(live);
+      });
+    }
+    return;
+  }
+
+  geoDrawBasemap(el);
+  geoDrawMarkers(el);
+  geoRenderSide(root);
+  const attrib = root.querySelector("#geo-attrib");
+  if (attrib && geoState.basemap && geoState.basemap.dataset) {
+    const d = geoState.basemap.dataset;
+    attrib.textContent = `${d.source || "boundaries"} v${d.version || "?"} - drawn offline`;
+    attrib.title = geoState.basemap.note || "";
+  }
+}
+
+// geoDrawBasemap paints the country outlines to the canvas.
+//
+// Canvas rather than SVG or DOM: 1,100 rings is far more path data than
+// is comfortable as elements, and it repaints on every pan frame.
+function geoDrawBasemap(el) {
+  const canvas = el.querySelector("#geo-canvas");
+  if (!canvas || !geoState.basemap) return;
+
+  const rect = el.getBoundingClientRect();
+  const dpr = window.devicePixelRatio || 1;
+  const w = Math.max(1, Math.round(rect.width));
+  const h = Math.max(1, Math.round(rect.height));
+  if (canvas.width !== w * dpr || canvas.height !== h * dpr) {
+    canvas.width = w * dpr;
+    canvas.height = h * dpr;
+    canvas.style.width = `${w}px`;
+    canvas.style.height = `${h}px`;
+  }
+
+  const ctx = canvas.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, w, h);
+
+  const css = getComputedStyle(document.documentElement);
+  const sea = css.getPropertyValue("--geo-sea").trim() || "#0f1720";
+  const land = css.getPropertyValue("--geo-land").trim() || "#1d2a35";
+  const line = css.getPropertyValue("--geo-outline").trim() || "#3a5064";
+
+  ctx.fillStyle = sea;
+  ctx.fillRect(0, 0, w, h);
+
+  const vp = geoViewport(el);
+  const world = geoWorldSize(geoState.zoom);
+
+  ctx.fillStyle = land;
+  ctx.strokeStyle = line;
+  ctx.lineWidth = 1;
+
+  for (const ring of geoState.basemap.rings || []) {
+    // Two passes, offset by one world width, so a ring is drawn on
+    // whichever copy of the world is currently on screen. Without this
+    // the map goes blank when panned past the antimeridian.
+    for (const shift of [0, -world, world]) {
+      let started = false;
+      let anyVisible = false;
+      ctx.beginPath();
+      for (let i = 0; i < ring.length; i += 2) {
+        const x = geoLonToX(ring[i], geoState.zoom) - vp.originX + shift;
+        const y = geoLatToY(ring[i + 1], geoState.zoom) - vp.originY;
+        if (x > -200 && x < w + 200 && y > -200 && y < h + 200) anyVisible = true;
+        if (!started) {
+          ctx.moveTo(x, y);
+          started = true;
+        } else {
+          ctx.lineTo(x, y);
+        }
+      }
+      if (!anyVisible) {
+        continue;
+      }
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+    }
+  }
+}
+
+// geoCluster groups photos that would overlap on screen into one marker.
+//
+// A grid in SCREEN space, not in degrees: what matters is whether two
+// markers collide at the current zoom, and a degree is a different
+// distance at different latitudes.
+function geoCluster(el) {
+  const vp = geoViewport(el);
+  const cells = new Map();
+
+  for (const p of geoState.photos) {
+    const pt = vp.toScreen(p.longitude, p.latitude);
+    // Off-screen photos are still clustered, so a cluster count is the
+    // true count and not "the ones that happened to be visible".
+    const key = `${Math.floor(pt.x / GEO_CLUSTER_CELL_PX)}:${Math.floor(pt.y / GEO_CLUSTER_CELL_PX)}`;
+    let c = cells.get(key);
+    if (!c) {
+      c = { photos: [], x: 0, y: 0 };
+      cells.set(key, c);
+    }
+    c.photos.push(p);
+    c.x += pt.x;
+    c.y += pt.y;
+  }
+
+  const out = [];
+  for (const c of cells.values()) {
+    out.push({
+      photos: c.photos,
+      x: c.x / c.photos.length,
+      y: c.y / c.photos.length,
+    });
+  }
+  return out;
+}
+
+function geoDrawMarkers(el) {
+  const host = el.querySelector("#geo-markers");
+  if (!host) return;
+
+  const rect = el.getBoundingClientRect();
+  const clusters = geoCluster(el);
+  const parts = [];
+
+  for (const c of clusters) {
+    // Only markers on (or near) the screen become DOM. A case with
+    // thousands of photos still produces a handful of elements.
+    if (c.x < -120 || c.x > rect.width + 120 || c.y < -120 || c.y > rect.height + 120) continue;
+
+    if (c.photos.length === 1) {
+      const p = c.photos[0];
+      geoPreloadThumb(p);
+      const sel = geoState.selected && geoState.selected.event_id === p.event_id;
+      parts.push(`
+        <button type="button" class="geo-marker${sel ? " selected" : ""}"
+                style="left:${c.x}px;top:${c.y}px"
+                data-event-id="${esc(p.event_id)}"
+                title="${esc(p.filename)}">
+          <span class="geo-marker-img">${geoThumbTag(p)}</span>
+          <span class="geo-marker-tail" aria-hidden="true"></span>
+        </button>`);
+    } else {
+      // Only the cluster's lead image is fetched -- a cluster of two
+      // hundred photos costs one preview, not two hundred.
+      const lead = c.photos[0];
+      geoPreloadThumb(lead);
+      parts.push(`
+        <button type="button" class="geo-marker geo-cluster"
+                style="left:${c.x}px;top:${c.y}px"
+                data-cluster="${esc(c.photos.map((p) => p.event_id).join(","))}"
+                title="${c.photos.length} photos here - click to zoom in">
+          <span class="geo-marker-img">${geoThumbTag(lead)}
+            <span class="geo-cluster-count">${c.photos.length}</span>
+          </span>
+          <span class="geo-marker-tail" aria-hidden="true"></span>
+        </button>`);
+    }
+  }
+  host.innerHTML = parts.join("");
+}
+
+// geoThumbCache remembers which thumbnails have been requested, and
+// whether each one loaded.
+//
+// It exists because markers are rebuilt from scratch on every pan and
+// zoom frame. An <img loading="lazy"> in that markup is destroyed and
+// recreated before the browser ever gets round to fetching it, so the
+// previews simply never appeared -- which is exactly what happened
+// before this cache was added.
+//
+// Fetching stays LAZY in the sense that matters forensically and for
+// performance: a thumbnail is requested only for a photo whose marker is
+// actually on screen (markers are clustered and viewport-culled before
+// any of this runs), and only once per session. A case with ten thousand
+// photographs never generates ten thousand previews; it generates the
+// handful the analyst has actually looked at.
+const geoThumbCache = new Map(); // source_file_id -> "loading" | "ok" | "failed"
+
+function geoThumbURL(sourceFileID) {
+  return `/api/cases/${encodeURIComponent(geoState.caseId)}/images/${encodeURIComponent(
+    sourceFileID
+  )}/thumbnail`;
+}
+
+// geoPreloadThumb warms the browser cache for one photo, then repaints
+// the markers once so the newly available image is drawn. The repaint is
+// deferred to a frame so a screenful arriving at once costs one repaint
+// rather than one per image.
+function geoPreloadThumb(p) {
+  if (!p.available || geoThumbCache.has(p.source_file_id)) return;
+  geoThumbCache.set(p.source_file_id, "loading");
+
+  const img = new Image();
+  img.decoding = "async";
+  const settle = (state) => {
+    geoThumbCache.set(p.source_file_id, state);
+    if (geoState.repaintFrame) return;
+    geoState.repaintFrame = true;
+    geoAfterLayout(() => {
+      geoState.repaintFrame = false;
+      const live = document.querySelector(".geo-wrap");
+      if (live) geoRender(live);
+    });
+  };
+  img.onload = () => settle("ok");
+  // A preview that cannot be produced is a displayable fact, not a
+  // failure to hide: the marker keeps its place and says so.
+  img.onerror = () => settle("failed");
+  img.src = geoThumbURL(p.source_file_id);
+}
+
+// geoThumbTag renders a marker's preview from whatever the cache knows.
+// An image that has not loaded yet, failed, or has no servable bytes all
+// render as a labelled placeholder rather than a browser broken-image
+// icon.
+function geoThumbTag(p) {
+  if (!p.available) {
+    return `<span class="geo-thumb-missing" title="image bytes unavailable">!</span>`;
+  }
+  const state = geoThumbCache.get(p.source_file_id);
+  if (state === "ok") {
+    return `<img src="${esc(geoThumbURL(p.source_file_id))}" alt="" decoding="async">`;
+  }
+  if (state === "failed") {
+    return `<span class="geo-thumb-missing" title="preview unavailable">!</span>`;
+  }
+  return `<span class="geo-thumb-pending" aria-hidden="true"></span>`;
+}
+
+// ---------------- Side panel (the photo card) ----------------
+
+function geoRenderSide(root) {
+  const side = root.querySelector("#geo-side");
+  if (!side) return;
+
+  if (!geoState.selected) {
+    const n = geoState.photos.length;
+    side.innerHTML = `
+      <div class="geo-card geo-card-empty">
+        <h3>${n} photo${n === 1 ? "" : "s"} on the map</h3>
+        <p>Select a marker to see the image, its EXIF metadata and its provenance.</p>
+        ${geoSortedList()}
+      </div>`;
+    return;
+  }
+
+  const p = geoState.selected;
+  const caseId = geoState.caseId;
+  const thumb = p.available
+    ? `<img class="geo-card-thumb" src="/api/cases/${encodeURIComponent(caseId)}/images/${encodeURIComponent(
+        p.source_file_id
+      )}/thumbnail" alt="Preview of ${esc(p.filename)}" loading="lazy">`
+    : `<div class="geo-card-thumb geo-card-thumb-missing">image unavailable</div>`;
+
+  const row = (label, value, opts) =>
+    value
+      ? `<div class="cred-field"><span class="cred-label">${esc(label)}</span>
+           <span class="cred-value">${detailCell(value, opts)}</span></div>`
+      : "";
+
+  side.innerHTML = `
+    <div class="geo-card">
+      <button type="button" class="geo-card-close" id="geo-card-close" aria-label="Close">&times;</button>
+      ${thumb}
+      <h3 class="geo-card-name">${esc(p.filename)}</h3>
+
+      <div class="img-section">Observed &mdash; stored in the file</div>
+      ${row("GPS", `${p.latitude}, ${p.longitude}`)}
+      ${row("As stored", [p.latitude_raw, p.longitude_raw].filter(Boolean).join(" / "))}
+      ${row("EXIF taken", p.exif_taken)}
+      ${row("Camera", [p.camera_make, p.camera_model].filter(Boolean).join(" "))}
+      ${row("Dimensions", p.image_dimensions)}
+
+      <div class="img-section">Derived &mdash; computed by Tracefall</div>
+      ${row("Country", p.country || "unavailable")}
+      ${row("Country code", p.country_iso)}
+      ${row("Confidence", p.country_confidence)}
+      ${row("Coordinate precision", p.coordinate_precision)}
+
+      <div class="img-section">Evidence</div>
+      ${row("Source path", p.path)}
+      ${row("Collection", p.collection_label || p.collection_id)}
+      ${row("Evidence SHA-256", p.sha256)}
+      ${row("Event time", p.timestamp ? fmtTime(p.timestamp) : NO_TIMESTAMP_LABEL)}
+      ${p.unavailable_reason ? `<p class="cred-note geo-warn">${esc(p.unavailable_reason)}</p>` : ""}
+
+      <div class="geo-card-actions">
+        <button type="button" class="btn-primary" id="geo-view-image"${p.available ? "" : " disabled"}>View image</button>
+        <button type="button" class="btn-secondary" id="geo-view-meta">Show metadata</button>
+        <a class="btn-secondary" href="#/cases/${esc(caseId)}/evidence">View evidence</a>
+        <a class="btn-secondary" href="#/cases/${esc(caseId)}/summary?event=${encodeURIComponent(
+          p.event_id
+        )}">View timeline event</a>
+      </div>
+      <p class="cred-note">The position is what this image CONTAINS. The country is derived from that
+      coordinate by Tracefall and is not stored in the image.</p>
+    </div>`;
+}
+
+// geoSortedList is the "many photos" fallback: a plain list, ordered the
+// way the analyst asked. It exists because a map is bad at answering
+// "what have I got", and because photos with no timestamp must still be
+// reachable without being given an invented position in a sequence.
+function geoSortedList() {
+  const sorted = geoSortPhotos(geoState.photos.slice());
+  if (sorted.length === 0) return "";
+  const untimed = sorted.filter((p) => !p.timestamp).length;
+  return `
+    <ol class="geo-list">
+      ${sorted
+        .map(
+          (p) => `<li><button type="button" class="geo-list-item" data-event-id="${esc(p.event_id)}">
+            <span class="geo-list-name">${esc(p.filename)}</span>
+            <span class="geo-list-meta">${esc(p.country || "country unavailable")} &middot; ${
+            p.timestamp ? esc(fmtTime(p.timestamp)) : NO_TIMESTAMP_LABEL
+          }</span>
+          </button></li>`
+        )
+        .join("")}
+    </ol>
+    ${
+      untimed > 0
+        ? `<p class="cred-note">${untimed} photo${untimed === 1 ? " has" : "s have"} no recorded time.
+           ${untimed === 1 ? "It is" : "They are"} listed after the timed ones, in filename order &mdash;
+           not placed in a sequence the evidence does not support.</p>`
+        : ""
+    }`;
+}
+
+function geoSortPhotos(list) {
+  const byName = (a, b) => (a.filename || "").localeCompare(b.filename || "");
+  switch (geoState.sort) {
+    case "filename":
+      return list.sort(byName);
+    case "country":
+      return list.sort((a, b) => (a.country || "").localeCompare(b.country || "") || byName(a, b));
+    default:
+      // Chronological, with the untimed after -- never interleaved into
+      // an order the evidence does not establish.
+      return list.sort((a, b) => {
+        if (a.timestamp && b.timestamp) return a.timestamp.localeCompare(b.timestamp) || byName(a, b);
+        if (a.timestamp) return -1;
+        if (b.timestamp) return 1;
+        return byName(a, b);
+      });
+  }
+}
+
+// ---------------- Interaction ----------------
+
+function wireGeoMap(root, caseId) {
+  const el = root.querySelector("#geo-map");
+  if (!el) return;
+
+  const rerender = () => geoRender(root);
+
+  // Pan.
+  el.addEventListener("pointerdown", (e) => {
+    if (e.target.closest(".geo-marker") || e.target.closest(".geo-controls")) return;
+    el.setPointerCapture(e.pointerId);
+    geoState.dragging = { x: e.clientX, y: e.clientY, moved: false };
+    el.classList.add("dragging");
+  });
+  el.addEventListener("pointermove", (e) => {
+    if (!geoState.dragging) return;
+    const dx = e.clientX - geoState.dragging.x;
+    const dy = e.clientY - geoState.dragging.y;
+    if (Math.abs(dx) + Math.abs(dy) > 2) geoState.dragging.moved = true;
+    geoState.dragging.x = e.clientX;
+    geoState.dragging.y = e.clientY;
+
+    const z = geoState.zoom;
+    const cx = geoLonToX(geoState.centerLon, z) - dx;
+    const cy = geoLatToY(geoState.centerLat, z) - dy;
+    geoState.centerLon = geoXToLon(cx, z);
+    geoState.centerLat = geoYToLat(Math.max(0, Math.min(geoWorldSize(z), cy)), z);
+    rerender();
+  });
+  const endDrag = (e) => {
+    if (!geoState.dragging) return;
+    geoState.dragging = null;
+    el.classList.remove("dragging");
+    if (e && e.pointerId !== undefined && el.hasPointerCapture(e.pointerId)) {
+      el.releasePointerCapture(e.pointerId);
+    }
+  };
+  el.addEventListener("pointerup", endDrag);
+  el.addEventListener("pointercancel", endDrag);
+
+  // Zoom, anchored on the cursor so the point under it stays put.
+  el.addEventListener(
+    "wheel",
+    (e) => {
+      e.preventDefault();
+      geoZoomAt(el, e.deltaY < 0 ? 0.5 : -0.5, e.clientX, e.clientY);
+      rerender();
+    },
+    { passive: false }
+  );
+
+  root.querySelector("#geo-zoom-in")?.addEventListener("click", () => {
+    geoZoomAt(el, 1);
+    rerender();
+  });
+  root.querySelector("#geo-zoom-out")?.addEventListener("click", () => {
+    geoZoomAt(el, -1);
+    rerender();
+  });
+  root.querySelector("#geo-fit")?.addEventListener("click", () => {
+    geoFitToPhotos(root);
+    rerender();
+  });
+
+  // Keyboard: the map is focusable, so it must be operable without a
+  // pointer.
+  el.addEventListener("keydown", (e) => {
+    const step = 60;
+    const z = geoState.zoom;
+    let dx = 0;
+    let dy = 0;
+    switch (e.key) {
+      case "ArrowLeft": dx = -step; break;
+      case "ArrowRight": dx = step; break;
+      case "ArrowUp": dy = -step; break;
+      case "ArrowDown": dy = step; break;
+      case "+": case "=": geoZoomAt(el, 1); rerender(); e.preventDefault(); return;
+      case "-": geoZoomAt(el, -1); rerender(); e.preventDefault(); return;
+      default: return;
+    }
+    e.preventDefault();
+    geoState.centerLon = geoXToLon(geoLonToX(geoState.centerLon, z) + dx, z);
+    geoState.centerLat = geoYToLat(geoLatToY(geoState.centerLat, z) + dy, z);
+    rerender();
+  });
+
+  // Markers.
+  root.querySelector("#geo-markers")?.addEventListener("click", (e) => {
+    const marker = e.target.closest(".geo-marker");
+    if (!marker) return;
+    if (marker.dataset.cluster) {
+      geoZoomToCluster(root, marker.dataset.cluster.split(","));
+      return;
+    }
+    geoSelect(root, marker.dataset.eventId);
+  });
+
+  // The side list.
+  root.querySelector("#geo-side")?.addEventListener("click", (e) => {
+    const item = e.target.closest(".geo-list-item");
+    if (item) {
+      geoSelect(root, item.dataset.eventId, { center: true });
+      return;
+    }
+    if (e.target.closest("#geo-card-close")) {
+      geoState.selected = null;
+      geoRender(root);
+      return;
+    }
+    if (e.target.closest("#geo-view-image")) {
+      geoOpenLightbox(geoState.selected);
+      return;
+    }
+    if (e.target.closest("#geo-view-meta")) {
+      geoOpenMetadata(geoState.selected);
+    }
+  });
+
+  // Filters.
+  const reload = () => renderGeoMapTab(root, caseId);
+  const bind = (id, key, evt) =>
+    root.querySelector(id)?.addEventListener(evt, (e) => {
+      geoState.filters[key] = e.target.value.trim();
+      reload();
+    });
+  bind("#geo-f-country", "country", "change");
+  bind("#geo-f-from", "from", "change");
+  bind("#geo-f-to", "to", "change");
+  root.querySelector("#geo-f-filename")?.addEventListener("change", (e) => {
+    geoState.filters.filename = e.target.value.trim();
+    reload();
+  });
+  root.querySelector("#geo-f-sort")?.addEventListener("change", (e) => {
+    geoState.sort = e.target.value;
+    geoRenderSide(root);
+  });
+  root.querySelector("#geo-f-clear")?.addEventListener("click", () => {
+    geoState.filters = { country: "", collection: "", filename: "", from: "", to: "" };
+    reload();
+  });
+
+  // The canvas must follow the element's size.
+  if (window.ResizeObserver && !geoState.observer) {
+    geoState.observer = new ResizeObserver(() => {
+      const live = document.getElementById("geo-map");
+      if (live) geoRender(live.closest(".geo-wrap") || document);
+    });
+  }
+  if (geoState.observer) {
+    geoState.observer.disconnect();
+    geoState.observer.observe(el);
+  }
+}
+
+function geoZoomAt(el, delta, clientX, clientY) {
+  const before = geoState.zoom;
+  const next = Math.max(GEO_MAP_MIN_ZOOM, Math.min(GEO_MAP_MAX_ZOOM, before + delta));
+  if (next === before) return;
+
+  if (clientX === undefined) {
+    geoState.zoom = next;
+    return;
+  }
+  // Keep the geographic point under the cursor fixed across the zoom.
+  const rect = el.getBoundingClientRect();
+  const px = clientX - rect.left;
+  const py = clientY - rect.top;
+  const vp = geoViewport(el);
+  const lon = geoXToLon(vp.originX + px, before);
+  const lat = geoYToLat(vp.originY + py, before);
+
+  geoState.zoom = next;
+  const nx = geoLonToX(lon, next) - px + rect.width / 2;
+  const ny = geoLatToY(lat, next) - py + rect.height / 2;
+  geoState.centerLon = geoXToLon(nx, next);
+  geoState.centerLat = geoYToLat(ny, next);
+}
+
+function geoFitToPhotos(root) {
+  const el = (root.querySelector ? root.querySelector("#geo-map") : null) || document.getElementById("geo-map");
+  if (!el || geoState.photos.length === 0) return;
+
+  let minLon = 180;
+  let maxLon = -180;
+  let minLat = 90;
+  let maxLat = -90;
+  for (const p of geoState.photos) {
+    minLon = Math.min(minLon, p.longitude);
+    maxLon = Math.max(maxLon, p.longitude);
+    minLat = Math.min(minLat, p.latitude);
+    maxLat = Math.max(maxLat, p.latitude);
+  }
+  geoState.centerLon = (minLon + maxLon) / 2;
+  geoState.centerLat = (minLat + maxLat) / 2;
+
+  const rect = el.getBoundingClientRect();
+  // Find the largest zoom at which every photo still fits, with margin
+  // for the marker artwork itself.
+  let best = GEO_MAP_MIN_ZOOM;
+  for (let z = GEO_MAP_MAX_ZOOM; z >= GEO_MAP_MIN_ZOOM; z -= 0.25) {
+    const w = Math.abs(geoLonToX(maxLon, z) - geoLonToX(minLon, z));
+    const h = Math.abs(geoLatToY(minLat, z) - geoLatToY(maxLat, z));
+    if (w < rect.width - 160 && h < rect.height - 160) {
+      best = z;
+      break;
+    }
+  }
+  geoState.zoom = best;
+}
+
+function geoZoomToCluster(root, eventIds) {
+  const set = new Set(eventIds);
+  const members = geoState.photos.filter((p) => set.has(p.event_id));
+  if (members.length === 0) return;
+
+  // Photos at IDENTICAL coordinates can never be separated by zooming.
+  // Expanding the cluster into the side list is the honest answer --
+  // zooming forever would look broken.
+  const allSame = members.every(
+    (p) => p.latitude === members[0].latitude && p.longitude === members[0].longitude
+  );
+  if (allSame || geoState.zoom >= GEO_MAP_MAX_ZOOM) {
+    geoShowClusterMembers(root, members);
+    return;
+  }
+
+  const saved = geoState.photos;
+  geoState.photos = members;
+  geoFitToPhotos(root);
+  geoState.photos = saved;
+  geoRender(root);
+}
+
+function geoShowClusterMembers(root, members) {
+  const side = root.querySelector("#geo-side");
+  if (!side) return;
+  geoState.selected = null;
+  side.innerHTML = `
+    <div class="geo-card geo-card-empty">
+      <h3>${members.length} photos at this location</h3>
+      <p>These photographs record the same coordinate, so zooming cannot separate them.</p>
+      <ol class="geo-list">
+        ${members
+          .map(
+            (p) => `<li><button type="button" class="geo-list-item" data-event-id="${esc(p.event_id)}">
+              <span class="geo-list-name">${esc(p.filename)}</span>
+              <span class="geo-list-meta">${
+                p.timestamp ? esc(fmtTime(p.timestamp)) : NO_TIMESTAMP_LABEL
+              }</span>
+            </button></li>`
+          )
+          .join("")}
+      </ol>
+    </div>`;
+}
+
+function geoSelect(root, eventId, opts) {
+  const p = geoState.photos.find((x) => x.event_id === eventId);
+  if (!p) return;
+  geoState.selected = p;
+  if (opts && opts.center) {
+    geoState.centerLon = p.longitude;
+    geoState.centerLat = p.latitude;
+  }
+  geoRender(root);
+}
+
+// ---------------- Lightbox ----------------
+//
+// The full-resolution evidence image, served from the authorized
+// endpoint. It is displayed by the browser's own image pipeline -- no
+// canvas, no re-encode, nothing that would decode a 50-megapixel file
+// into a JavaScript buffer.
+
+function geoOpenLightbox(p) {
+  if (!p || !p.available) return;
+  const caseId = geoState.caseId;
+  const src = `/api/cases/${encodeURIComponent(caseId)}/images/${encodeURIComponent(
+    p.source_file_id
+  )}/content`;
+
+  const host = document.createElement("div");
+  host.className = "geo-lightbox";
+  host.setAttribute("role", "dialog");
+  host.setAttribute("aria-modal", "true");
+  host.setAttribute("aria-label", `Image ${p.filename}`);
+  host.innerHTML = `
+    <div class="geo-lb-bar">
+      <div class="geo-lb-meta">
+        <strong>${esc(p.filename)}</strong>
+        <span>GPS ${esc(String(p.latitude))}, ${esc(String(p.longitude))} <em>(observed)</em></span>
+        <span>${esc(p.country || "country unavailable")} <em>(derived)</em></span>
+        <span>${p.exif_taken ? esc(p.exif_taken) + " <em>(EXIF)</em>" : "no EXIF timestamp"}</span>
+      </div>
+      <div class="geo-lb-tools">
+        <button type="button" class="geo-btn" data-lb="out" aria-label="Zoom out">&minus;</button>
+        <button type="button" class="geo-btn geo-btn-wide" data-lb="fit">Fit</button>
+        <button type="button" class="geo-btn geo-btn-wide" data-lb="full">100%</button>
+        <button type="button" class="geo-btn" data-lb="in" aria-label="Zoom in">+</button>
+        <button type="button" class="geo-btn geo-btn-wide" data-lb="close">Close</button>
+      </div>
+    </div>
+    <div class="geo-lb-stage" id="geo-lb-stage">
+      <p class="geo-lb-status" id="geo-lb-status">Loading image...</p>
+      <img id="geo-lb-img" alt="${esc(p.filename)}" hidden>
+    </div>
+    <p class="geo-lb-foot">Original evidence bytes, served unmodified. SHA-256 ${esc(p.sha256 || "unknown")}</p>`;
+
+  document.body.appendChild(host);
+  document.body.classList.add("geo-lb-open");
+
+  const img = host.querySelector("#geo-lb-img");
+  const status = host.querySelector("#geo-lb-status");
+  const stage = host.querySelector("#geo-lb-stage");
+  const view = { scale: 1, fit: true, x: 0, y: 0, drag: null };
+
+  const apply = () => {
+    img.style.transform = view.fit
+      ? ""
+      : `translate(${view.x}px, ${view.y}px) scale(${view.scale})`;
+    img.classList.toggle("fit", view.fit);
+  };
+
+  img.addEventListener("load", () => {
+    status.hidden = true;
+    img.hidden = false;
+    apply();
+  });
+  img.addEventListener("error", () => {
+    // A failure here must not lose the record: the metadata stays on
+    // screen behind the lightbox, and the reason is stated.
+    status.textContent =
+      "This image's bytes could not be served. Its metadata and provenance are unaffected " +
+      "and remain available in the Evidence and Timeline views.";
+    status.classList.add("geo-warn");
+  });
+  img.src = src;
+
+  const close = () => {
+    host.remove();
+    document.body.classList.remove("geo-lb-open");
+    document.removeEventListener("keydown", onKey);
+  };
+  const onKey = (e) => {
+    if (e.key === "Escape") close();
+  };
+  document.addEventListener("keydown", onKey);
+
+  host.addEventListener("click", (e) => {
+    const btn = e.target.closest("[data-lb]");
+    if (!btn) {
+      if (e.target === host || e.target === stage) close();
+      return;
+    }
+    switch (btn.dataset.lb) {
+      case "close": close(); break;
+      case "fit": view.fit = true; view.scale = 1; view.x = 0; view.y = 0; apply(); break;
+      case "full": view.fit = false; view.scale = 1; view.x = 0; view.y = 0; apply(); break;
+      case "in": view.fit = false; view.scale = Math.min(8, view.scale * 1.5); apply(); break;
+      case "out": view.fit = false; view.scale = Math.max(0.1, view.scale / 1.5); apply(); break;
+    }
+  });
+
+  // Pan when zoomed in.
+  stage.addEventListener("pointerdown", (e) => {
+    if (view.fit) return;
+    view.drag = { x: e.clientX, y: e.clientY };
+    stage.setPointerCapture(e.pointerId);
+  });
+  stage.addEventListener("pointermove", (e) => {
+    if (!view.drag) return;
+    view.x += e.clientX - view.drag.x;
+    view.y += e.clientY - view.drag.y;
+    view.drag = { x: e.clientX, y: e.clientY };
+    apply();
+  });
+  const stop = () => (view.drag = null);
+  stage.addEventListener("pointerup", stop);
+  stage.addEventListener("pointercancel", stop);
+
+  host.querySelector('[data-lb="close"]').focus();
+}
+
+// geoOpenMetadata reaches the FULL EXIF record by going to the event the
+// image metadata parser produced -- the same event the Timeline shows.
+// The map does not keep a second copy of the metadata to drift from.
+function geoOpenMetadata(p) {
+  if (!p) return;
+  const target = p.metadata_event_id || p.event_id;
+  window.location.hash = `#/cases/${geoState.caseId}/summary?event=${encodeURIComponent(target)}`;
 }
 
 // ---------------- Router ----------------
@@ -1806,6 +3302,21 @@ let restoringHash = false;
 window.addEventListener("hashchange", async () => {
   if (restoringHash) {
     restoringHash = false;
+    return;
+  }
+  // A deletion in flight pins the route.
+  //
+  // The modal covers the page and the navigation behind it is
+  // pointer-inert, which stops a mouse -- but not a keyboard activating
+  // a focused link, and not the back button. Either would leave the
+  // modal reporting a deletion while the app rendered some other view,
+  // or navigate INTO the case currently being destroyed. The route is
+  // simply held until the request resolves; nothing is asked of the
+  // analyst, because there is no useful choice to offer while a
+  // destructive operation is already running.
+  if (deleteInFlight) {
+    restoringHash = true;
+    window.location.hash = lastHash;
     return;
   }
   const target = window.location.hash;
@@ -2157,7 +3668,8 @@ function wireCaseSelection() {
         <span>${selected.length} case(s) selected</span>
         <button type="button" class="danger" id="case-delete-selected-btn">Delete Selected (${selected.length})</button>
       </div>`;
-    document.getElementById("case-delete-selected-btn").addEventListener("click", () => confirmAndDeleteCases(selected));
+    document.getElementById("case-delete-selected-btn").addEventListener("click", (ev) =>
+      confirmAndDeleteCases(selected, undefined, ev.currentTarget));
   }
 
   checkboxes().forEach((cb) => cb.addEventListener("change", update));
@@ -2171,6 +3683,367 @@ function wireCaseSelection() {
   });
 }
 
+// ---------------- Case deletion progress ----------------
+//
+// Deletion is SYNCHRONOUS and, on this hardware, fast: the database work
+// is one transaction (27 ms at 1,000 events, 2.4 s at 100,000) and the
+// evidence directory removal is 127 ms for 8,000 files. A whole-case
+// delete therefore takes roughly a tenth of a second to a few seconds.
+//
+// # Why there is no percentage, and no per-table stage
+//
+// Two separate reasons, and both are about honesty rather than effort:
+//
+//   * The server reports no position. It returns once, when everything
+//     is gone. Any number rendered here would be invented, so the bar is
+//     indeterminate -- it says "working", never "how far".
+//
+//   * The obvious stages cannot be claimed. "Removing events" and
+//     "Removing findings" are separate DELETE statements, but they run
+//     inside ONE transaction that can still roll back. Reporting
+//     "events removed" before the commit would announce a completed
+//     stage that may never have happened, which is exactly what must not
+//     be done with a destructive operation.
+//
+// So what this panel shows is what is genuinely known: that deletion is
+// running, what it is removing (from counts the case already loaded),
+// and how long it has been going. Elapsed time is measured, not
+// estimated, and is never presented as progress toward a total.
+
+// DELETION_STAGE_LABELS mirrors DeletionStageLabels in
+// internal/api/deleteprogress.go. The server sends its own label too;
+// this is the fallback so a stage can never render as a raw identifier.
+const DELETION_STAGE_LABELS = {
+  preparing: "Preparing deletion",
+  removing_records: "Removing case records",
+  removing_evidence_files: "Removing evidence files",
+  complete: "Complete",
+  failed: "Failed",
+};
+
+// deletionCountsNote states what the committed transaction actually
+// removed, from the row counts the database reported. Every number here
+// is confirmed: it is read back after the commit, so nothing shown can
+// still be rolled back.
+function deletionCountsNote(c) {
+  const parts = [];
+  const add = (n, one, many) => {
+    if (n > 0) parts.push(`${Number(n).toLocaleString()} ${n === 1 ? one : many}`);
+  };
+  add(c.collections, "collection", "collections");
+  add(c.source_files, "evidence file", "evidence files");
+  add(c.events, "event", "events");
+  add(c.findings, "finding", "findings");
+  add(c.correlations, "correlation", "correlations");
+  if (parts.length === 0) return "no records to remove";
+  return parts.join(" \u00b7 ");
+}
+
+const deletionProgress = {
+  host: null,
+  timer: null,
+  pollTimer: null,
+  startedAt: 0,
+
+  // open mounts the modal panel. It is modal on purpose: it covers the
+  // application, so a stray click cannot start another action or make
+  // the case look navigable-away-from while its deletion is still
+  // running (requirement 10). Nothing here closes on Escape or on a
+  // backdrop click while the request is in flight.
+  open(title, detail) {
+    this.close();
+    this.startedAt = Date.now();
+
+    const host = document.createElement("div");
+    host.className = "deletion-overlay";
+    host.setAttribute("role", "alertdialog");
+    host.setAttribute("aria-modal", "true");
+    host.setAttribute("aria-labelledby", "deletion-title");
+    host.setAttribute("aria-describedby", "deletion-detail");
+    host.innerHTML = `
+      <div class="deletion-panel" id="deletion-panel">
+        <div class="deletion-head">
+          <span class="deletion-spinner" aria-hidden="true"></span>
+          <h2 id="deletion-title">${esc(title)}</h2>
+        </div>
+        <div class="deletion-activity" role="progressbar"
+             aria-valuetext="in progress" aria-label="Deletion in progress"></div>
+        <p class="deletion-lede">Deletion is in progress. Please keep this tab open until it finishes.</p>
+        <ol class="deletion-stages" id="deletion-stages" aria-live="polite"></ol>
+        <div class="deletion-summary" id="deletion-summary">${detail}</div>
+        <p class="deletion-elapsed muted small" id="deletion-elapsed" aria-live="off"></p>
+      </div>`;
+    document.body.appendChild(host);
+    document.body.classList.add("deletion-open");
+    this.host = host;
+
+    // Elapsed time is the one number here, and it is measured. It is
+    // deliberately not styled as progress: a case with a large evidence
+    // tree simply takes longer, and saying so beats a bar that stalls.
+    const elapsed = host.querySelector("#deletion-elapsed");
+    const tick = () => {
+      const s = Math.floor((Date.now() - this.startedAt) / 1000);
+      elapsed.textContent = s < 1 ? "" : `Elapsed ${s}s`;
+    };
+    tick();
+    this.timer = window.setInterval(tick, 1000);
+
+    // Focus moves into the dialog so a screen reader announces it and a
+    // keyboard user is not left on a button that is now behind a modal.
+    host.querySelector("#deletion-panel").setAttribute("tabindex", "-1");
+    host.querySelector("#deletion-panel").focus({ preventScroll: true });
+  },
+
+  // track polls the server for the stages a deletion has actually
+  // reached. Single-case deletion only: the bulk endpoint deletes cases
+  // one at a time and publishes no combined progress, so claiming a
+  // stage there would be inventing one.
+  track(caseId) {
+    if (!caseId) return;
+    this.stopTracking();
+
+    // Polling is deliberately frugal. Before the server has registered
+    // the deletion the endpoint answers 404, and a 250ms poll through a
+    // long deletion filled the console and the network log with a
+    // hundred of them for no added information. So: a slow poll until
+    // the first real answer, a fast one after it, and a full stop once
+    // the server says the deletion is done -- there is nothing further
+    // to learn after that.
+    const fast = 250;
+    const slow = 1000;
+    let seen = false;
+    let interval = slow;
+
+    const schedule = (ms) => {
+      window.clearInterval(this.pollTimer);
+      interval = ms;
+      this.pollTimer = window.setInterval(poll, ms);
+    };
+
+    const poll = async () => {
+      try {
+        const p = await api(`/cases/${caseId}/deletion-progress`);
+        if (!seen) {
+          seen = true;
+          schedule(fast);
+        }
+        this.renderStages(p);
+        if (p.done) {
+          // The server has finished. The request's own resolution is
+          // what closes the panel; nothing more can be learned here.
+          this.stopTracking();
+        }
+      } catch {
+        // 404 until the server registers the deletion, and again once
+        // the record expires. Neither is an error worth showing: the
+        // request itself is what reports success or failure.
+        if (seen) this.stopTracking();
+      }
+    };
+
+    poll();
+    this.pollTimer = window.setInterval(poll, interval);
+  },
+
+  stopTracking() {
+    if (this.pollTimer) {
+      window.clearInterval(this.pollTimer);
+      this.pollTimer = null;
+    }
+  },
+
+  // renderStages draws only what the backend has confirmed.
+  //
+  // A stage is ticked when the server says it is past it -- never when
+  // the UI guesses it should be. Row counts appear against "Removing
+  // case records" only once that transaction has COMMITTED, which is the
+  // first moment any record can truthfully be called deleted.
+  renderStages(p) {
+    const host = this.host && this.host.querySelector("#deletion-stages");
+    if (!host || !p) return;
+
+    const order = ["preparing", "removing_records", "removing_evidence_files", "complete"];
+    const current = order.indexOf(p.stage);
+    const failedAt = p.stage === "failed";
+
+    const rows = order.slice(0, 3).map((stage, i) => {
+      let state = "pending";
+      let note = "";
+      if (failedAt) {
+        // A failed deletion still shows what it had confirmed. Nothing
+        // beyond that is marked either way.
+        if (stage === "removing_records" && p.records_confirmed) state = "done";
+        else if (stage === "preparing") state = "done";
+      } else if (p.done) {
+        state = "done";
+      } else if (i < current) {
+        state = "done";
+      } else if (i === current) {
+        state = "active";
+      }
+
+      if (stage === "removing_records" && p.records_confirmed && p.records_removed) {
+        state = "done";
+        note = deletionCountsNote(p.records_removed);
+      }
+      if (stage === "removing_evidence_files" && p.evidence_files_removed) state = "done";
+
+      const mark = state === "done" ? "&#10003;" : state === "active" ? "&#8226;" : "";
+      return `<li class="deletion-stage ${state}">
+        <span class="deletion-stage-mark" aria-hidden="true">${mark}</span>
+        <span class="deletion-stage-name">${esc(DELETION_STAGE_LABELS[stage] || stage)}</span>
+        ${note ? `<span class="deletion-stage-note">${esc(note)}</span>` : ""}
+      </li>`;
+    });
+    host.innerHTML = rows.join("");
+  },
+
+  // fail converts the panel in place into an error state. The running
+  // state is stopped, and the word "Deleted" never appears: a failed
+  // deletion has not deleted anything it is willing to claim.
+  fail(message, onClose) {
+    if (!this.host) return;
+    this.stopTracking();
+    window.clearInterval(this.timer);
+    this.timer = null;
+
+    const panel = this.host.querySelector(".deletion-panel");
+    panel.classList.add("failed");
+    panel.innerHTML = `
+      <div class="deletion-head">
+        <span class="deletion-fail-mark" aria-hidden="true">!</span>
+        <h2 id="deletion-title">Deletion failed</h2>
+      </div>
+      <p class="deletion-detail" id="deletion-detail">${esc(message)}</p>
+      <p class="deletion-note small">The case has not been reported as deleted. Some of its
+      records or files may already have been removed &mdash; reopen the case to see its
+      current state, or repeat the deletion to finish it.</p>
+      <div class="deletion-actions">
+        <button type="button" class="secondary small" id="deletion-dismiss">Close</button>
+      </div>`;
+    panel.querySelector("#deletion-dismiss").addEventListener("click", () => {
+      this.close();
+      if (onClose) onClose();
+    });
+    panel.querySelector("#deletion-dismiss").focus({ preventScroll: true });
+  },
+
+  close() {
+    this.stopTracking();
+    if (this.timer) {
+      window.clearInterval(this.timer);
+      this.timer = null;
+    }
+    if (this.host) {
+      this.host.remove();
+      this.host = null;
+    }
+    document.body.classList.remove("deletion-open");
+  },
+};
+
+// deletionSummaryHTML lists what is about to be removed, as a table
+// rather than a sentence.
+//
+// The prose version ("Removing 1 collection, 7,074 evidence files, 2,319
+// events, 1,023 findings and 35 correlations...") put six numbers in one
+// run-on line, which is the hardest possible shape to read at the moment
+// an analyst most wants to check them.
+//
+// Every figure comes from the summary the case page has ALREADY loaded.
+// Nothing is fetched or estimated for this panel, and a count that is
+// not available is omitted rather than shown as zero-by-default.
+function deletionSummaryHTML(ids, evidence) {
+  if (ids.length !== 1) {
+    return `<p class="deletion-summary-note">Removing ${fmtCount(ids.length)} cases and all of their
+      evidence, events and analysis.</p>`;
+  }
+
+  const loaded =
+    overviewData && overviewData.c && overviewData.c.id === ids[0] ? overviewData.summary : null;
+  if (!loaded) {
+    return `<p class="deletion-summary-note">Removing this case's evidence, events and analysis.</p>`;
+  }
+
+  // Order matches how the case itself is built up: evidence first, then
+  // what was derived from it.
+  const rows = [
+    ["Collections", loaded.collections],
+    ["Evidence files", loaded.source_files],
+    ["Events", loaded.events],
+    ["Findings", loaded.findings],
+    ["Correlations", loaded.correlations],
+    ["ATT&CK techniques", loaded.technique_count],
+    ["Investigations", loaded.investigations],
+  ].filter(([, n]) => Number(n) > 0);
+
+  if (rows.length === 0) {
+    return `<p class="deletion-summary-note">This case holds no evidence, events or analysis.</p>`;
+  }
+
+  const table = rows
+    .map(
+      ([label, n]) => `<div class="deletion-row">
+        <span class="deletion-row-label">${esc(label)}</span>
+        <span class="deletion-row-value">${esc(fmtCount(n))}</span>
+      </div>`
+    )
+    .join("");
+
+  // The on-disk figure, and only what is true of THIS case.
+  //
+  // A size is a size: nothing derives a position from it.
+  //
+  // Three distinct answers, because they are three different facts. A
+  // measured zero is not "unknown" -- it means Tracefall stores none of
+  // this case's evidence itself, which is exactly what a local-path
+  // collection looks like: it points at the investigator's own folder,
+  // and deletion never touches it. Saying "evidence files are also being
+  // removed" there would claim a deletion that will not happen.
+  let disk;
+  if (evidence && evidence.measured && evidence.files > 0) {
+    disk = `<p class="deletion-summary-note">
+      Evidence on disk: ${esc(fmtCount(evidence.files))} files &middot; ${esc(fmtBytes(evidence.bytes))}
+    </p>`;
+  } else if (evidence && evidence.measured) {
+    disk = `<p class="deletion-summary-note">
+      No evidence files are stored by Tracefall for this case, so none are removed from disk.
+      Evidence you ingested from a local folder is left where it is.
+    </p>`;
+  } else {
+    disk = `<p class="deletion-summary-note">Evidence files stored by Tracefall are also being removed.</p>`;
+  }
+
+  return `<div class="deletion-table">${table}</div>${disk}`;
+}
+
+// deletionNavGuard warns before a reload or tab close while a deletion
+// is running.
+//
+// It cannot stop the request -- that is on the server and will finish
+// either way -- but leaving the page mid-deletion loses the only
+// indication of whether it succeeded, and a browser warning is the one
+// mechanism available for that. In-app navigation needs no handler: the
+// panel is modal and covers the sidebar.
+const deletionNavGuard = {
+  handler: null,
+  arm() {
+    if (this.handler) return;
+    this.handler = (e) => {
+      e.preventDefault();
+      // Browsers show their own wording; returnValue is what enables it.
+      e.returnValue = "";
+      return "";
+    };
+    window.addEventListener("beforeunload", this.handler);
+  },
+  disarm() {
+    if (!this.handler) return;
+    window.removeEventListener("beforeunload", this.handler);
+    this.handler = null;
+  },
+};
+
 // confirmAndDeleteCases requires explicit confirmation (never a silent
 // destructive action -- see requirement 13) before permanently deleting
 // one or more cases and everything associated with them. onSuccess
@@ -2178,24 +4051,182 @@ function wireCaseSelection() {
 // "the current page" is still valid afterward); the case detail page
 // passes its own onSuccess to navigate back to the list instead, since
 // its own case no longer exists to reload.
-async function confirmAndDeleteCases(ids, onSuccess) {
+// confirmAndDeleteCases warns, deletes, and does not pretend to be
+// finished before the server says it is.
+//
+// Deletion is SYNCHRONOUS: the request returns only after every row and
+// the case's evidence directory are gone. So the honest UI is an
+// in-flight state held until the response arrives -- not an optimistic
+// navigation, and not a progress percentage. The server does not report
+// how far through a deletion it is, so any number shown here would be
+// invented; an indeterminate "Deleting..." is the truthful shape.
+//
+// The button is disabled for the duration. Without that, a second click
+// on a large case fires a second DELETE while the first is still
+// running, and the second one fails with "not found" -- an error message
+// about an operation that is in fact succeeding.
+async function confirmAndDeleteCases(ids, onSuccess, trigger) {
   const title = ids.length === 1 ? "Delete Case?" : `Delete ${ids.length} Cases?`;
-  const detail =
+  // The warning states exactly what goes and exactly what stays. It is
+  // checked against the implementation by a test -- a deletion warning
+  // that overstates or understates what it destroys is worse than none.
+  const what =
     ids.length === 1
-      ? "This will permanently delete this case and all associated evidence and analysis (events, observations, findings, correlations, ATT&CK mappings, and case files on disk)."
-      : "This will permanently delete the selected cases and all associated evidence and analysis (events, observations, findings, correlations, ATT&CK mappings, and case files on disk).";
+      ? "This permanently deletes this case and everything belonging to it:"
+      : `This permanently deletes the ${ids.length} selected cases and everything belonging to them:`;
+  const detail =
+    `${what}\n\n` +
+    "  \u2022 every evidence collection, and its files on disk\n" +
+    "  \u2022 the original uploaded archive or disk image\n" +
+    "  \u2022 every discovered and imported source file record\n" +
+    "  \u2022 every parsed event, observation and raw evidence record\n" +
+    "  \u2022 every finding, correlation, investigation and ATT&CK mapping\n" +
+    "  \u2022 notes, tags, analyst status, analysis runs and the case audit history\n\n" +
+    "Evidence you ingested from a local folder is NOT deleted: Tracefall only " +
+    "removes storage it owns. The system security log is also kept, so the record " +
+    "that this case existed and was deleted survives.\n\n" +
+    "This cannot be undone.";
+  // Measured BEFORE the confirmation is shown, so the walk never runs
+  // during the deletion itself and cannot race the removal it would be
+  // measuring. A failure here is not worth surfacing: the summary simply
+  // says that evidence files are being removed, without a size.
+  let evidence = null;
+  if (ids.length === 1) {
+    try {
+      evidence = await api(`/cases/${ids[0]}/evidence-size`);
+    } catch {
+      evidence = null;
+    }
+  }
+
   if (!window.confirm(`${title}\n\n${detail}`)) return;
+
+  const restore = beginDeleting(trigger, ids.length);
+  if (!restore.started) return; // a deletion is already running
+
+  // The summary is built BEFORE the request, while the case's own counts
+  // are still loaded and still true.
+  deletionProgress.open(
+    ids.length === 1 ? "Deleting case\u2026" : `Deleting ${ids.length} cases\u2026`,
+    deletionSummaryHTML(ids, evidence)
+  );
+  // Real stages, polled from the server, for a single-case deletion. A
+  // bulk delete removes cases one at a time and publishes no combined
+  // progress, so it stays on the indeterminate state rather than being
+  // given a stage list it cannot substantiate.
+  if (ids.length === 1) deletionProgress.track(ids[0]);
+  deletionNavGuard.arm();
+
+  const stop = () => {
+    deletionNavGuard.disarm();
+    restore();
+  };
+
   try {
     if (ids.length === 1) {
       await api(`/cases/${ids[0]}`, { method: "DELETE" });
     } else {
-      await api(`/cases`, { method: "DELETE", body: JSON.stringify({ case_ids: ids }) });
+      // A bulk delete answers 200 even when some cases failed: the
+      // result carries a Failed map (see Service.DeleteCases). Treating
+      // the 200 alone as success reported "deleted" for cases that are
+      // still there, which is the one thing a deletion UI must never do.
+      const res = await api(`/cases`, {
+        method: "DELETE",
+        body: JSON.stringify({ case_ids: ids }),
+      });
+      const failed = (res && res.failed) || {};
+      const failedIDs = Object.keys(failed);
+      if (failedIDs.length > 0) {
+        const deleted = (res && res.deleted_case_ids) || [];
+        stop();
+        deletionProgress.fail(
+          `${deleted.length} of ${ids.length} cases were deleted. ` +
+            `${failedIDs.length} could not be: ` +
+            failedIDs.map((id) => `${id} (${failed[id]})`).join("; "),
+          () => window.location.reload()
+        );
+        return;
+      }
     }
+
+    // Drop the cached case payload before navigating. It is overwritten
+    // on the next case open and the deleted case can no longer be
+    // fetched anyway, so nothing could actually resurrect it -- but a
+    // deleted case's data sitting in a module variable is not a thing to
+    // leave to that argument.
+    overviewData = null;
+    renderedCaseId = null;
+    currentCollections = [];
+    // Only now. The server has finished; nothing before this point
+    // claims completion, and the panel is torn down as the view it was
+    // covering is replaced.
+    stop();
+    deletionProgress.close();
     (onSuccess || (() => window.location.reload()))();
   } catch (e) {
-    window.alert("Failed to delete: " + (e.message || e));
+    stop();
+    deletionProgress.fail(e.message || String(e));
   }
 }
+
+// beginDeleting disables every delete control and blocks a second
+// attempt. Returns the undo, for the failure path -- on success the view
+// is replaced, so nothing is restored.
+//
+// It deliberately does NOT relabel or animate the button.
+//
+// It used to: the trigger became "Deleting case..." with a sweeping
+// underline, which put a second live status indicator on screen
+// underneath the modal that was already reporting the same thing. Two
+// indicators for one operation is worse than one -- an analyst has to
+// work out whether they are showing the same deletion, and a button
+// that animates behind a backdrop reads as something still interactive.
+// The modal is the single authoritative deletion status; the button
+// behind it is simply disabled, keeping its own label.
+function beginDeleting(trigger, count) {
+  // The returned function carries `started`, so the caller can tell a
+  // real start from a refused duplicate. Without it a second click
+  // opened a second progress panel over the first and then tore both
+  // down on one response.
+  if (deleteInFlight) {
+    const noop = () => {};
+    noop.started = false;
+    return noop;
+  }
+  deleteInFlight = true;
+
+  // Every delete control is disabled, including the one that was
+  // clicked, so the block cannot be walked around by clicking a
+  // different button for the same case.
+  const others = [
+    ...document.querySelectorAll("#delete-case-btn, #case-delete-selected-btn, .delete-collection-btn"),
+  ];
+  const btn = trigger instanceof HTMLElement ? trigger : null;
+  if (btn && !others.includes(btn)) others.push(btn);
+  others.forEach((b) => (b.disabled = true));
+
+  // Everything else on the case is inert too, so nothing underneath can
+  // be operated while its case is being removed.
+  document.querySelectorAll(".case-header-actions, .sidenav").forEach((el) => {
+    el.classList.add("deletion-inert");
+  });
+
+  const restore = () => {
+    deleteInFlight = false;
+    others.forEach((b) => (b.disabled = false));
+    document.querySelectorAll(".deletion-inert").forEach((el) => {
+      el.classList.remove("deletion-inert");
+    });
+  };
+  restore.started = true;
+  return restore;
+}
+
+// deleteInFlight guards against a second delete being started while one
+// is still running. Deletion is synchronous and can take seconds on a
+// large case; a second request would fail with "not found" and report an
+// error for an operation that was actually succeeding.
+let deleteInFlight = false;
 
 // ---------------- Case detail ----------------
 
@@ -2265,10 +4296,14 @@ async function renderCaseDetail(caseId, tab) {
   // as the case renders, not only after a save.
   applyLifecycleLocks(data);
   // Absent for a non-admin: the control is not rendered at all.
-  document.getElementById("delete-case-btn")?.addEventListener("click", () =>
-    confirmAndDeleteCases([caseId], () => {
-      window.location.hash = "#/";
-    })
+  document.getElementById("delete-case-btn")?.addEventListener("click", (ev) =>
+    confirmAndDeleteCases(
+      [caseId],
+      () => {
+        window.location.hash = "#/";
+      },
+      ev.currentTarget
+    )
   );
 
   renderedCaseId = caseId;
@@ -2292,6 +4327,10 @@ const CASE_NAV = [
   { key: "investigations", label: "Investigations" },
   { key: "correlations", label: "Activity Chains" },
   { key: "attack", label: "ATT&CK" },
+  // Phase 21. Placed after the analysis views and before the audit
+  // trail: it is a way of LOOKING at evidence, like the Timeline, not a
+  // record of what was done to the case.
+  { key: "geomap", label: "Photo Map" },
   { key: "audit", label: "Audit History" },
 ];
 
@@ -2660,6 +4699,9 @@ async function renderTabContent(caseId, tab, collections) {
         break;
       case "evidence":
         await renderEvidenceTab(content, caseId, collections);
+        break;
+      case "geomap":
+        await renderGeoMapTab(content, caseId);
         break;
       case "audit":
         await renderAuditTab(content, caseId);
@@ -4355,7 +6397,7 @@ function wireParseFailureToggle(container, failures) {
       ${renderParseFailureGroups(groups)}
       <div class="muted small" style="margin-top:var(--space-3)">Every affected file</div>
       <div class="table-wrap"><table class="data-table">
-        <thead><tr><th>File</th><th>Artifact type</th><th>Stage</th><th>Problem</th><th>Events kept</th></tr></thead>
+        <thead><tr><th>File</th><th>Artifact type</th><th>State</th><th>Stage</th><th>Problem</th><th>Events kept</th></tr></thead>
         <tbody>${page.items.map(parseFailureRow).join("")}</tbody>
       </table></div>
       ${renderPager(PARSE_ERROR_PAGER, page, { noun: "parse errors", label: "Parse error pagination" })}`;
@@ -4372,6 +6414,43 @@ function wireParseFailureToggle(container, failures) {
       render();
     }
   });
+}
+
+// PARSE_CATEGORY_LABELS name the STATE a file ended in, so the six that
+// matter are never rendered alike.
+//
+// The distinction is the point. "This artifact is not one Tracefall
+// reads", "this artifact is fine and its compression is not implemented",
+// "this file was catalogued as the wrong thing", "this file is damaged"
+// and "this file is empty" lead to four different next steps and one
+// non-step, and reporting them all as "parse error" told an analyst
+// nothing about which they were looking at.
+const PARSE_CATEGORY_LABELS = {
+  unsupported_format: "Unsupported artifact",
+  unsupported_compression: "Unsupported compression",
+  misclassified: "Misclassified",
+  corrupt_or_truncated: "Corrupt or truncated",
+  empty: "Empty file",
+  limit_exceeded: "Safety limit reached",
+  unreadable: "Could not be read",
+  internal_error: "Internal error",
+};
+
+// PARSE_CATEGORY_NOTE says, in one line, what the state means for the
+// EVIDENCE -- which is the question an analyst is actually asking.
+const PARSE_CATEGORY_NOTE = {
+  unsupported_format: "The file is intact. Tracefall does not read this artifact.",
+  unsupported_compression: "The artifact is present and supported; its container's compression is not implemented.",
+  misclassified: "The file is intact. It is not the artifact it was cataloged as.",
+  corrupt_or_truncated: "The evidence itself is damaged.",
+  empty: "The file has no content. Nothing to parse, and nothing is wrong with it.",
+  limit_exceeded: "The file exceeded a safety ceiling and was not parsed.",
+  unreadable: "The file could not be read from storage.",
+  internal_error: "Tracefall failed unexpectedly on this file.",
+};
+
+function parseCategoryLabel(c) {
+  return PARSE_CATEGORY_LABELS[c] || c || "Unknown";
 }
 
 // groupParseFailures collapses identical failures into one entry each.
@@ -4417,8 +6496,10 @@ function renderParseFailureGroups(groups) {
             <summary>
               <strong>${fmtCount(g.count)} file(s)</strong>
               <span class="small">${esc(artifactLabel(g.artifactType))}</span>
+              <span class="parse-category parse-category-${esc(g.category || "unknown")}">${esc(parseCategoryLabel(g.category))}</span>
               <span class="muted small">&middot; ${esc(PARSE_STAGE_LABELS[g.stage] || g.stage)}</span>
             </summary>
+            <p class="small parse-error-note">${esc(PARSE_CATEGORY_NOTE[g.category] || "")}</p>
             <p class="small parse-error-message">${esc(g.message)}</p>
             <div class="muted small parse-error-files">${g.files.slice(0, 200).map(esc).join(", ")}${
               g.files.length > 200 ? ` and ${fmtCount(g.files.length - 200)} more` : ""
@@ -4437,6 +6518,7 @@ function parseFailureRow(f) {
   return `<tr>
     <td class="mono small" title="${esc(f.path)}">${esc(f.filename || f.path)}</td>
     <td class="small">${esc(artifactLabel(f.artifact_type))}</td>
+    <td class="small"><span class="parse-category parse-category-${esc(f.category || "unknown")}">${esc(parseCategoryLabel(f.category))}</span></td>
     <td class="small">${esc(PARSE_STAGE_LABELS[f.stage] || f.stage)}</td>
     <td class="small">${esc(f.message)}</td>
     <td class="small">${f.partial_events ? "partial" : "none"}</td>
@@ -4603,66 +6685,310 @@ function wireAnalysisAction(caseId) {
   });
 }
 
-// ---------------- Timeline tab ----------------
+// ---------------- Forensic timeline tab (Phase 14) ----------------
 //
-// The primary investigation view: every event across every collection in
-// the case, chronological, cross-referenced client-side against findings
-// (buildEventFindingIndex) and correlations (buildEventCorrelationIndex)
-// -- both already fetched in full for their own tabs, so joining them
-// here costs no extra requests. Filtering is entirely client-side over
-// this one fetch (see renderTimelineTab's doc note on why that beats
-// round-tripping to the server for a dataset this size).
+// The analyst-facing view of NORMALIZED EVENTS -- the layer between the
+// evidence that was collected and the findings a detection drew from it.
+// It is deliberately not the Findings page: most events here will never
+// be cited by any detection, and being able to search those is the whole
+// point. An event with no finding is an ordinary observation, not a
+// negative result.
+//
+// # Why this queries the server
+//
+// It previously fetched the entire timeline, plus every finding and
+// every correlation, and filtered the lot in JavaScript. That is
+// workable for a few thousand events and untenable for the evidence
+// Tracefall now parses: one $MFT alone can contribute hundreds of
+// thousands. The browser held the whole case in memory and re-scanned it
+// on every keystroke.
+//
+// So filtering, searching, ordering and paging all happen in the
+// database (see store/eventquery.go), and the browser receives one page.
+// The filter vocabularies come from the server too, derived from the
+// events the case actually holds -- so a dropdown never offers a choice
+// that cannot return anything.
+//
+// # Timezone
+//
+// Date bounds are entered as wall-clock readings in the DISPLAY
+// timezone (readDateTime / wallTimeToInstant) and sent as absolute
+// instants. The server never has to guess what the analyst meant, and
+// the window queried is the same window they are reading on screen.
+
+// TIMELINE_SEARCH_FIELDS are the forensic fields a search term can be
+// aimed at. The empty value is "any field": the documented free-text
+// surface (see docs/forensic-search.md), which is what an analyst who
+// does not yet know where a string lives should be using.
+//
+// Each named option maps to the API's own parameter of the same name, so
+// what the analyst picks is exactly what the server searches.
+const TIMELINE_SEARCH_FIELDS = [
+  { value: "", label: "Any field" },
+  { value: "filename", label: "Filename" },
+  { value: "path", label: "Path" },
+  { value: "url", label: "URL" },
+  { value: "domain", label: "Domain / host" },
+  { value: "ip", label: "IP address" },
+  { value: "command_line", label: "Command line" },
+  { value: "original_path", label: "Deleted original path" },
+];
 
 async function renderTimelineTab(content, caseId, collections) {
   content.innerHTML = `<p class="empty">Loading timeline...</p>`;
-  const [events, findings, correlations] = await Promise.all([
-    api(`/cases/${caseId}/timeline`),
-    api(`/cases/${caseId}/findings`).catch(() => []),
-    api(`/cases/${caseId}/correlations`).catch(() => []),
-  ]);
-  const eventFindingIdx = buildEventFindingIndex(findings);
-  const eventCorrIdx = buildEventCorrelationIndex(correlations);
 
-  if (events.length === 0) {
-    content.innerHTML = `<p class="empty">No events yet. Add evidence first.</p>`;
+  let facets;
+  try {
+    facets = await api(`/cases/${caseId}/events/facets`);
+  } catch (e) {
+    content.innerHTML = errorBox(e);
     return;
   }
 
-  // Every categorical filter's option list is derived from the data this
-  // tab already loaded -- no hardcoded hosts/users/processes/techniques,
-  // and no extra request to build them.
-  const techniqueIds = Array.from(new Set(findings.flatMap((f) => f.attack_techniques || []))).sort();
+  if (!facets.total_events) {
+    content.innerHTML = `<p class="empty">No events yet. Add evidence and import it first.</p>
+      <p class="muted small">Some artifacts are evidence without being timeline events -- an NTFS $LogFile
+      records no timestamps, and a browser cache index is a container rather than a cached response. Those
+      appear under Evidence with what was read from them.</p>`;
+    return;
+  }
+
+  // ATT&CK options come from the findings this case has, which is a
+  // small bounded list -- unlike events, it is safe to fetch whole.
+  let techniqueIds = [];
+  try {
+    const findings = await api(`/cases/${caseId}/findings`);
+    techniqueIds = Array.from(new Set((findings || []).flatMap((f) => f.attack_techniques || []))).sort();
+  } catch {
+    techniqueIds = [];
+  }
+
   content.innerHTML = `
-    <div class="row between">
-      <h2 id="timeline-heading">Unified timeline (${events.length} events)</h2>
+    <div class="row between tl-head">
+      <h2 id="timeline-heading">Forensic timeline</h2>
+      <div class="tl-meta small muted" id="tl-meta"></div>
     </div>
-    ${renderFilterBar("tl", {
-      scope: caseId,
-      search: "Search events...",
-      severity: true,
-      category: filterOptions(events.map(eventCategory), (c) => EVENT_CATEGORY_LABELS[c] || c),
-      host: filterOptions(events.map((e) => e.host)),
-      user: filterOptions(events.map((e) => e.user)),
-      process: filterOptions(events.map((e) => e.process_name)),
-      technique: filterOptions(techniqueIds),
-      collection: filterOptions(
-        collections.map((c) => c.collection_id),
-        (id) => collectionLabel(id)
-      ),
-      timeRange: true,
-    })}
-    <div id="timeline-body"></div>
-  `;
+    <p class="muted small tl-explain">Normalized events parsed from this case's evidence. An event is an
+      observation, not a detection &mdash; most events are never cited by a finding.</p>
+    <div id="tl-filters"></div>
+    <div id="tl-body" aria-live="polite"></div>
+    <div id="tl-pager"></div>`;
 
-  pagerFor("tl", { scope: caseId, sizes: [10, 25, 50, 100, 250], defaultSize: 10 });
+  const prefix = "tl";
+  pagerFor(prefix, { scope: caseId, sizes: [10, 25, 50, 100], defaultSize: 10 });
 
-  const rerender = () => renderTimelineRows(caseId, events, eventFindingIdx, eventCorrIdx, readFilterBar("tl"));
-  wireFilterBar("tl", () => {
-    resetPage("tl");
-    rerender();
+  document.getElementById("tl-filters").innerHTML = renderFilterBar(prefix, {
+    scope: caseId,
+    search: "Search events...",
+    searchFields: TIMELINE_SEARCH_FIELDS,
+    // A request per keystroke is not free here, unlike the old in-memory
+    // filtering this replaced.
+    searchDebounceMs: 300,
+    severity: true,
+    artifact: (facets.artifact_types || []).map((o) => ({ value: o.value, label: o.label })),
+    eventType: (facets.event_types || []).map((o) => ({ value: o.value, label: o.label })),
+    host: filterOptions(facets.hosts || []),
+    user: filterOptions(facets.users || []),
+    process: filterOptions(facets.processes || []),
+    technique: filterOptions(techniqueIds),
+    collection: filterOptions(facets.collections || [], (id) => collectionLabel(id)),
+    timeRange: true,
   });
-  wirePager("tl", content, rerender);
-  rerender();
+
+  let inFlight = 0;
+
+  // timelineQuery translates the filter bar into the API's parameters.
+  // Every value is sent as a separate parameter so each is individually
+  // escaped, and repeated parameters form the OR-set the server expects.
+  function timelineQuery() {
+    const f = readFilterBar(prefix);
+    const st = pagerStates.get(prefix);
+    const q = new URLSearchParams();
+
+    const term = (f.qRaw || "").trim();
+    if (term) q.set(f.qField || "q", term);
+
+    const addAll = (param, set) => {
+      if (!set) return;
+      set.forEach((v) => q.append(param, v));
+    };
+    addAll("artifact_type", f.artifact);
+    addAll("event_type", f.eventType);
+    addAll("host", f.host);
+    addAll("user", f.user);
+    addAll("process", f.process);
+    addAll("collection", f.collection);
+    addAll("severity", f.severity);
+    addAll("technique", f.technique);
+
+    // Absolute instants, already resolved out of the display timezone.
+    if (f.from) q.set("from", f.from.toISOString());
+    if (f.to) q.set("to", f.to.toISOString());
+
+    q.set("page", String(st.page));
+    q.set("page_size", String(st.pageSize));
+    return q;
+  }
+
+  async function load() {
+    const token = ++inFlight;
+    const body = document.getElementById("tl-body");
+    body.setAttribute("aria-busy", "true");
+    let page;
+    try {
+      page = await api(`/cases/${caseId}/events?${timelineQuery()}`);
+    } catch (e) {
+      // A slower earlier request must never overwrite a newer answer.
+      if (token !== inFlight) return;
+      body.removeAttribute("aria-busy");
+      body.innerHTML = errorBox(e);
+      return;
+    }
+    if (token !== inFlight) return;
+    body.removeAttribute("aria-busy");
+    renderTimelinePage(caseId, page);
+  }
+
+  wireFilterBar(prefix, () => {
+    // Any change to the result set returns to page 1: staying on page 7
+    // of a two-page result shows an empty screen that reads as "nothing
+    // matched".
+    resetPage(prefix);
+    load();
+  });
+  wirePager(prefix, content, load);
+  load();
+}
+
+// renderTimelinePage draws one server page of the forensic timeline.
+function renderTimelinePage(caseId, page) {
+  const body = document.getElementById("tl-body");
+  const pagerHost = document.getElementById("tl-pager");
+  const meta = document.getElementById("tl-meta");
+
+  if (meta) {
+    // The zone every timestamp below is rendered in, stated on the view
+    // itself. A timeline whose zone the reader has to remember is a
+    // timeline that gets misread.
+    const range = page.range && page.range.from
+      ? ` &middot; ${esc(fmtRangeSummary(page.range))}`
+      : "";
+    meta.innerHTML = `Times shown in <strong>${esc(tzLabel())}</strong>${range}`;
+  }
+
+  // The note goes ABOVE the results, whether or not there are any: the
+  // case an analyst most needs it in is the one where a partial date
+  // returned nothing and looked like a bug.
+  const scopeNote = renderSearchScopeNote((readFilterBar("tl") || {}).qRaw);
+
+  if (!page.items.length) {
+    // Two different situations, two different sentences. "No events
+    // match" and "this case has no events" send an analyst to entirely
+    // different next steps, and a bare empty table says neither.
+    body.innerHTML = scopeNote + (page.filtered
+      ? `<p class="empty">No events match the current filters.
+           This case holds ${fmtCount(page.total_in_case)} event(s) in total.</p>`
+      : `<p class="empty">No events in this case yet.</p>`);
+    pagerHost.innerHTML = "";
+    return;
+  }
+
+  body.innerHTML = scopeNote + `
+    <div class="table-wrap"><table class="data-table wide">
+      <thead><tr>
+        <th>Time (${esc(tzLabel())})</th><th>Artifact</th><th>Event type</th><th>Host</th><th>User</th>
+        <th>Process</th><th>Detail</th><th>Finding</th><th>ATT&amp;CK</th><th>Collection</th>
+      </tr></thead>
+      <tbody>
+        ${page.items.map((e) => timelineRow(e)).join("")}
+      </tbody>
+    </table></div>`;
+
+  pagerHost.innerHTML = renderPager("tl", {
+    page: page.page,
+    pageSize: page.page_size,
+    total: page.total,
+    totalPages: page.total_pages,
+    from: page.total === 0 ? 0 : (page.page - 1) * page.page_size + 1,
+    to: (page.page - 1) * page.page_size + page.items.length,
+  }, { noun: "events", label: "Timeline pagination" });
+
+  wireDetailCells(body);
+  wireTimelineRowClicks(caseId, body);
+}
+
+// partialDateTerm reports when a search term looks like a DATE but is
+// not a complete one, so the timeline can say what it actually did.
+//
+// This exists because of a specific, repeated confusion. Typing "2021"
+// into the search box returns results -- on one real case, 43 of them --
+// and they look like time filtering. They are not: the term matched the
+// literal string "2021" inside file paths, URLs and page titles. Typing
+// the more precise "2021-04" then returns NOTHING, because no field
+// happens to contain that string, which reads as the search being
+// broken when it is doing exactly what a text search does.
+//
+// A COMPLETE date or timestamp is handled as a moment (see the server's
+// searchTermMoment) and needs no warning. Only the partial forms do.
+function partialDateTerm(term) {
+  const t = (term || "").trim();
+  if (!t) return "";
+  // Complete forms are resolved as moments; nothing to explain.
+  if (/^\d{4}-\d{2}-\d{2}([ T]\d{2}:\d{2}(:\d{2})?)?$/.test(t)) return "";
+  // A bare year, a year-month, or a truncated date.
+  if (/^\d{4}$/.test(t) || /^\d{4}-\d{1,2}$/.test(t) || /^\d{4}-\d{1,2}-\d{1}$/.test(t)) return t;
+  return "";
+}
+
+// renderSearchScopeNote explains a text-only date-ish search, and points
+// at the control that does filter by time.
+function renderSearchScopeNote(term) {
+  const partial = partialDateTerm(term);
+  if (!partial) return "";
+  return `<p class="tl-hint" role="note">
+    <strong>${esc(partial)}</strong> is being searched as <strong>text</strong>, not as a time.
+    Any results below contain that string in a path, URL, title or other field &mdash; they are
+    not selected by when the event happened. To filter by time, use
+    <strong>Date range</strong>, which supports a full date and time down to the second.
+  </p>`;
+}
+
+// fmtRangeSummary states the window actually queried, in the display
+// zone, so the analyst can check the conversion rather than trust it.
+function fmtRangeSummary(range) {
+  const from = range.from ? fmtTime(range.from) : "";
+  const to = range.to ? fmtTime(range.to) : "";
+  if (from && to) return `${from} to ${to}`;
+  return from ? `from ${from}` : `to ${to}`;
+}
+
+// timelineRow renders one server-supplied event.
+//
+// The finding, ATT&CK and chain columns are driven by the REFERENCES the
+// server attached (e.findings / e.correlations), not by a client-side
+// join against every finding in the case. An empty findings list renders
+// as an empty cell, never as a dash or a zero -- there is nothing absent
+// to report.
+function timelineRow(e) {
+  const findings = e.findings || [];
+  const sev = maxSeverity(findings.map((f) => f.severity));
+  const techniques = Array.from(new Set(findings.flatMap((f) => f.attack_techniques || []))).sort();
+  const hasChain = (e.correlations || []).some((c) => c.correlation_type === "activity_chain");
+  return `<tr class="timeline-row" data-event="${esc(e.id)}" tabindex="0">
+    <td class="mono small nowrap">${eventTimeCell(e)}</td>
+    <td class="small nowrap">${esc(e.artifact_label || e.artifact_type)}</td>
+    <td class="small nowrap">${esc(e.event_type)}${hasChain ? ' <span class="badge conf chain-badge" title="Part of a reconstructed activity chain">chain</span>' : ""}</td>
+    <td class="mono small nowrap">${esc(e.host)}</td>
+    <td class="mono small nowrap">${esc(e.user)}</td>
+    <td class="mono small nowrap">${esc(e.process_name)}</td>
+    <td class="mono small detail-td">${detailCell(eventDetailValue(e))}</td>
+    <td class="small nowrap">${sev ? severityBadge(sev) : ""}</td>
+    <td class="small">${techChips(techniques)}</td>
+    <td class="small nowrap">${collectionBadge(e.collection_id)}</td>
+  </tr>
+  <tr class="raw-row" data-for="${esc(e.id)}" style="display:none">
+    <td colspan="10"><div class="evidence-box"></div></td>
+  </tr>`;
 }
 
 function renderTimelineRows(caseId, events, eventFindingIdx, eventCorrIdx, filters) {
@@ -4680,7 +7006,7 @@ function renderTimelineRows(caseId, events, eventFindingIdx, eventCorrIdx, filte
   // slices an already-ordered array, so a page boundary never changes
   // which event comes before which.
   const page = paginate("tl", filtered);
-  body.innerHTML = `
+  body.innerHTML = scopeNote + `
     <div class="table-wrap"><table class="data-table wide">
       <thead><tr>
         <th>Time (${esc(tzLabel())})</th><th>Category</th><th>Type</th><th>Host</th><th>User</th>
@@ -4798,11 +7124,335 @@ async function loadProvenanceInto(caseId, eventId, box) {
   box.textContent = "Loading...";
   try {
     const prov = await api(`/cases/${caseId}/events/${eventId}`);
-    box.textContent = renderProvenanceText(prov);
+    // An account/credential record gets a labelled panel above the raw
+    // record: it is the ONE place the NTLM hash is shown, and the place
+    // it can be copied from exactly.
+    const panel =
+      credentialPanel(prov.event) ||
+      shellBagPanel(prov.event) ||
+      filezillaPanel(prov.event) ||
+      imageGeoPanel(prov.event);
+    if (panel) {
+      box.innerHTML = panel + `<pre class="provenance-text"></pre>`;
+      box.querySelector(".provenance-text").textContent = renderProvenanceText(prov);
+      wireDetailCells(box);
+    } else {
+      box.textContent = renderProvenanceText(prov);
+    }
     box.dataset.loaded = "1";
   } catch (e) {
     box.textContent = "Error loading evidence: " + (e.message || e);
   }
+}
+
+// credentialPanel renders the account/credential fields of a Windows SAM
+// event, and returns "" for every other event.
+//
+// This is the ONLY view that shows an NTLM hash. It is not in the
+// timeline row, not in the Detail column, and not in any search index --
+// see internal/store/eventquery.go's named-key allowlist. It is shown
+// truncated with a reveal control, and Copy always carries the complete
+// 32 characters whatever the display is showing.
+//
+// The wording is as deliberate as the placement. An NTLM hash is a
+// PASSWORD HASH: not a password, not reversible into one, and not
+// something Tracefall attempts to crack. An analyst reading this panel
+// under time pressure must not be able to come away with the wrong idea
+// about what they are looking at.
+// hashStateLabel turns a non-decoded hash status into what the analyst
+// should read, and says whether the underlying material exists.
+//
+// The distinction the whole function exists for: "no hash is stored"
+// and "the hash is stored and encrypted" must never render the same.
+function hashStateLabel(x) {
+  switch (x.ntlm_hash_status) {
+    case "encrypted_system_hive_missing":
+      return { value: "Encrypted \u2014 SYSTEM hive required", encrypted: true };
+    case "encrypted_system_hive_unusable":
+      return { value: "Encrypted \u2014 SYSTEM hive could not be used", encrypted: true };
+    case "encrypted_data_unavailable":
+      return { value: "Encrypted \u2014 hash material could not be read", encrypted: true };
+    case "unsupported":
+      return { value: "Encrypted \u2014 unsupported format", encrypted: true };
+    case "not_stored":
+      return { value: "No hash stored for this account", encrypted: false };
+    default:
+      return { value: "Not available (" + (x.ntlm_hash_status || "unknown") + ")", encrypted: false };
+  }
+}
+
+// shellBagPanel shows the reconstructed navigation chain for a ShellBags
+// event, and returns "" for every other event.
+//
+// A ShellBags entry means little on its own: what it establishes is
+// where a folder SAT, which is a statement about its ancestors. The
+// Detail column shows the reconstructed path; this panel shows the chain
+// that produced it, level by level, so an analyst can see which levels
+// are recorded names and which are gaps -- and read a source folder off
+// the evidence instead of inferring it from a leaf.
+function shellBagPanel(ev) {
+  const x = (ev && ev.extra) || {};
+  if (!ev || ev.event_type !== "shellbag_navigation") return "";
+
+  const path = x.reconstructed_path || "";
+  const levels = path ? path.split("\\") : [];
+  const complete = x.path_complete !== "false";
+
+  const chain = levels
+    .map((seg, i) => {
+      const undecoded = seg === "(undecoded)";
+      const last = i === levels.length - 1;
+      return `<li class="sb-level${undecoded ? " sb-undecoded" : ""}${last ? " sb-leaf" : ""}">
+        <span class="sb-depth">${i}</span>
+        <span class="sb-name">${esc(undecoded ? "not decoded" : seg)}</span>
+      </li>`;
+    })
+    .join("");
+
+  const rows = [];
+  const add = (label, value, opts) => {
+    if (!value) return;
+    rows.push(`<div class="cred-field"><span class="cred-label">${esc(label)}</span>
+      <span class="cred-value">${detailCell(value, opts)}</span></div>`);
+  };
+  add("Reconstructed path", path);
+  add("Parent folder", x.parent_name);
+  add("Parent path", x.parent_path);
+  add("BagMRU node", x.shellbag_node);
+  add("Parent BagMRU key", x.parent_registry_key);
+  add("Shell item type", x.shell_item_kind + (x.shell_item_type_hex ? ` (${x.shell_item_type_hex})` : ""));
+  if (x.shell_item_name_source) add("Name source", x.shell_item_name_source);
+  if (x.shell_item_recovered_strings) add("Strings in this item", x.shell_item_recovered_strings);
+  if (x.registry_last_write) add("BagMRU last write", x.registry_last_write);
+
+  return `<div class="cred-panel sb-panel">
+    <h4>Explorer navigation &mdash; reconstructed hierarchy</h4>
+    <ol class="sb-chain">${chain}</ol>
+    ${
+      complete
+        ? ""
+        : `<p class="cred-note sb-warn">${esc(x.path_limitation || "")}</p>`
+    }
+    ${rows.join("")}
+    <p class="cred-note">${esc(x.evidence_meaning || "")}</p>
+    <p class="cred-note">${esc(x.timestamp_meaning || "")}</p>
+  </div>`;
+}
+
+// filezillaPanel renders a FileZilla entry as the connection record it
+// is, with the address question -- "is there an IPv4 here?" -- answered
+// explicitly either way rather than left to be inferred from a missing
+// field.
+//
+// There is no password row and there is no way to add one: the value is
+// never carried out of internal/filezilla, so the event this renders
+// does not contain it.
+function filezillaPanel(ev) {
+  const x = (ev && ev.extra) || {};
+  if (!ev || ev.event_type !== "filezilla_server_entry") return "";
+
+  const rows = [];
+  const add = (label, value, opts) => {
+    if (value === undefined || value === null || value === "") return;
+    rows.push(`<div class="cred-field"><span class="cred-label">${esc(label)}</span>
+      <span class="cred-value">${detailCell(value, opts)}</span></div>`);
+  };
+
+  if (x.server_ipv4) add("Server (IPv4)", x.server_ipv4);
+  else if (x.server_ipv6) add("Server (IPv6)", x.server_ipv6);
+  else if (x.server_hostname) add("Server (hostname)", x.server_hostname);
+  else add("Server", x.server_host);
+
+  add("Address type", x.server_address_type);
+  if (x.ipv4_availability) add("IPv4 availability", x.ipv4_availability);
+  add("Protocol", x.protocol + (x.protocol_code ? ` (code ${x.protocol_code})` : ""));
+  if (x.protocol_note) add("Protocol note", x.protocol_note);
+  add("Port", x.server_port || x.server_port_raw);
+  add("Username", x.server_username);
+  add("Account", x.server_account);
+  add("Site name", x.site_name);
+  add("Site comment", x.site_comment);
+  add("Remote directory", x.remote_directory);
+  add("Local directory", x.local_directory);
+  add("Logon type", x.logon_type || x.logon_type_code);
+  add("Transfer mode", x.transfer_mode);
+  add("Stored password", x.password_present === "true" ? "present - not extracted" : "none stored");
+  if (x.password_storage) add("Password storage", x.password_storage);
+  add("Source", x.source_file);
+  add("FileZilla version", x.filezilla_version);
+  if (x.parse_warnings) add("Parse warnings", x.parse_warnings);
+
+  return `<div class="cred-panel fz-panel">
+    <h4>FileZilla server entry</h4>
+    ${rows.join("")}
+    ${x.password_present === "true" ? `<p class="cred-note">${esc(x.password_handling || "")}</p>` : ""}
+    <p class="cred-note">${esc(x.evidence_meaning || "")}</p>
+    <p class="cred-note">${esc(x.timestamp_basis || x.timestamp_meaning || "")}</p>
+  </div>`;
+}
+
+// imageGeoPanel renders an image's embedded location with OBSERVED and
+// DERIVED kept visually apart.
+//
+// The split is the whole point of the panel. The raw sexagesimal
+// components and the hemisphere letters are what the file holds; the
+// decimal coordinate is arithmetic on them; the country is a lookup
+// Tracefall performed against a bundled dataset and is not in the image
+// at all. Presenting the country beside the coordinate without saying
+// which of them the image actually recorded is the misreading this
+// layout exists to prevent.
+function imageGeoPanel(ev) {
+  const x = (ev && ev.extra) || {};
+  if (!ev) return "";
+  const isGPS = ev.event_type === "image_gps_recorded";
+  if (!isGPS && ev.event_type !== "image_metadata_recorded") return "";
+
+  const rows = [];
+  const add = (label, value, opts) => {
+    if (value === undefined || value === null || value === "") return;
+    rows.push(`<div class="cred-field"><span class="cred-label">${esc(label)}</span>
+      <span class="cred-value">${detailCell(value, opts)}</span></div>`);
+  };
+
+  const section = (title) =>
+    rows.push(`<div class="img-section">${esc(title)}</div>`);
+
+  section("Observed - stored in the file");
+  add("Image", x.image_file);
+  add("Format", x.image_format);
+  add("Dimensions", x.image_dimensions);
+  if (x.dimensions_disagree) add("Dimensions note", x.dimensions_disagree);
+  add("Make", x.camera_make);
+  add("Model", x.camera_model);
+  add("Writing software", x.writing_software);
+  add("Body serial", x.camera_body_serial);
+  add("Lens", x.lens_model);
+
+  for (const tag of ["datetimeoriginal", "datetimedigitized", "datetime"]) {
+    const v = x["exif_" + tag];
+    if (!v) continue;
+    add(`EXIF ${tag === "datetime" ? "ModifyDate" : tag === "datetimeoriginal" ? "DateTimeOriginal" : "DateTimeDigitized"}`, v);
+    add("  meaning", x["exif_" + tag + "_meaning"]);
+  }
+  if (x.exif_present === "false") add("EXIF", x.exif_note);
+
+  if (isGPS) {
+    add("GPS latitude (as stored)", x.gps_latitude_raw);
+    add("GPS longitude (as stored)", x.gps_longitude_raw);
+    add("EXIF components", x.gps_components_observed);
+    if (x.gps_altitude) add("Altitude", x.gps_altitude);
+    if (x.gps_time_raw) add("GPS fix time", `${x.gps_date_raw || ""} ${x.gps_time_raw}`.trim());
+
+    section("Derived - computed by Tracefall, not stored in the file");
+    add("Decimal coordinate", x.gps_coordinates);
+    add("Derivation", x.gps_decimal_derivation);
+    if (x.gps_precision) add("Coordinate precision", x.gps_precision);
+    if (x.gps_precision_note) add("Precision note", x.gps_precision_note);
+    add("Country", x.country || "unavailable");
+    if (x.country_iso_a2) add("Country code", `${x.country_iso_a2}${x.country_iso_a3 ? " / " + x.country_iso_a3 : ""}`);
+    if (x.country_status) add("Country status", x.country_status);
+    if (x.country_confidence) add("Country confidence", x.country_confidence);
+    if (x.country_confidence_note) add("Confidence note", x.country_confidence_note);
+    if (x.country_nearest_land) add("Nearest land", x.country_nearest_land);
+    add("Geolocation method", x.geolocation_method);
+    add("Dataset", x.geolocation_dataset);
+    if (x.geolocation_dataset_source) add("Dataset source", x.geolocation_dataset_source);
+    if (x.geolocation_dataset_license) add("Dataset license", x.geolocation_dataset_license);
+  }
+
+  if (x.parse_warnings) add("Parse warnings", x.parse_warnings);
+
+  // Phase 21: the reverse of the map's "View timeline event". Both
+  // directions address the SAME event -- there is no second record for
+  // the map to point at.
+  const onMap = isGPS && currentCaseId()
+    ? `<p class="img-map-link"><a class="btn-secondary" href="#/cases/${esc(currentCaseId())}/geomap"
+         data-geo-focus="${esc(ev.id || "")}">View on map</a></p>`
+    : "";
+
+  return `<div class="cred-panel img-panel">
+    <h4>${isGPS ? "Image location &mdash; EXIF GPS" : "Image metadata &mdash; EXIF"}</h4>
+    ${onMap}
+    ${rows.join("")}
+    ${isGPS ? `<p class="cred-note">${esc(x.country_derivation || "")}</p>` : ""}
+    ${isGPS ? `<p class="cred-note">${esc(x.gps_observation_note || "")}</p>` : ""}
+    <p class="cred-note">${esc(x.evidence_meaning || "")}</p>
+    <p class="cred-note">${esc(x.timestamp_meaning || "")}</p>
+  </div>`;
+}
+
+function credentialPanel(ev) {
+  const x = (ev && ev.extra) || {};
+  if (!ev || ev.event_type !== "sam_local_account") return "";
+
+  const rows = [];
+  const add = (label, value, opts) => {
+    if (value === undefined || value === null || value === "") return;
+    rows.push(`<div class="cred-field"><span class="cred-label">${esc(label)}</span>
+      <span class="cred-value">${detailCell(value, opts)}</span></div>`);
+  };
+
+  add("Account", x.account_name);
+  add("RID", x.rid);
+  if (x.account_full_name) add("Full name", x.account_full_name);
+  add("Scope", x.account_scope);
+  if (x.account_control) add("Account control", x.account_control);
+  if (x.account_disabled) add("Disabled", x.account_disabled);
+
+  if (x.ntlm_hash) {
+    // truncateAt is short on purpose: the whole value is one click away
+    // and one click to the clipboard, and a hash does not need to sit
+    // fully rendered on screen to be usable evidence.
+    rows.push(`<div class="cred-field cred-hash"><span class="cred-label">NTLM hash</span>
+      <span class="cred-value">${detailCell(x.ntlm_hash, { truncateAt: 8, revealLabel: "Reveal hash" })}</span></div>`);
+    add("Hash status", "decoded");
+    rows.push(`<p class="cred-note">${esc(x.ntlm_hash_meaning || "")}</p>`);
+  } else {
+    // WORDING MATTERS HERE. An encrypted hash is not a missing one.
+    //
+    // "not available" told an analyst the same thing for an account
+    // with no password and for an account whose hash is sitting in the
+    // evidence needing one more file to read. Those are different
+    // findings and they lead to different next steps, so they get
+    // different words -- and the encrypted cases say plainly that the
+    // hash material EXISTS.
+    const state = hashStateLabel(x);
+    rows.push(`<div class="cred-field cred-hash"><span class="cred-label">NTLM hash</span>
+      <span class="cred-value ${state.encrypted ? "cred-encrypted" : "cred-unavailable"}">${esc(state.value)}</span></div>`);
+    add("Hash status", x.ntlm_hash_status || "unknown");
+    rows.push(`<p class="cred-note">${esc(x.ntlm_hash_unavailable_reason || "")}</p>`);
+  }
+
+  // The account's own timestamps, each labelled with what it is. None of
+  // them is this event's time -- the event has none.
+  const times = [
+    ["Last logon", x.last_logon],
+    ["Password last set", x.password_last_set],
+    ["Last incorrect password", x.last_incorrect_password],
+    ["Account expires", x.account_expires],
+  ].filter(([, v]) => v);
+  if (times.length) {
+    rows.push(`<div class="cred-times">` +
+      times.map(([l, v]) => `<div class="cred-field"><span class="cred-label">${esc(l)}</span>
+        <span class="cred-value">${esc(v)}</span></div>`).join("") +
+      `</div>`);
+  }
+
+  // The boot key is the SECOND piece of evidence a decoded hash stands
+  // on. Named on the event so provenance is complete: "decoded" without
+  // saying decoded USING WHAT is half a record.
+  if (x.boot_key_source) {
+    add("Boot key source", x.boot_key_source + (x.boot_key_control_set ? ` (${x.boot_key_control_set})` : ""));
+  } else if (x.boot_key_status && x.boot_key_status !== "derived") {
+    add("Boot key source", "none available");
+  }
+
+  return `<div class="cred-panel">
+    <h4>Windows local account &mdash; credential evidence</h4>
+    ${rows.join("")}
+    <p class="cred-note">${esc(x.evidence_meaning || "")}</p>
+    <p class="cred-note">${esc(x.timestamp_basis || "")}</p>
+  </div>`;
 }
 
 function renderProvenanceText(prov) {
@@ -4992,44 +7642,23 @@ function integrityFileRow(sf) {
 }
 
 // wireIntegrityHash makes the copy and expand controls work. Copying
-// uses the async clipboard API where available and falls back to a
-// hidden selection, so it still works over plain HTTP on a LAN -- which
-// is exactly how Tracefall is normally reached.
+// goes through the SAME copyText helper the Detail column uses, so
+// there is one clipboard implementation to reason about and both
+// controls behave identically over plain HTTP on a LAN -- which is
+// exactly how Tracefall is normally reached.
+//
+// The hash keeps one extra step the Detail column does not need: if the
+// clipboard is unreachable entirely, the digest is expanded in place
+// and SELECTED, so Ctrl+C still yields the complete value. That is a
+// fallback for a failure, not a claim of success -- the button says so.
 function wireIntegrityHash(root) {
   root.querySelectorAll(".copy-hash").forEach((btn) => {
     btn.addEventListener("click", async (e) => {
       e.stopPropagation();
-      const value = btn.dataset.hash;
-      let ok = false;
-      try {
-        if (navigator.clipboard && window.isSecureContext) {
-          await navigator.clipboard.writeText(value);
-          ok = true;
-        }
-      } catch (_) {
-        ok = false;
-      }
+      const ok = await copyText(btn.dataset.hash);
       if (!ok) {
-        const ta = document.createElement("textarea");
-        ta.value = value;
-        ta.setAttribute("readonly", "");
-        ta.style.position = "fixed";
-        ta.style.opacity = "0";
-        document.body.appendChild(ta);
-        ta.select();
-        try {
-          ok = document.execCommand("copy");
-        } catch (_) {
-          ok = false;
-        }
-        document.body.removeChild(ta);
-      }
-      if (!ok) {
-        // Neither the clipboard API (unavailable over plain HTTP, which
-        // is how Tracefall is normally reached on a LAN) nor execCommand
-        // worked. Rather than tell the investigator to press Ctrl+C with
-        // nothing selected, expand the hash in place and SELECT it, so
-        // Ctrl+C actually copies the complete digest.
+        // Rather than tell the investigator to press Ctrl+C with
+        // nothing selected, expand the hash in place and select it.
         const code = setHashExpanded(btn.parentElement, true);
         const range = document.createRange();
         range.selectNodeContents(code);
@@ -5038,11 +7667,12 @@ function wireIntegrityHash(root) {
         sel.addRange(range);
       }
       const original = btn.textContent;
-      btn.textContent = ok ? "Copied" : "Selected - press Ctrl+C";
+      btn.textContent = ok ? "Copied" : "Copy failed - press Ctrl+C";
       btn.classList.toggle("copy-ok", ok);
+      btn.classList.toggle("copy-failed", !ok);
       setTimeout(() => {
         btn.textContent = original;
-        btn.classList.remove("copy-ok");
+        btn.classList.remove("copy-ok", "copy-failed");
       }, 2000);
     });
   });
@@ -5346,21 +7976,44 @@ function wireDeleteCollection(caseId, cd, root) {
     });
     if (!ok) return;
 
+    // Deletion is SYNCHRONOUS: the request returns only once every row
+    // and the collection's directory are gone, so "Deleting..." is held
+    // until the response arrives and nothing here claims completion
+    // early. A pending collection of several thousand discovered files
+    // is the slow case -- every one of them is a catalog row.
     const original = btn.textContent;
+    const host = root.querySelector(".collection-danger");
+    const previousError = host ? host.querySelector(".error-box") : null;
+    if (previousError) previousError.remove(); // don't stack failures
+
     btn.disabled = true;
     btn.textContent = "Deleting...";
+
+    let deleted = false;
     try {
       await api(`/cases/${caseId}/collections/${cd.collection_id}`, { method: "DELETE" });
+      deleted = true;
+    } catch (err) {
+      if (host) host.insertAdjacentHTML("beforeend", errorBox(err));
+    } finally {
+      // Restored on BOTH paths, and in a finally so it cannot be skipped.
+      //
+      // On success the card is about to be replaced by the re-render, so
+      // this is invisible. It is here for the case that is not: if the
+      // response arrives and anything afterwards throws -- a failed
+      // re-render, a transport error surfacing late -- the control would
+      // otherwise sit on "Deleting..." for the rest of the session,
+      // looking like a deletion that never finished when in fact it had.
+      btn.disabled = false;
+      btn.textContent = original;
+    }
+
+    if (deleted) {
       // A full re-render is right here: the collection is gone, so its
       // card, the case counters and the stale-analysis banner all have
       // to be rebuilt from the server's new answer rather than patched.
       renderedCaseId = null;
       route();
-    } catch (err) {
-      btn.disabled = false;
-      btn.textContent = original;
-      const host = root.querySelector(".collection-danger");
-      if (host) host.insertAdjacentHTML("beforeend", errorBox(err));
     }
   });
 }

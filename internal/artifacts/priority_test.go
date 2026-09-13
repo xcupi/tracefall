@@ -55,10 +55,16 @@ func TestPriority_IsIndependentOfSupport(t *testing.T) {
 		{"C/hiberfil.sys", artifacts.PriorityCritical},
 		{"Windows/System32/winevt/Logs/AppEvent.evt", artifacts.PriorityCritical},
 		// HIGH, and none of them parseable.
-		{"Windows/appcompat/Programs/Amcache.hve", artifacts.PriorityHigh},
+		// Amcache.hve: see artifacts_test.go -- parsed as of Phase 16.
 		{"Windows/System32/sru/SRUDB.dat", artifacts.PriorityHigh},
-		{"Users/j/AppData/Local/Microsoft/Windows/UsrClass.dat", artifacts.PriorityHigh},
-		{"Users/j/AppData/Local/ConnectedDevicesPlatform/L.j/ActivitiesCache.db", artifacts.PriorityHigh},
+		// UsrClass.dat is deliberately ABSENT from this list as of Phase
+		// 15: ShellBags are now extracted from it, so it is a supported
+		// artifact and belongs in the supported-priority tests instead.
+		// Leaving it here would assert that Tracefall cannot read
+		// something it can.
+		// ActivitiesCache.db is deliberately ABSENT as of Phase 16: it is
+		// now parsed by internal/parsers/activitiescache, so it belongs
+		// with the supported artifacts.
 		{"Windows/inf/setupapi.dev.log", artifacts.PriorityHigh},
 		{"C/pagefile.sys", artifacts.PriorityHigh},
 	}

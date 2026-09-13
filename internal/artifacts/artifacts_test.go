@@ -8,6 +8,7 @@ import (
 	"tracefall/internal/artifacts"
 	"tracefall/internal/ingest"
 	"tracefall/internal/model"
+	"tracefall/internal/parsers"
 )
 
 func registry() *artifacts.Registry { return artifacts.NewRegistry(ingest.Registry()) }
@@ -19,9 +20,19 @@ func registry() *artifacts.Registry { return artifacts.NewRegistry(ingest.Regist
 func TestRegistry_SupportedMatchesTheParserRegistry(t *testing.T) {
 	r := registry()
 
+	// Both kinds of artifact type a parser can produce: the type of the
+	// FILE it claims, and (Phase 15) the types its EVENTS carry, for a
+	// container like a registry hive that holds several distinct
+	// artifacts. Gathering both keeps the invariant intact -- support is
+	// still derived from the live registry, never hardcoded.
 	parserTypes := map[string]bool{}
 	for _, p := range ingest.Registry() {
 		parserTypes[p.ArtifactType()] = true
+		if src, ok := p.(parsers.EventArtifactTypeSource); ok {
+			for _, at := range src.EventArtifactTypes() {
+				parserTypes[at] = true
+			}
+		}
 	}
 	supported := r.Supported()
 	if len(supported) != len(parserTypes) {
@@ -78,7 +89,10 @@ func TestClassify_UnsupportedArtifactKeepsItsRealPriority(t *testing.T) {
 		// $MFT, $UsnJrnl and $LogFile are all parsed now; $Secure is the
 		// NTFS metafile still without a reader.
 		{"C/$Secure", "NTFS volume metadata (other metafiles)", artifacts.PriorityMedium, artifacts.FamilyFileSystem},
-		{"Windows/appcompat/Programs/Amcache.hve", "Amcache hive", artifacts.PriorityHigh, artifacts.FamilyExecution},
+		// Amcache.hve is deliberately ABSENT as of Phase 16: it is now
+		// parsed (the hive parser extracts its inventory trees), so it
+		// belongs with the supported artifacts. Asserting it here would
+		// claim Tracefall cannot read something it can.
 		{"Windows/System32/sru/SRUDB.dat", "SRUM database", artifacts.PriorityHigh, artifacts.FamilyExecution},
 		{"Users/j/AppData/Local/Microsoft/Windows/WebCache/WebCacheV01.dat", "IE / Edge Legacy web cache (WebCacheV01.dat)", artifacts.PriorityMedium, artifacts.FamilyBrowser},
 		{"Users/j/AppData/Roaming/Mozilla/Firefox/Profiles/x/cookies.sqlite", "Browser cookie store", artifacts.PriorityMedium, artifacts.FamilyBrowser},

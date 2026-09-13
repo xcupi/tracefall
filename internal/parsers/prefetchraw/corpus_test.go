@@ -1,6 +1,7 @@
 package prefetchraw_test
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"sort"
@@ -9,6 +10,7 @@ import (
 
 	"tracefall/internal/model"
 	"tracefall/internal/parsers/prefetchraw"
+	"tracefall/internal/prefetch"
 )
 
 // End-to-end over real Windows 10 evidence: every MAM-compressed .pf in
@@ -50,7 +52,7 @@ func TestParser_RealWindowsCorpusEndToEnd(t *testing.T) {
 
 	p := prefetchraw.New()
 	var parsed, failed, empty, totalEvents int
-	var compressedEvents int
+	var compressedEvents, rejectedNonPrefetch int
 	for _, name := range names {
 		full := filepath.Join(dir, name)
 		info, err := os.Stat(full)
@@ -61,6 +63,24 @@ func TestParser_RealWindowsCorpusEndToEnd(t *testing.T) {
 		if err != nil || len(head) < 8 || string(head[:3]) != "MAM" {
 			continue
 		}
+
+		// MAM is a general Windows compression container, not a Prefetch
+		// format, and this directory also holds the application
+		// compatibility databases wrapped the same way. Those must be
+		// REJECTED, and the rejection is asserted here rather than
+		// skipped -- the parser used to accept them on the container tag
+		// alone and report an unsupported compression method for files
+		// that were never Prefetch.
+		if !p.Detect(name) {
+			if _, err := p.Parse(full); err == nil {
+				t.Errorf("%s: a non-Prefetch MAM container parsed as Prefetch", name)
+			} else if !errors.Is(err, prefetch.ErrNotPrefetch) {
+				t.Errorf("%s: rejected as %v, want ErrNotPrefetch", name, err)
+			}
+			rejectedNonPrefetch++
+			continue
+		}
+
 		res, err := p.Parse(full)
 		if err != nil {
 			failed++
@@ -109,8 +129,9 @@ func TestParser_RealWindowsCorpusEndToEnd(t *testing.T) {
 	if compressedEvents != totalEvents {
 		t.Errorf("%d of %d events recorded their MAM container", compressedEvents, totalEvents)
 	}
-	t.Logf("parsed %d real MAM Prefetch files -> %d execution events (%d files had no usable run time)",
-		parsed, totalEvents, empty)
+	t.Logf("parsed %d real MAM Prefetch files -> %d execution events (%d files had no usable run time); "+
+		"%d non-Prefetch MAM containers correctly rejected",
+		parsed, totalEvents, empty, rejectedNonPrefetch)
 }
 
 // The same evidence must produce byte-identical events on every run.

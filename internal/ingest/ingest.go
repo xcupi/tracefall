@@ -26,13 +26,17 @@ import (
 	"github.com/google/uuid"
 
 	"tracefall/internal/browsercache"
+	"tracefall/internal/browserdb"
 	"tracefall/internal/model"
 	"tracefall/internal/parsers"
+	"tracefall/internal/parsers/activitiescache"
 	browsercacheparser "tracefall/internal/parsers/browsercache"
 	browsercacheindexparser "tracefall/internal/parsers/browsercacheindex"
 	"tracefall/internal/parsers/browserhistory"
 	evtxnative "tracefall/internal/parsers/evtx"
 	"tracefall/internal/parsers/evtxcsv"
+	filezillaparser "tracefall/internal/parsers/filezilla"
+	imageparser "tracefall/internal/parsers/image"
 	jumplistparser "tracefall/internal/parsers/jumplist"
 	lnkparser "tracefall/internal/parsers/lnk"
 	"tracefall/internal/parsers/logfile"
@@ -46,6 +50,7 @@ import (
 	"tracefall/internal/parsers/registry"
 	"tracefall/internal/parsers/scheduledtasks"
 	"tracefall/internal/parsers/usnjrnl"
+	"tracefall/internal/regf"
 )
 
 // Registry is the ordered list of known artifact parsers. Adding support
@@ -72,6 +77,13 @@ func Registry() []parsers.ArtifactParser {
 		prefetchraw.New(),
 		pshistory.New(),
 		browserhistory.New(),
+		// Phase 16: Windows Timeline. Registered AFTER the browser
+		// parsers: its content detector can only see the SQLite
+		// signature on a 512-byte header, so it must never pre-empt a
+		// parser whose database it would otherwise claim. The real check
+		// is the schema, which Parse performs -- a SQLite file that is
+		// not a Timeline database is reported as not-this-artifact.
+		activitiescache.New(),
 		// Phase 15: NTFS $MFT. Ordered last among the native parsers
 		// because its content detector is the broadest -- it must not
 		// pre-empt a more specific match on a file that merely happens
@@ -110,6 +122,17 @@ func Registry() []parsers.ArtifactParser {
 		// is what finds a renamed Jump List.
 		jumplistparser.NewAutomatic(),
 		jumplistparser.NewCustom(),
+		// Phase 20: FileZilla connection files. Name-detected with a
+		// content confirmation, and content-detected as well, so a
+		// recentservers.xml found under any name is still claimed while
+		// an unrelated file merely NAMED recentservers.xml is not.
+		filezillaparser.New(),
+		// Phase 20: image metadata. Registered LAST of every parser
+		// because its content detector is the broadest of all -- a JPEG
+		// signature says only "this is a picture", and any file whose
+		// bytes a more specific parser can identify must be claimed by
+		// that parser first.
+		imageparser.New(),
 	}
 }
 
@@ -146,12 +169,25 @@ func Discover(root string, registry []parsers.ArtifactParser) ([]DiscoveredFile,
 		}
 		relPath = filepath.ToSlash(relPath)
 
+		// The header is read once and reused: a name match that needs
+		// confirming and content-based detection both want it, and
+		// discovery runs over every file in a triage collection.
+		header := readHeader(path, parsers.SniffLength)
+
 		var matched parsers.ArtifactParser
 		for _, p := range registry {
-			if p.Detect(relPath) {
-				matched = p
-				break
+			if !p.Detect(relPath) {
+				continue
 			}
+			// A parser may require its name match to be backed by the
+			// bytes. See parsers.ContentConfirmer: this is what stops a
+			// text file called SAM being claimed as a registry hive and
+			// then reported as a broken one.
+			if cc, ok := p.(parsers.ContentConfirmer); ok && len(header) > 0 && !cc.ConfirmContent(header) {
+				continue
+			}
+			matched = p
+			break
 		}
 		// Nothing recognized the name. Native Windows artifacts are
 		// identified by content instead -- a hive copied out of a triage
@@ -159,9 +195,11 @@ func Discover(root string, registry []parsers.ArtifactParser) ([]DiscoveredFile,
 		// nothing about what is inside. See parsers.ContentDetector.
 		var recognized string
 		if matched == nil {
-			header := readHeader(path, parsers.SniffLength)
 			if len(header) > 0 {
 				for _, p := range registry {
+					if !contentDetectionApplies(p, relPath) {
+						continue
+					}
 					if cd, ok := p.(parsers.ContentDetector); ok && cd.DetectContent(header) {
 						matched = p
 						break
@@ -215,7 +253,36 @@ func Discover(root string, registry []parsers.ArtifactParser) ([]DiscoveredFile,
 // It runs only for files no parser claimed, and only ever produces types
 // that are never Supported. Nothing here changes what is parsed; it
 // changes what an analyst is told about what is not.
+// RecognizeUnparsed names a file no parser claimed, so triage can
+// explain it instead of listing it as an anonymous unsupported blob.
+//
+// Exported for the same reason MatchParser is: there is more than one
+// way into Tracefall, and a file that is "a registry transaction log"
+// from a folder must not be "unrecognized" from an AD1 image.
+//
+// Recognizing is NOT parsing. Everything named here is catalogued as
+// present and explicitly unsupported; no event, timestamp or value is
+// produced from any of it.
+func RecognizeUnparsed(relPath string, header []byte) string {
+	return recognizeUnparsed(relPath, header)
+}
+
 func recognizeUnparsed(relPath string, header []byte) string {
+	// A registry TRANSACTION LOG is a REGF file with the hive signature
+	// and a different base-block file type. Recognized here so it is
+	// catalogued as what it is instead of being claimed as a hive and
+	// then failed at import. See regf.SniffTransactionLog.
+	if regf.SniffTransactionLog(header) {
+		return model.ArtifactRegistryTransactionLog
+	}
+
+	// A browser-related SQLite database that is not history. Recognized
+	// rather than claimed, so it stops being reported as broken browser
+	// history. See internal/browserdb.
+	if k := browserdb.Recognize(relPath, browserhistory.IsSQLite(header)); k != browserdb.KindNone {
+		return model.ArtifactUnsupportedBrowserDB
+	}
+
 	lower := strings.ToLower(relPath)
 	if !browsercache.InCacheDirectory("/" + lower) {
 		return ""
@@ -289,6 +356,65 @@ type ParsedFile struct {
 	Raw    []model.RawEvidence
 }
 
+// MatchParser decides which parser, if any, owns a file. It is the
+// SINGLE place that decision is made, because there is more than one way
+// into Tracefall -- a directory or ZIP walked by Discover, and an AD1
+// image catalogued entry by entry (internal/api's catalogAD1) -- and the
+// two answering differently is a bug an analyst experiences as "the same
+// hive is evidence from a folder and unsupported from an image".
+//
+// The order is: name match, confirmed against the bytes where the parser
+// asks for that, then content match.
+//
+//   - A name match alone is right for the EZ Tools CSVs, whose filenames
+//     are produced by the tool itself.
+//   - A name match that must be CONFIRMED is right for the native hives:
+//     "SAM", "SYSTEM" and "NTUSER.DAT" are ordinary words, and a text
+//     file carrying one is not a hive. See parsers.ContentConfirmer.
+//   - A content match catches everything renamed -- a hive copied out of
+//     a triage image may be called anything, and a .evtx extension
+//     proves nothing about what is inside. See parsers.ContentDetector.
+//
+// header may be empty (nothing could be read), in which case only
+// unconfirmed name matches can apply.
+func MatchParser(relPath string, header []byte, registry []parsers.ArtifactParser) parsers.ArtifactParser {
+	for _, p := range registry {
+		if !p.Detect(relPath) {
+			continue
+		}
+		if cc, ok := p.(parsers.ContentConfirmer); ok && len(header) > 0 && !cc.ConfirmContent(header) {
+			continue
+		}
+		return p
+	}
+	if len(header) == 0 {
+		return nil
+	}
+	for _, p := range registry {
+		if !contentDetectionApplies(p, relPath) {
+			continue
+		}
+		if cd, ok := p.(parsers.ContentDetector); ok && cd.DetectContent(header) {
+			return p
+		}
+	}
+	return nil
+}
+
+// contentDetectionApplies asks a parser whether its CONTENT detector
+// should be consulted for this path at all. See
+// parsers.PathScopedDetector: a signature can identify a format
+// correctly and still be the wrong answer about the artifact, and a
+// parser whose detector is that broad scopes itself here rather than
+// having ingestion carry a list of exceptions.
+//
+// A parser that does not implement the interface is always consulted,
+// which is every parser that existed before this was added.
+func contentDetectionApplies(p parsers.ArtifactParser, relPath string) bool {
+	ps, ok := p.(parsers.PathScopedDetector)
+	return !ok || ps.DetectPath(relPath)
+}
+
 // ParseFile parses one file at root/relPath with p, stamping every
 // resulting Event/RawEvidence with caseID/collectionID/sourceFileID.
 //
@@ -302,8 +428,23 @@ type ParsedFile struct {
 // the ingestion/service layer's job, done once per import batch over the
 // complete picture -- see internal/api.Service.enrichBatchHosts.
 func ParseFile(caseID, collectionID, sourceFileID, root, relPath string, p parsers.ArtifactParser) (ParsedFile, error) {
+	return ParseFileWithContext(caseID, collectionID, sourceFileID, root, relPath, p, parsers.ParseContext{})
+}
+
+// ParseFileWithContext is ParseFile plus collection-scoped context (see
+// parsers.ParseContext). A parser that does not implement
+// parsers.ContextualParser is called exactly as ParseFile calls it, so
+// passing context is free for every parser that has no use for it.
+func ParseFileWithContext(caseID, collectionID, sourceFileID, root, relPath string, p parsers.ArtifactParser, ctx parsers.ParseContext) (ParsedFile, error) {
 	abs := filepath.Join(root, filepath.FromSlash(relPath))
-	parsed, err := p.Parse(abs)
+
+	var parsed parsers.ParseResult
+	var err error
+	if cp, ok := p.(parsers.ContextualParser); ok {
+		parsed, err = cp.ParseWithContext(abs, ctx)
+	} else {
+		parsed, err = p.Parse(abs)
+	}
 	if err != nil {
 		return ParsedFile{}, err
 	}

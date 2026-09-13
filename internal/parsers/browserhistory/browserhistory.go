@@ -88,6 +88,19 @@ func New() *Parser { return &Parser{} }
 func (Parser) Name() string         { return parserName }
 func (Parser) ArtifactType() string { return model.ArtifactBrowserHistory }
 
+// EventArtifactTypes declares that this parser also produces DOWNLOAD
+// events (Phase 16).
+//
+// Both browsers keep downloads in the same database as visits, so they
+// are read by this parser -- but a download is a different claim from a
+// page visit and carries its own artifact type. Declaring it here is
+// what makes the capability registry label and classify it properly
+// instead of falling back to a generated name. See
+// parsers.EventArtifactTypeSource.
+func (Parser) EventArtifactTypes() []string {
+	return []string{model.ArtifactBrowserDownload}
+}
+
 // Detect matches the filenames the supported browsers use.
 func (Parser) Detect(relPath string) bool {
 	switch strings.ToLower(filepath.Base(relPath)) {
@@ -97,17 +110,42 @@ func (Parser) Detect(relPath string) bool {
 	return false
 }
 
-// DetectContent matches the SQLite signature.
-//
-// This is intentionally broad: it says "this is a SQLite database", not
-// "this is browser history", because the schema cannot be determined
-// without opening it and discovery must not open files. A SQLite
-// database that turns out to be something else is reported as an
-// unsupported-schema parse failure at import, which is the honest place
-// for that determination.
-func (Parser) DetectContent(header []byte) bool {
+// ConfirmContent backs the filename match with the bytes: a file called
+// "History" that is not a SQLite database is not claimed, so it is
+// reported as unrecognized rather than as broken browser history.
+func (Parser) ConfirmContent(header []byte) bool { return IsSQLite(header) }
+
+// IsSQLite reports whether header carries the SQLite file signature.
+func IsSQLite(header []byte) bool {
 	return len(header) >= len(sqliteMagic) && string(header[:len(sqliteMagic)]) == sqliteMagic
 }
+
+// NOTE ON CONTENT DETECTION -- and why this parser no longer has any.
+//
+// DetectContent used to return true for ANY SQLite database, on the
+// reasoning that discovery cannot open a file to read its schema and a
+// stray SQLite database is rare. In a real Windows image it is not rare
+// at all. A single browser profile holds Cookies, Favicons, Login Data,
+// Web Data, Media History, Top Sites, Shortcuts, Network Action
+// Predictor, QuotaManager, Reporting and NEL, Safe Browsing Cookies and
+// more, and the OS adds wpndatabase.db, queue.sqlite3 and others
+// elsewhere. Every one of them was catalogued as "Browser history
+// (Chromium / Firefox)" and then failed at import with "not a browser
+// history schema" -- 25 files in one image, each reported as broken
+// evidence when nothing was broken and none of them was ever history.
+//
+// Browser history is now claimed by NAME ONLY -- "History" and
+// "places.sqlite", the two names the formats actually define -- with the
+// bytes confirming that the file is a SQLite database. The other
+// databases are recognized for what they are (see
+// browserdb.Recognize) and catalogued as a browser artifact Tracefall
+// does not parse, which is the truth about them.
+//
+// The cost is that a RENAMED history database is no longer detected.
+// That is the right trade: the previous behaviour did not detect renamed
+// history either, it merely claimed everything and let the parser sort
+// it out at import, turning a classification question into a page of
+// parse errors.
 
 // Visit is one recorded page visit.
 type Visit struct {
@@ -215,6 +253,20 @@ func (p Parser) Parse(absPath string) (parsers.ParseResult, error) {
 		})
 		out.Events = append(out.Events, ev)
 		out.Raw = append(out.Raw, model.RawEvidence{SourceReference: ev.SourceReference, Raw: string(rawJSON)})
+	}
+
+	// Downloads live in the SAME database as visits for both browsers,
+	// so they are read here rather than by a parser that could never
+	// claim the file. They become their own artifact type -- a download
+	// and a page visit are different claims. See downloads.go.
+	//
+	// A database with no downloads is not an error: history that records
+	// no downloads is a valid artifact with zero records of that kind.
+	downloads, derr := readDownloads(db, flavor)
+	if derr == nil {
+		dEvents, dRaw := downloadEvents(downloads, flavor, sourceName, profile, user)
+		out.Events = append(out.Events, dEvents...)
+		out.Raw = append(out.Raw, dRaw...)
 	}
 	return out, nil
 }

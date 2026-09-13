@@ -1329,10 +1329,65 @@ func (s *Store) AnalysisInvalidatedWithoutReplacement(caseID string) (bool, erro
 // This does not touch the case's on-disk evidence directory --
 // Service.DeleteCase does that separately via internal/casefiles, since
 // this package has no filesystem knowledge.
+// DeletedCaseCounts is how many rows of each kind a case deletion
+// actually removed, as the database reported them.
+//
+// These are not estimates and not pre-counts: each field is the
+// RowsAffected of the statement that removed it, read back after the
+// transaction COMMITTED. Before the commit none of it is true, and
+// after the commit all of it is -- which is exactly the granularity at
+// which case deletion can be honestly reported.
+//
+// It costs nothing to collect: sql.Result is already returned by every
+// Exec, so no counting query is added for it.
+type DeletedCaseCounts struct {
+	Collections       int64 `json:"collections"`
+	SourceFiles       int64 `json:"source_files"`
+	Events            int64 `json:"events"`
+	EventObservations int64 `json:"event_observations"`
+	RawEvidence       int64 `json:"raw_evidence"`
+	Findings          int64 `json:"findings"`
+	Correlations      int64 `json:"correlations"`
+	Notes             int64 `json:"notes"`
+	Tags              int64 `json:"tags"`
+	AnalystStatus     int64 `json:"analyst_status"`
+	AuditLog          int64 `json:"audit_log"`
+	AnalysisRuns      int64 `json:"analysis_runs"`
+}
+
+// DeleteCase removes a case and everything belonging to it. See
+// DeleteCaseWithCounts, which it delegates to; the counts are discarded
+// for callers that do not need them.
 func (s *Store) DeleteCase(caseID string) error {
+	_, err := s.DeleteCaseWithCounts(caseID)
+	return err
+}
+
+// DeleteCaseWithCounts is DeleteCase, additionally reporting what it
+// removed.
+func (s *Store) DeleteCaseWithCounts(caseID string) (DeletedCaseCounts, error) {
+	var counts DeletedCaseCounts
+	// Each statement's row count is routed to the field it belongs to.
+	// A table with no destination here is still deleted -- the count is
+	// simply not surfaced.
+	into := map[string]*int64{
+		`DELETE FROM event_observations WHERE case_id = ?`: &counts.EventObservations,
+		`DELETE FROM raw_evidence WHERE case_id = ?`:       &counts.RawEvidence,
+		`DELETE FROM events WHERE case_id = ?`:             &counts.Events,
+		`DELETE FROM findings WHERE case_id = ?`:           &counts.Findings,
+		`DELETE FROM correlations WHERE case_id = ?`:       &counts.Correlations,
+		`DELETE FROM source_files WHERE case_id = ?`:       &counts.SourceFiles,
+		`DELETE FROM collections WHERE case_id = ?`:        &counts.Collections,
+		`DELETE FROM notes WHERE case_id = ?`:              &counts.Notes,
+		`DELETE FROM tags WHERE case_id = ?`:               &counts.Tags,
+		`DELETE FROM analyst_status WHERE case_id = ?`:     &counts.AnalystStatus,
+		`DELETE FROM audit_log WHERE case_id = ?`:          &counts.AuditLog,
+		`DELETE FROM analysis_runs WHERE case_id = ?`:      &counts.AnalysisRuns,
+	}
+
 	tx, err := s.db.Begin()
 	if err != nil {
-		return err
+		return DeletedCaseCounts{}, err
 	}
 	defer tx.Rollback()
 
@@ -1363,11 +1418,22 @@ func (s *Store) DeleteCase(caseID string) error {
 		`DELETE FROM cases WHERE id = ?`,
 	}
 	for _, stmt := range stmts {
-		if _, err := tx.Exec(stmt, caseID); err != nil {
-			return fmt.Errorf("%s: %w", stmt, err)
+		res, err := tx.Exec(stmt, caseID)
+		if err != nil {
+			return DeletedCaseCounts{}, fmt.Errorf("%s: %w", stmt, err)
+		}
+		if field, ok := into[stmt]; ok {
+			if n, err := res.RowsAffected(); err == nil {
+				*field = n
+			}
 		}
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return DeletedCaseCounts{}, err
+	}
+	// Only now are the counts true. Returning them before the commit
+	// would describe rows that could still have rolled back.
+	return counts, nil
 }
 
 // ---------------- Analysis runs (Phase 11) ----------------
@@ -1523,6 +1589,107 @@ func (s *Store) ClearFindingRunIDsForTest(caseID string) error {
 // events, re-points events still observed elsewhere, and marks the case
 // for re-analysis. The statements below are what remains afterwards, and
 // are written to be correct even if some of it is already gone.
+// CollectionEventsAreSelfContained reports whether every event tied to
+// this collection belongs to it alone.
+//
+// It exists to decide whether DeleteCollection's bulk statements are
+// SAFE. Those statements delete `events WHERE collection_id = ?`
+// wholesale, which is correct only when no other collection still
+// observes one of them -- otherwise evidence that a second collection
+// independently recorded would be destroyed along with this one.
+//
+// Two ways that can be untrue, and both are checked:
+//
+//   - an event attributed HERE is also observed by another collection
+//     (deleting it would lose the other collection's observation), or
+//   - an observation HERE belongs to an event attributed ELSEWHERE
+//     (that event survives, with one fewer observation).
+//
+// The second case is handled correctly by the bulk statements on their
+// own, but it is included so a true answer means "nothing about this
+// collection's events involves any other collection" -- a condition a
+// reader can check in one sentence, rather than a subtler rule that
+// happens to hold.
+func (s *Store) CollectionEventsAreSelfContained(collectionID string) (bool, error) {
+	var sharedOut, sharedIn int
+	err := s.db.QueryRow(`
+		SELECT
+			(SELECT COUNT(*) FROM events e
+			   WHERE e.collection_id = ?
+			     AND EXISTS (SELECT 1 FROM event_observations o
+			                   WHERE o.event_id = e.id AND o.collection_id <> ?)),
+			(SELECT COUNT(*) FROM event_observations o
+			   WHERE o.collection_id = ?
+			     AND EXISTS (SELECT 1 FROM events e
+			                   WHERE e.id = o.event_id AND e.collection_id <> ?))`,
+		collectionID, collectionID, collectionID, collectionID).Scan(&sharedOut, &sharedIn)
+	if err != nil {
+		return false, fmt.Errorf("store: checking whether collection %s shares events: %w", collectionID, err)
+	}
+	return sharedOut == 0 && sharedIn == 0, nil
+}
+
+// CountEventsByCollection counts the events attributed to one
+// collection, without loading them.
+func (s *Store) CountEventsByCollection(collectionID string) (int, error) {
+	var n int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM events WHERE collection_id = ?`, collectionID).Scan(&n)
+	if err != nil {
+		return 0, fmt.Errorf("store: counting events for collection %s: %w", collectionID, err)
+	}
+	return n, nil
+}
+
+// CountActiveSourceFilesByCollection counts a collection's live (not
+// already soft-deleted) catalog rows, without loading them. A discovery
+// pass writes one row per file it cataloged, supported or not, so this
+// is in the thousands for a real triage image even when nothing was
+// imported.
+func (s *Store) CountActiveSourceFilesByCollection(collectionID string) (int, error) {
+	var n int
+	err := s.db.QueryRow(
+		`SELECT COUNT(*) FROM source_files WHERE collection_id = ? AND deleted_at = ''`,
+		collectionID).Scan(&n)
+	if err != nil {
+		return 0, fmt.Errorf("store: counting source files for collection %s: %w", collectionID, err)
+	}
+	return n, nil
+}
+
+// ListSourceFileIDsByCollectionArtifacts returns the IDs of a
+// collection's live catalog rows whose artifact type is one of those
+// given. Used to find the few files that may have a generated thumbnail,
+// rather than attempting a removal for every file in the collection.
+func (s *Store) ListSourceFileIDsByCollectionArtifacts(collectionID string, artifactTypes []string) ([]string, error) {
+	if len(artifactTypes) == 0 {
+		return nil, nil
+	}
+	args := make([]any, 0, len(artifactTypes)+1)
+	args = append(args, collectionID)
+	placeholders := make([]string, 0, len(artifactTypes))
+	for _, t := range artifactTypes {
+		placeholders = append(placeholders, "?")
+		args = append(args, t)
+	}
+	rows, err := s.db.Query(
+		`SELECT id FROM source_files WHERE collection_id = ? AND deleted_at = '' AND artifact_type IN (`+
+			strings.Join(placeholders, ",")+`)`, args...)
+	if err != nil {
+		return nil, fmt.Errorf("store: listing source file ids for collection %s: %w", collectionID, err)
+	}
+	defer rows.Close()
+
+	var out []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
+}
+
 func (s *Store) DeleteCollection(collectionID string) error {
 	tx, err := s.db.Begin()
 	if err != nil {

@@ -52,9 +52,26 @@ func (Parser) Detect(relPath string) bool {
 	return strings.HasSuffix(strings.ToLower(filepath.Base(relPath)), ".pf")
 }
 
-// DetectContent identifies Prefetch by its SCCA signature (or the MAM
-// wrapper), so the classification never depends on the filename.
-func (Parser) DetectContent(header []byte) bool { return prefetch.Sniff(header) }
+// DetectContent identifies Prefetch by its SCCA signature.
+//
+// It deliberately does NOT accept a bare MAM container. MAM is a general
+// Windows compression wrapper, not a Prefetch format: the application
+// compatibility databases that sit in the very same directory
+// (AgGlGlobalHistory.db, ResPriHMStaticDb.ebd and their siblings) use
+// it too. Accepting MAM here catalogued seven of those as Prefetch in
+// one real image and failed every one with "unsupported compression
+// method" -- a message about files that were never Prefetch.
+//
+// A compressed Prefetch file is still recognized: by its .pf name, via
+// Detect, confirmed by ConfirmContent below.
+func (Parser) DetectContent(header []byte) bool { return prefetch.SniffUncompressed(header) }
+
+// ConfirmContent backs the .pf name match with the bytes, so a file that
+// merely carries the extension is not claimed and then reported as
+// broken Prefetch. Either container is accepted here -- what is INSIDE a
+// MAM container is checked after decompression, which is the only place
+// it can be.
+func (Parser) ConfirmContent(header []byte) bool { return prefetch.Sniff(header) }
 
 // Parse reads one .pf file and emits an event per recorded execution.
 func (p Parser) Parse(absPath string) (parsers.ParseResult, error) {

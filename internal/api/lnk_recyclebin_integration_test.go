@@ -87,7 +87,7 @@ func TestLNKRB_ClassificationIsStructural(t *testing.T) {
 		"Users/jdoe/Desktop/renamed-shortcut.bin": {
 			model.ArtifactLNK, "Windows LNK shortcut", true, "high"},
 		`C/$Recycle.Bin/S-1-5-21-1004336348-1177238915-682003330-1001/$IA1B2C3.docx`: {
-			model.ArtifactRecycleBin, "Windows Recycle Bin $I metadata", true, "high"},
+			model.ArtifactRecycleBin, "Recycle Bin", true, "high"},
 	}
 	for path, w := range want {
 		sf, ok := sourceFileByPath(disc.SourceFiles, path)
@@ -139,7 +139,7 @@ func TestLNKRB_ClassificationIsStructural(t *testing.T) {
 	if rf.ArtifactType != model.ArtifactRecycleBinContent {
 		t.Errorf("the $R file's artifact type = %q, want %q", rf.ArtifactType, model.ArtifactRecycleBinContent)
 	}
-	if rf.TypeLabel == "Windows Recycle Bin $I metadata" {
+	if rf.TypeLabel == "Recycle Bin" {
 		t.Error("the $R content file is labelled as an $I metadata record")
 	}
 	if !strings.Contains(rf.Note, "$I record") {

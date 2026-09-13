@@ -399,7 +399,108 @@ const (
 	// though it did.
 	ArtifactJumpListCustom = "jumplist_custom"
 
+	// ArtifactUserAssist is a Windows UserAssist entry, read out of an
+	// NTUSER.DAT hive.
+	//
+	// A SEPARATE artifact type from ArtifactRegistryHive even though the
+	// evidence FILE is a hive, because the two answer different
+	// questions. The source file stays classified as a registry hive --
+	// that is what was collected and hashed. An EVENT, though, is what an
+	// analyst filters a timeline by, and "UserAssist" tells them what the
+	// observation is; "registry hive" tells them only where it was
+	// stored. See docs/windows-artifacts.md.
+	ArtifactUserAssist = "userassist"
+	// ArtifactShellBags is a Windows ShellBags (BagMRU) entry, read out
+	// of an NTUSER.DAT or UsrClass.dat hive. Separate from
+	// ArtifactRegistryHive for the same reason as ArtifactUserAssist.
+	ArtifactShellBags = "shellbags"
+
+	// ArtifactAmcache is a Windows Amcache entry, read out of
+	// Amcache.hve. Separate from ArtifactRegistryHive for the same
+	// reason as ArtifactUserAssist: the FILE is a hive, but the analyst
+	// filters a timeline by what the observation IS.
+	ArtifactAmcache = "amcache"
+	// ArtifactRecentDocs is a Windows RecentDocs MRU entry: a document
+	// name Explorer recorded as recently opened.
+	ArtifactRecentDocs = "recent_docs"
+	// ArtifactRunMRU is a Windows Run-dialog MRU entry.
+	ArtifactRunMRU = "run_mru"
+	// ArtifactTypedPaths is a path typed into the Explorer address bar.
+	ArtifactTypedPaths = "typed_paths"
+	// ArtifactOpenSaveMRU is an Open/Save common-dialog MRU entry.
+	ArtifactOpenSaveMRU = "opensave_mru"
+	// ArtifactMUICache is a MUICache application display-name entry.
+	ArtifactMUICache = "muicache"
+
+	// ArtifactSAM is a Windows local account record read out of a SAM
+	// hive. Separate from ArtifactRegistryHive for the same reason as
+	// ArtifactUserAssist -- the FILE is a hive, but what the analyst is
+	// looking at is the local account database, and it is the one
+	// artifact in this family that can carry credential material.
+	//
+	// An analyst who filters the timeline to "Windows SAM" wants the
+	// accounts, not every persistence key that happened to be in the
+	// same file.
+	ArtifactSAM = "sam_account"
+
+	// ArtifactUnsupportedBrowserDB is a browser-related SQLite database
+	// Tracefall recognizes but does not parse -- cookies, saved logins,
+	// favicons, autofill, media state, quota bookkeeping.
+	//
+	// It exists so those files stop being catalogued as browser history.
+	// A browser profile holds a dozen databases and exactly one of them
+	// is history; claiming all of them and failing the rest at import
+	// reported 25 files of intact evidence as broken. Recognized is not
+	// parsed: nothing is extracted from these, and the catalog says so.
+	ArtifactUnsupportedBrowserDB = "unsupported_browser_artifact"
+
+	// ArtifactRegistryTransactionLog is a registry transaction log --
+	// SAM.LOG1, SYSTEM.LOG2 and the rest.
+	//
+	// A REGF file, sharing the hive signature, with a different base
+	// block file type and no key tree. Classifying it as a hive
+	// catalogued 20 of them in one image and failed every one with "this
+	// is a registry transaction log, not a hive": true, and discovered
+	// far too late to be useful. The file type is in the first 512
+	// bytes, so the distinction belongs at classification time.
+	ArtifactRegistryTransactionLog = "registry_transaction_log"
+	// ArtifactActivitiesCache is a Windows Timeline activity record from
+	// ActivitiesCache.db.
+	ArtifactActivitiesCache = "activities_cache"
+	// ArtifactBrowserDownload is a browser download record. Deliberately
+	// SEPARATE from ArtifactBrowserHistory: a download and a page visit
+	// are different claims about different actions, and merging them
+	// would let "this file arrived" read as "this page was viewed".
+	ArtifactBrowserDownload = "browser_download"
+
 	ArtifactScheduledTask = "scheduled_task" // raw Task Scheduler XML
+
+	// ArtifactFileZillaServer is a server entry from a FileZilla
+	// connection file -- recentservers.xml or the Site Manager's
+	// sitemanager.xml.
+	//
+	// A CONFIGURATION record, kept apart from every network artifact for
+	// that reason. It says the client held this host, port, protocol and
+	// username; it does not say a connection was made at any time, that
+	// one succeeded, or that anything was transferred.
+	ArtifactFileZillaServer = "filezilla_server"
+
+	// ArtifactImageMetadata is metadata embedded in an image file --
+	// EXIF, and the JPEG frame header.
+	//
+	// This is ordinary file CONTENT. A camera writes it and so does every
+	// editor and exporter downstream, so it identifies what CLAIMED to
+	// produce the image rather than establishing that it did.
+	ArtifactImageMetadata = "image_metadata"
+
+	// ArtifactImageGPS is a geographic coordinate embedded in an image's
+	// EXIF GPS block.
+	//
+	// Deliberately SEPARATE from ArtifactImageMetadata: a position is a
+	// much stronger claim than a camera model, it is the one EXIF field
+	// an analyst filters a case down to, and merging the two would bury
+	// it among thousands of images that carry no location at all.
+	ArtifactImageGPS = "image_gps"
 )
 
 // Event types recognized in Phase 1. EventType is the normalized,
@@ -561,6 +662,127 @@ const (
 	// not evidence that anything ran. One event type, because an $I
 	// record carries exactly one timestamp.
 	EventRecycleBinDeletion = "recyclebin_deletion"
+
+	// EventUserAssistActivity is one UserAssist entry.
+	//
+	// Named "activity", not "execution", and that is the whole point.
+	// UserAssist counts launches Explorer performed -- from the Start
+	// menu, the desktop, a shortcut. A program run from a script, a
+	// service or a command prompt never appears, so the absence of an
+	// entry proves nothing, and the presence of one is evidence that this
+	// USER's shell launched the item, not that a process was created at
+	// the recorded instant. Security 4688 is what records that.
+	EventUserAssistActivity = "userassist_activity"
+
+	// EventShellBagNavigation is one reconstructed ShellBags entry:
+	// Explorer recorded a folder.
+	//
+	// Not "file opened" and not "folder opened at time T". The registry
+	// key's last-write time is when Explorer last updated that node of
+	// the BagMRU tree; the shell item's own DOS timestamps are local-time
+	// wall-clock readings with no timezone and are reported as metadata
+	// rather than placed on the timeline. See internal/shellbag.
+	EventShellBagNavigation = "shellbag_navigation"
+
+	// EventAmcacheApplication is one Amcache entry.
+	//
+	// "Application", not "execution". Amcache records that Windows'
+	// application-compatibility machinery CATALOGUED a binary -- which
+	// happens on installation, on inventory scans and on execution
+	// alike. It is application-presence evidence with strong identifying
+	// metadata (path, SHA-1, publisher, size), not a process-creation
+	// record. Security 4688 is what records that.
+	EventAmcacheApplication = "amcache_application"
+
+	// EventSAMLocalAccount is one Windows LOCAL ACCOUNT record read from
+	// a SAM hive: the account's name, its RID, its account-control
+	// flags, its stored timestamps, and -- when the SYSTEM hive's boot
+	// key was also present -- its NTLM PASSWORD HASH.
+	//
+	// What this event is NOT, deliberately and in every case:
+	//
+	//   - not a logon. An account existing is not an authentication.
+	//     Security 4624/4625 record those.
+	//   - not a password change. The record carries a
+	//     "password last set" timestamp, which is reported AS THAT and
+	//     is not the event's own time.
+	//   - not persistence, and not execution. Nothing here ran.
+	//   - not a finding. A local account having a password hash is what
+	//     a Windows machine looks like; it is evidence, and calling it
+	//     an alert would bury the real ones.
+	//
+	// The event carries NO TIMESTAMP of its own. A SAM record does not
+	// say when it was written, and the hive's or the file's modification
+	// time would be a different fact wearing this event's clothes. The
+	// account's own timestamps travel as explicitly-labelled fields.
+	//
+	// The NTLM value is a PASSWORD HASH. It is not a password, it is not
+	// reversible into one, and Tracefall does not attempt to recover
+	// one. See internal/sam.
+	EventSAMLocalAccount = "sam_local_account"
+
+	// EventRecentDocument is one RecentDocs MRU entry: Explorer recorded
+	// a document as recently opened. The key's last-write time dates the
+	// MOST RECENT entry only -- see internal/parsers/registry.
+	EventRecentDocument = "recent_document"
+
+	// EventRunMRUCommand is one Run-dialog MRU entry: a command was
+	// TYPED into the Run dialog and accepted. Not proof it executed
+	// successfully, and not a process-creation record.
+	EventRunMRUCommand = "run_mru_command"
+
+	// EventTypedPath is one Explorer address-bar entry: a path was typed
+	// there. Not proof the path was opened, and certainly not that
+	// anything was executed.
+	EventTypedPath = "typed_path"
+
+	// EventOpenSaveMRU is one Open/Save common-dialog MRU entry: a file
+	// was selected in an open or save dialog.
+	EventOpenSaveMRU = "opensave_mru"
+
+	// EventMUICacheEntry is one MUICache entry: Windows cached an
+	// application's display name. Presence evidence only -- the shell
+	// caches these on enumeration, not just on launch.
+	EventMUICacheEntry = "muicache_entry"
+
+	// EventActivityRecorded is one Windows Timeline activity.
+	//
+	// "Recorded", not "executed": the Activities provider logs
+	// application and document focus, and an activity row is not a
+	// process-creation record.
+	EventActivityRecorded = "activity_recorded"
+
+	// EventBrowserDownload is one browser download record: the browser
+	// retrieved a resource to a local path. Downloaded is not opened and
+	// is not executed.
+	EventBrowserDownload = "browser_download"
+
+	// EventLogoff is a Windows logoff record (Security 4634/4647). It
+	// bounds a session that EventLogonSuccess opened, which is what makes
+	// "who was at this machine, and when" answerable rather than
+	// open-ended.
+	EventLogoff = "logoff"
+
+	// EventFileZillaServerEntry is one server entry held by a FileZilla
+	// client. It carries NO TIMESTAMP: neither recentservers.xml nor
+	// sitemanager.xml records when an entry was created or used, and the
+	// file's own mtime describes the file rather than the entry.
+	//
+	// It is not a network connection, not a logon, and not a transfer.
+	// The strongest reading recentservers.xml supports is that a
+	// connection to this host was ATTEMPTED from this user's profile.
+	EventFileZillaServerEntry = "filezilla_server_entry"
+
+	// EventImageMetadataRecorded is the metadata one image file carries.
+	// Its time, when it has one, is the EXIF DateTimeOriginal -- when the
+	// exposure was recorded according to the writing device's own clock.
+	// It is never a filesystem timestamp.
+	EventImageMetadataRecorded = "image_metadata_recorded"
+
+	// EventImageGPSRecorded is a coordinate an image's EXIF GPS block
+	// recorded. The position is OBSERVED in the file; any country derived
+	// from it is DERIVED, and the event keeps the two apart.
+	EventImageGPSRecorded = "image_gps_recorded"
 )
 
 // Event is Tracefall's normalized evidence record. Every parser emits
