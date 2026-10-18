@@ -878,6 +878,7 @@ const ARTIFACT_TYPE_LABELS = {
   bash_history: "Bash history",
   wtmp: "Login records (wtmp)",
   auth_log: "Authentication log (auth.log)",
+  syslog: "System log (syslog)",
   browser_history: "Browser history (Chromium / Firefox)",
   browser_download: "Browser download",
   ntfs_mft: "NTFS $MFT",
@@ -1031,6 +1032,8 @@ const EVENT_CATEGORIES = {
   privilege_switch: "authentication",
   // sudo authorised the command; it is execution evidence like shell history.
   sudo_command: "execution",
+  // cron started a scheduled job as an account: execution, and a persistence lead.
+  scheduled_job_run: "execution",
   browser_download: "browser_download",
   logoff: "authentication",
   // Phase 20. A FileZilla entry is a CONFIGURATION record naming a

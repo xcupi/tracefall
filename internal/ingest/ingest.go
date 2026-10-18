@@ -51,6 +51,7 @@ import (
 	recyclebincontentparser "tracefall/internal/parsers/recyclebincontent"
 	"tracefall/internal/parsers/registry"
 	"tracefall/internal/parsers/scheduledtasks"
+	"tracefall/internal/parsers/syslog"
 	"tracefall/internal/parsers/usnjrnl"
 	"tracefall/internal/parsers/volatility"
 	"tracefall/internal/parsers/wtmp"
@@ -85,6 +86,7 @@ func Registry() []parsers.ArtifactParser {
 		bashhistory.New(),
 		wtmp.New(),
 		authlog.New(),
+		syslog.New(),
 		// Roadmap item 4: the combined Volatility output for a memory
 		// image. Detected by its fixed name and confirmed by its schema
 		// marker, so nothing else can be claimed as one.

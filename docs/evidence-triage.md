@@ -99,6 +99,7 @@ what the binary can actually parse:
 | `bash_history` | Bash history | Shell | High | `bashhistory@1` |
 | `wtmp` | Login records (wtmp) | Log | High | `wtmp@1` |
 | `auth_log` | Authentication log (auth.log) | Log | High | `authlog@1` |
+| `syslog` | System log (syslog) | Log | High | `syslog@1` |
 | `prefetch` | Prefetch | Prefetch | High | `prefetch@1`, `pecmd@1` |
 | `registry_run_key` | Registry (RECmd export) | Registry | High | `recmd@1` |
 | `scheduled_task` | Scheduled Task XML | Scheduled Task | High | `scheduledtasks@1` |
@@ -954,6 +955,36 @@ Limitations, stated rather than hidden:
   and gdm lines, so it correctly produces zero events. The count is verified
   against an independent pass over the raw file.
 - Compressed rotations are not parsed.
+
+
+### System log (`syslog@1`)
+
+Parses `/var/log/syslog` and its plain numbered rotations (`syslog.1`).
+Compressed rotations (`.gz`) are not claimed.
+
+Only one kind of line is emitted: a cron job starting, in the form
+`(user) CMD (command)`. It becomes a `scheduled_job_run` event with the
+account, the command text (wrapper parentheses removed, inner ones kept),
+and the cron PID. cron records that it started the job, not its result, and
+the event says so.
+
+Everything else in a system log is left uninterpreted. That includes USB
+attachment: on the Insider image the only USB device in the log is a VMware
+virtual mouse, and a rule that matched "usb" would have reported it as
+removable media. Lines with no program name are skipped.
+
+Partial timestamps, as in auth.log: no year, the month, day and time kept as
+written in `Extra["timestamp_partial"]`, and the year not inferred.
+
+On the Insider image, `syslog` gives 105 jobs (70 + 1 `debian-sa1`, 23
+`sessionclean`, 11 `run-parts`) and `syslog.1` gives 785. Both match an
+independent count of the raw files. `installer/syslog`, a BusyBox installer
+log, is also detected by name and correctly yields zero events, since it has
+no cron lines.
+
+Not done: systemd unit start and stop, kernel, NetworkManager and DHCP events.
+The journal (`/var/log/journal`) is not on this image, so it cannot be
+validated here and is not parsed.
 
 ### Browser history (`browserhistory@1`)
 
