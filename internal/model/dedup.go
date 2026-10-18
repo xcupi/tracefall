@@ -71,8 +71,16 @@ func (e Event) ComputeDedupHash() string {
 	// other artifact -- so existing evidence keeps its identity exactly.
 	// TestDedupHash_TimestampedEventsAreUnaffectedByTheZeroTimeRule pins
 	// that down.
+	//
+	// The source reference (the line or record number) is included too.
+	// Without it a command typed twice in one history file -- "ls" eleven
+	// times in the Insider image's root history -- collapses into a single
+	// event, and 25 of its 95 lines were silently lost. Re-importing the
+	// same file yields the same line numbers, so cross-collection
+	// deduplication of the same artifact still holds; two different lines
+	// that happen to read the same stay two events.
 	if e.Timestamp.IsZero() {
-		parts = append(parts, e.CommandLine)
+		parts = append(parts, e.CommandLine, e.SourceReference)
 	}
 	// Most Extra fields are interpretation or renderer metadata, not identity.
 	// Memory observations are the exception: a PID at snapshot time may own
