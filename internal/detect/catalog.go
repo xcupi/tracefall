@@ -50,6 +50,13 @@ type RuleDoc struct {
 // ruleDocs is keyed by Rule.ID(). Values are the levels the rule code in
 // rules.go actually assigns.
 var ruleDocs = map[string]RuleDoc{
+	"memory-process-signals": {
+		Title:        "Corroborated memory process review",
+		Detects:      "One process-level lead for private executable PE memory, independently corroborated executable regions, a successfully compared process-list discrepancy, or writable-image execution with a remote socket in the same acquisition.",
+		BaseSeverity: "medium", BaseConfidence: "low", MaxSeverity: "high", MaxConfidence: "medium",
+		Escalates: []string{"Private executable PE memory plus a writable image path or remote socket", "Private executable memory plus encoded/dynamic/download or remote execution command indicators"},
+		Basis:     "RWX memory alone is common in JIT runtimes and is not a finding. Writable-path installers with sockets are low-confidence review leads, not malware verdicts. Joins require matching acquisition, host, PID, process name and lifetime. Socket state is preserved as observed; an attempt or closed socket is not asserted to be a successful C2 connection.",
+	},
 	"office-spawns-powershell": {
 		Title:        "Office application spawned PowerShell",
 		Detects:      "A Microsoft Office process created a PowerShell child process.",
@@ -122,7 +129,7 @@ var ruleDocs = map[string]RuleDoc{
 	},
 	"suspicious-parent-child-lineage": {
 		Title:        "Suspicious parent/child process lineage",
-		Detects:      "A process was created by a parent that does not normally spawn it.",
+		Detects:      "A service-manager/svchost child with independent path or command indicators, or an explorer-launched script interpreter observation.",
 		BaseSeverity: "low", BaseConfidence: "low",
 		MaxSeverity: "high", MaxConfidence: "medium",
 		Escalates: []string{

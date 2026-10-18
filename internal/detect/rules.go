@@ -31,6 +31,7 @@ func All() []Rule {
 		privilegedLogonObserved{},
 		networkAfterExecution{},
 		remoteLogonObserved{},
+		memoryProcessSignals{},
 	}
 }
 
@@ -562,17 +563,14 @@ func (r suspiciousParentChildLineage) Evaluate(events []model.Event) []model.Fin
 			}
 
 		case "svchost.exe":
-			// svchost.exe hosts DLL-based services; it does not normally
-			// spawn child processes directly. A direct child -- especially
-			// one from a suspicious path or a script host -- is unusual.
-			if e.ProcessName == "" {
+			// Services legitimately create children (including via DCOM and
+			// scheduled tasks). Parent name alone is not an anomaly, nor is
+			// absence of a path evidence of an unusual installation path.
+			if e.ProcessName == "" || !corroborated(e) {
 				continue
 			}
-			reason = "svchost.exe directly spawning a child process, which is atypical for a DLL-hosting service process"
-			severity, confidence = model.SeverityMedium, model.ConfidenceLow
-			if corroborated(e) {
-				severity, confidence = model.SeverityHigh, model.ConfidenceMedium
-			}
+			reason = "svchost.exe child with corroborating user-writable path or suspicious command indicators; lineage alone was not used"
+			severity, confidence = model.SeverityHigh, model.ConfidenceMedium
 
 		default:
 			continue
@@ -716,6 +714,11 @@ func (r networkAfterExecution) Evaluate(events []model.Event) []model.Finding {
 
 	var findings []model.Finding
 	for _, ex := range execs {
+		// Memory socket observations are evaluated by memory-process-signals,
+		// with acquisition/PID/lifetime checks and explicit socket-state caveats.
+		if ex.ArtifactType == model.ArtifactMemoryAnalysis {
+			continue
+		}
 		// Gated on process behavior (a scripting interpreter/LOLBin, or a
 		// process from a suspicious path), never on the network
 		// destination or port -- see this phase's explicit "do not use
@@ -730,6 +733,9 @@ func (r networkAfterExecution) Evaluate(events []model.Event) []model.Finding {
 		found := false
 		for _, n := range netConnsByHostProc[eventKey(ex.Host, ex.ProcessName)] {
 			if n.Host != ex.Host || n.ProcessName != ex.ProcessName {
+				continue
+			}
+			if ex.PID > 0 && n.PID > 0 && ex.PID != n.PID {
 				continue
 			}
 			if n.Timestamp.Before(ex.Timestamp) || n.Timestamp.Sub(ex.Timestamp) > networkAfterExecWindow {
