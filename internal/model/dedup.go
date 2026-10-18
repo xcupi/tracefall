@@ -33,10 +33,10 @@ const unitSep = "\x1f"
 // CollectionID would defeat cross-collection deduplication entirely,
 // which is the whole point of this function existing.
 //
-// Fields not part of an event's identity in any artifact type (e.g.
-// Provider, Confidence, Extra) are excluded too -- widening the identity
-// key only risks two observations of the same real event failing to
-// match due to incidental parser differences.
+// Provider, Confidence and most Extra metadata are excluded: widening the
+// identity key risks failing to match recollections because of incidental
+// parser differences. Explicit memory object attributes are the exception
+// below: snapshot time plus PID alone cannot distinguish regions or sockets.
 func (e Event) ComputeDedupHash() string {
 	parts := []string{
 		e.EventType,
@@ -73,6 +73,24 @@ func (e Event) ComputeDedupHash() string {
 	// that down.
 	if e.Timestamp.IsZero() {
 		parts = append(parts, e.CommandLine)
+	}
+	// Most Extra fields are interpretation or renderer metadata, not identity.
+	// Memory observations are the exception: a PID at snapshot time may own
+	// many regions, services and sockets. Include their explicit object fields
+	// (never the source row index), so distinct objects survive while genuine
+	// repeated observations still deduplicate. The artifact guard leaves every
+	// historical non-memory hash unchanged, including network log events.
+	if e.ArtifactType == ArtifactMemoryAnalysis {
+		switch e.EventType {
+		case EventMemoryInjection:
+			parts = append(parts, e.Extra["start_vpn"], e.Extra["end_vpn"])
+		case EventMemoryService:
+			parts = append(parts, e.Extra["service_name"], e.Extra["state"],
+				e.Extra["start_type"], e.Extra["service_type"], e.Extra["binary_registry"], e.Extra["dll"])
+		case EventNetworkConnection, EventNetworkListener:
+			parts = append(parts, e.NetworkSource, e.Extra["local_port"],
+				e.Extra["protocol"], e.Extra["state"])
+		}
 	}
 	sum := sha256.Sum256([]byte(strings.Join(parts, unitSep)))
 	return hex.EncodeToString(sum[:])
