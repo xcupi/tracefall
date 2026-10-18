@@ -299,6 +299,10 @@ const (
 	// scheduled-job lines are read; the rest of the file is desktop and
 	// kernel noise that is not yet interpreted.
 	ArtifactSyslog = "syslog"
+	// ArtifactJournal is a systemd journal file (.journal, binary, LZ4
+	// compressed). Each entry carries a real UTC timestamp, so unlike the text
+	// logs these events are dated.
+	ArtifactJournal = "journal"
 	// ArtifactBrowserHistory is a browser history database. The exact
 	// formats supported are listed in docs/evidence-triage.md; the
 	// artifact type does not imply every browser is readable.
@@ -624,6 +628,10 @@ const (
 	// EventScheduledJobRun is a cron job that cron started, with the command
 	// it ran and the account it ran as. cron records the start, not the result.
 	EventScheduledJobRun = "scheduled_job_run"
+	// EventJournalEntry is one systemd journal entry. The message and the
+	// process fields are as the service logged them; the entry is not
+	// interpreted beyond that.
+	EventJournalEntry = "journal_entry"
 	// EventBrowserVisit is one recorded page visit from a browser history
 	// database.
 	EventBrowserVisit = "browser_visit"

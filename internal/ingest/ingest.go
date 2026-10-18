@@ -39,6 +39,7 @@ import (
 	"tracefall/internal/parsers/evtxcsv"
 	filezillaparser "tracefall/internal/parsers/filezilla"
 	imageparser "tracefall/internal/parsers/image"
+	"tracefall/internal/parsers/journal"
 	jumplistparser "tracefall/internal/parsers/jumplist"
 	lnkparser "tracefall/internal/parsers/lnk"
 	"tracefall/internal/parsers/logfile"
@@ -87,6 +88,7 @@ func Registry() []parsers.ArtifactParser {
 		wtmp.New(),
 		authlog.New(),
 		syslog.New(),
+		journal.New(),
 		// Roadmap item 4: the combined Volatility output for a memory
 		// image. Detected by its fixed name and confirmed by its schema
 		// marker, so nothing else can be claimed as one.

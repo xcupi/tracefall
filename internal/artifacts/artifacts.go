@@ -403,6 +403,10 @@ var supportedTypeInfo = map[string]typeInfo{
 		label: "Bash history", family: FamilyShell, priority: PriorityHigh,
 		why: "Records the commands a user typed on a POSIX host, which often survive after logs are rotated or cleared.",
 	},
+	model.ArtifactJournal: {
+		label: "Systemd journal", family: FamilyLog, priority: PriorityMedium,
+		why: "The structured log of every service on a systemd host, with real timestamps. Large, so it is importable but not auto-selected.",
+	},
 	model.ArtifactSyslog: {
 		label: "System log (syslog)", family: FamilyLog, priority: PriorityHigh,
 		why: "Records the scheduled jobs cron started, with their command and account -- a common place for persistence.",

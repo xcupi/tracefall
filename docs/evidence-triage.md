@@ -100,6 +100,7 @@ what the binary can actually parse:
 | `wtmp` | Login records (wtmp) | Log | High | `wtmp@1` |
 | `auth_log` | Authentication log (auth.log) | Log | High | `authlog@1` |
 | `syslog` | System log (syslog) | Log | High | `syslog@1` |
+| `journal` | Systemd journal | Log | Medium | `journal@1` |
 | `prefetch` | Prefetch | Prefetch | High | `prefetch@1`, `pecmd@1` |
 | `registry_run_key` | Registry (RECmd export) | Registry | High | `recmd@1` |
 | `scheduled_task` | Scheduled Task XML | Scheduled Task | High | `scheduledtasks@1` |
@@ -985,6 +986,50 @@ no cron lines.
 Not done: systemd unit start and stop, kernel, NetworkManager and DHCP events.
 The journal (`/var/log/journal`) is not on this image, so it cannot be
 validated here and is not parsed.
+
+
+### Systemd journal (`journal@1`)
+
+Parses systemd journal files: `*.journal` by name, and any file whose first
+bytes carry the journal signature. That second rule also claims the
+set-aside copies journald makes after corruption (`*.journal~`), which read
+correctly.
+
+Every entry becomes a `journal_entry` event with its **real UTC timestamp**.
+This is the one Linux log in the set that carries the year, so these events
+are dated and need no partial-timestamp handling.
+
+Exclusions: entries from `sshd`, `sudo`, `su`, and `cron` are not emitted,
+because the auth.log and syslog parsers already emit those actions. Excluded
+counts are reported.
+
+Kept fields are a fixed set: the message, the host, the command and
+executable, the PID, the UID, the boot id, the systemd unit, the transport,
+the syslog identifier and the priority. Other fields are read past. Messages
+longer than 4096 characters are truncated and say so.
+
+Limitations, stated rather than hidden:
+
+- Only LZ4-compressed objects are decoded (the dependency is
+  `github.com/pierrec/lz4/v4`). XZ and ZSTD objects are counted as
+  unsupported in the statistics, not guessed.
+- A message that is not valid text is kept with replacement characters.
+- Volume: a journal holds far more entries than the text logs. The lab's 86
+  AzurePot journals contain 904,601 entries, of which 903,182 become events.
+  Importing them all is correct but large.
+
+Validation: every entry of every file on the AzurePot image (86 files) was
+compared against `journalctl`, with the same realtime, process, PID and
+message. All 86 files match. On the MrGamer image, six non-empty journal
+files (76,762 events) match the same way, and the imported database holds
+exactly 76,762 distinct events.
+
+The MrGamer image's `system.journal` is zero bytes in its inode, with a
+deletion time. It is reported as failed, not as empty; that status is a known
+wart.
+
+Not done: the journal's own integrity hashes are not verified by this parser.
+`journalctl --verify` is the reference used in validation.
 
 ### Browser history (`browserhistory@1`)
 

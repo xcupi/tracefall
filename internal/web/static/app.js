@@ -879,6 +879,7 @@ const ARTIFACT_TYPE_LABELS = {
   wtmp: "Login records (wtmp)",
   auth_log: "Authentication log (auth.log)",
   syslog: "System log (syslog)",
+  journal: "Systemd journal",
   browser_history: "Browser history (Chromium / Firefox)",
   browser_download: "Browser download",
   ntfs_mft: "NTFS $MFT",
@@ -1034,6 +1035,8 @@ const EVENT_CATEGORIES = {
   sudo_command: "execution",
   // cron started a scheduled job as an account: execution, and a persistence lead.
   scheduled_job_run: "execution",
+  // Generic service log entries: context, not a classified action.
+  journal_entry: "other",
   browser_download: "browser_download",
   logoff: "authentication",
   // Phase 20. A FileZilla entry is a CONFIGURATION record naming a

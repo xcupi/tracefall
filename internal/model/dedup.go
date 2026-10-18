@@ -82,6 +82,13 @@ func (e Event) ComputeDedupHash() string {
 	if e.Timestamp.IsZero() {
 		parts = append(parts, e.CommandLine, e.SourceReference)
 	}
+	// Journal entries are timestamped at microsecond resolution, so two
+	// entries from the same process in the same microsecond would collapse
+	// under the timestamped rule above. The per-file sequence number is what
+	// tells them apart; it is included for this artifact only.
+	if e.ArtifactType == ArtifactJournal {
+		parts = append(parts, e.SourceReference)
+	}
 	// Most Extra fields are interpretation or renderer metadata, not identity.
 	// Memory observations are the exception: a PID at snapshot time may own
 	// many regions, services and sockets. Include their explicit object fields
