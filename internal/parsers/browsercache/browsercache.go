@@ -78,16 +78,21 @@ func (Parser) Detect(relPath string) bool {
 	return ok
 }
 
-// DetectContent identifies an entry by the structure of the file.
+// DetectContent identifies an entry from its leading bytes.
 //
-// Both checks are strict about self-consistency: Chromium requires its
-// magic AND a key length that fits, Firefox requires a trailing metadata
-// offset that lands inside the file with a coherent header at it. That
-// is what stops arbitrary files being claimed as browser cache.
+// Chromium's magic and blockfile header are checked here. The Firefox
+// cache2 check reads its metadata offset from the LAST four bytes of the
+// data it is given. That is only the real trailing offset when the data is
+// the whole file, which is exactly when the header is shorter than
+// SniffLength (readHeader returns the whole file for small files). A full
+// header may be a prefix of a larger file, so its last four bytes prove
+// nothing: an ordinary .m4a was claimed that way and then failed at import.
+// Parse runs the full-file Firefox check on every entry it reads.
 func (Parser) DetectContent(header []byte) bool {
-	return bc.SniffChromiumSimple(header) ||
-		bc.SniffFirefoxCache2(header) ||
-		bc.SniffChromiumBlockfileData(header)
+	if bc.SniffChromiumSimple(header) || bc.SniffChromiumBlockfileData(header) {
+		return true
+	}
+	return len(header) < parsers.SniffLength && bc.SniffFirefoxCache2(header)
 }
 
 // Parse reads one cache entry file.
