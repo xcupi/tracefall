@@ -877,6 +877,7 @@ const ARTIFACT_TYPE_LABELS = {
   powershell_history: "PowerShell console history",
   bash_history: "Bash history",
   wtmp: "Login records (wtmp)",
+  auth_log: "Authentication log (auth.log)",
   browser_history: "Browser history (Chromium / Firefox)",
   browser_download: "Browser download",
   ntfs_mft: "NTFS $MFT",
@@ -1026,6 +1027,10 @@ const EVENT_CATEGORIES = {
   session_start: "authentication",
   session_end: "authentication",
   system_boot: "other",
+  // An su attempt is a change of account, so it is an authentication event.
+  privilege_switch: "authentication",
+  // sudo authorised the command; it is execution evidence like shell history.
+  sudo_command: "execution",
   browser_download: "browser_download",
   logoff: "authentication",
   // Phase 20. A FileZilla entry is a CONFIGURATION record naming a

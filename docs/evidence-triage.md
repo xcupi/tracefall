@@ -98,6 +98,7 @@ what the binary can actually parse:
 | `powershell_history` | PowerShell console history | PowerShell | High | `pshistory@1` |
 | `bash_history` | Bash history | Shell | High | `bashhistory@1` |
 | `wtmp` | Login records (wtmp) | Log | High | `wtmp@1` |
+| `auth_log` | Authentication log (auth.log) | Log | High | `authlog@1` |
 | `prefetch` | Prefetch | Prefetch | High | `prefetch@1`, `pecmd@1` |
 | `registry_run_key` | Registry (RECmd export) | Registry | High | `recmd@1` |
 | `scheduled_task` | Scheduled Task XML | Scheduled Task | High | `scheduledtasks@1` |
@@ -919,10 +920,40 @@ Limitations, stated rather than hidden:
 - The file is in file order, not time order. Rotations and clock changes
   break time order, so each event keeps its own timestamp.
 
-`auth.log` is not supported yet. Its lines carry no year, and the AD1
-extraction path does not set file modification times, so there is no
-honest source for the year. The plan is to keep those events undated and
-record an assumed year in `Extra`, not to infer one.
+### Authentication log (`authlog@1`)
+
+Parses `/var/log/auth.log` and its plain numbered rotations (`auth.log.1`).
+Compressed rotations (`.gz`) are not claimed.
+
+Emitted: `su` successes and failures (`privilege_switch`, outcome in
+`Extra`), `sudo` commands (`sudo_command`, the authorised command, not a
+confirmed execution), and `sshd` accepted and failed logons (`logon_success`
+and `logon_failure`, with the source address). PAM session open/close lines
+and CRON, systemd and polkit noise produce no event: they repeat the action
+lines above or describe nothing an examiner acts on.
+
+**Timestamps are partial on purpose.** Each line gives only `Mon DD HH:MM:SS`,
+with no year, and the year is not in the file. These events therefore have a
+zero `Timestamp`. The month, day and time are kept exactly as written in
+`Extra["timestamp_partial"]`, so filtering by time of day works (the usual
+question, for example "what happened at 11:26?") and the file's line order is
+preserved. The year is deliberately **not** inferred, and the file's
+modification time is not used to fill it in: mtime is when the file was last
+written, not when a line was logged, and it can be changed.
+
+On the Insider image this gives 6 successful `su` (all `Mar 20 11:26:22-23`,
+target `postgres`, invoked by `root`) and 4 `sudo` commands. The `su` target
+is `postgres`; the invoking account is `root`, so this line alone does not
+show which person was behind the session.
+
+Limitations, stated rather than hidden:
+
+- A full timestamp is available only from another source, for example the
+  correlation of an event with a dated artifact. Nothing here supplies one.
+- `auth.log.1` on the Insider image holds only CRON, realmd, systemd, polkit
+  and gdm lines, so it correctly produces zero events. The count is verified
+  against an independent pass over the raw file.
+- Compressed rotations are not parsed.
 
 ### Browser history (`browserhistory@1`)
 

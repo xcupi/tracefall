@@ -291,6 +291,10 @@ const (
 	// ArtifactWtmp is the utmp-format login record file (/var/log/wtmp).
 	// Each record has an epoch timestamp, a session type and a user.
 	ArtifactWtmp = "wtmp"
+	// ArtifactAuthLog is the syslog-style authentication log
+	// (/var/log/auth.log). Lines carry no year, so no event from it has a
+	// full timestamp; the month, day and time are kept as written.
+	ArtifactAuthLog = "auth_log"
 	// ArtifactBrowserHistory is a browser history database. The exact
 	// formats supported are listed in docs/evidence-triage.md; the
 	// artifact type does not imply every browser is readable.
@@ -607,6 +611,12 @@ const (
 	EventSessionEnd = "session_end"
 	// EventSystemBoot is a BOOT_TIME record in wtmp.
 	EventSystemBoot = "system_boot"
+	// EventPrivilegeSwitch is an su attempt: a user asked to become another
+	// account. Outcome is in Extra; the switch itself is what is recorded.
+	EventPrivilegeSwitch = "privilege_switch"
+	// EventSudoCommand is a command sudo authorised to run as another user.
+	// sudo logs the authorisation, not a confirmed execution.
+	EventSudoCommand = "sudo_command"
 	// EventBrowserVisit is one recorded page visit from a browser history
 	// database.
 	EventBrowserVisit = "browser_visit"

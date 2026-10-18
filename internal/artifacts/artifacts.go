@@ -403,6 +403,10 @@ var supportedTypeInfo = map[string]typeInfo{
 		label: "Bash history", family: FamilyShell, priority: PriorityHigh,
 		why: "Records the commands a user typed on a POSIX host, which often survive after logs are rotated or cleared.",
 	},
+	model.ArtifactAuthLog: {
+		label: "Authentication log (auth.log)", family: FamilyLog, priority: PriorityHigh,
+		why: "Records su and sudo privilege changes, the commands sudo authorised, and SSH logons with their source addresses.",
+	},
 	model.ArtifactWtmp: {
 		label: "Login records (wtmp)", family: FamilyLog, priority: PriorityHigh,
 		why: "Records when accounts logged in and out and the terminal or remote host used, with epoch timestamps.",

@@ -30,6 +30,7 @@ import (
 	"tracefall/internal/model"
 	"tracefall/internal/parsers"
 	"tracefall/internal/parsers/activitiescache"
+	"tracefall/internal/parsers/authlog"
 	"tracefall/internal/parsers/bashhistory"
 	browsercacheparser "tracefall/internal/parsers/browsercache"
 	browsercacheindexparser "tracefall/internal/parsers/browsercacheindex"
@@ -83,6 +84,7 @@ func Registry() []parsers.ArtifactParser {
 		// only; neither format has a signature that is safe to sniff.
 		bashhistory.New(),
 		wtmp.New(),
+		authlog.New(),
 		// Roadmap item 4: the combined Volatility output for a memory
 		// image. Detected by its fixed name and confirmed by its schema
 		// marker, so nothing else can be claimed as one.
