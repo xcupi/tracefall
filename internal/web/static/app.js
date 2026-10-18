@@ -28,6 +28,7 @@ const tabScroll = new Map();
 // silent or like an unrelated failure.
 function apiError(res, body) {
   const err = new Error((body && body.error) || res.statusText);
+  err.status = res.status;
   if (res.status === 409 && body && body.duplicate_collection_label) {
     err.duplicateCollectionLabel = body.duplicate_collection_label;
   }
@@ -839,6 +840,7 @@ const SOURCE_TYPE_LABELS = {
   local_path: "Local Path",
   legacy: "Legacy",
   ad1_image: "AD1 Forensic Image",
+  disk_image: "Disk Image",
 };
 
 // ARTIFACT_TYPE_LABELS renders internal/model's Artifact* constants for
@@ -4528,6 +4530,9 @@ function renderCaseHeader(caseId, c, summary, staleAnalysis, invalidated) {
               <a role="menuitem" href="/api/cases/${caseId}/export" target="_blank" rel="noopener">Case JSON</a>
               <a role="menuitem" href="/api/cases/${caseId}/export/timeline.csv" target="_blank" rel="noopener">Timeline CSV</a>
               <a role="menuitem" href="/api/cases/${caseId}/export/findings.csv" target="_blank" rel="noopener">Findings CSV</a>
+              <a role="menuitem" href="/api/cases/${caseId}/report.html" target="_blank" rel="noopener">Forensic report (HTML)</a>
+              <a role="menuitem" href="/api/cases/${caseId}/report.pdf" target="_blank" rel="noopener">Forensic report (PDF)</a>
+              <a role="menuitem" href="/api/cases/${caseId}/report.zip">Report bundle (ZIP + hash manifest)</a>
             </div>
           </div>
           ${canDelete() ? `<button type="button" class="danger small" id="delete-case-btn">Delete Case</button>` : ""}
@@ -4641,11 +4646,12 @@ function renderOverviewTab(content, caseId) {
       <div id="tab-lock-banner"></div>
       <div id="add-evidence-form" class="add-evidence-form hidden">
         <h3>Upload evidence</h3>
-        <p class="muted small">Upload a ZIP archive of a KAPE triage collection, or a single AD1 forensic image (FTK Imager's logical/custom-content format, detected from the file's contents, not just its <code>.ad1</code> extension). Tracefall safely inspects it and catalogs every file inside (EvtxECmd/PECmd/RECmd CSV, Scheduled Task XML, and anything else, or the files inside the AD1) without extracting or parsing anything yet -- you choose which discovered files to import next.</p>
+        <p class="muted small">Upload a disk image (a raw/dd file or a single-file E01 with NTFS volumes; Tracefall finds the partitions and reads the artifacts inside), a ZIP archive of a KAPE triage collection, or a single AD1 forensic image (FTK Imager's logical/custom-content format, detected from the file's contents, not just its <code>.ad1</code> extension). Tracefall safely inspects it and catalogs every file inside. By default, it imports all supported files and runs analysis automatically; turn off the automatic option below if you want to review/select files manually. Unsupported files and parse failures remain clearly reported.</p>
         <div class="row">
-          <input type="file" id="upload-file" accept=".zip,.ad1,application/zip" />
+          <input type="file" id="upload-file" accept=".zip,.ad1,.e01,.dd,.raw,.img,.001,application/zip" />
           <button id="upload-btn">Upload Evidence</button>
         </div>
+        <label class="small" for="upload-auto-analyze"><input type="checkbox" id="upload-auto-analyze" checked /> Automatically import all supported files and run analysis after upload</label>
         <div id="upload-error"></div>
         <div id="upload-progress"></div>
 
@@ -5378,6 +5384,10 @@ function wireEvidenceHeader(caseId) {
     addBtn.textContent = hidden ? "+ Add Evidence" : "Cancel";
   });
 
+  // A pipeline job outlives the page: if one is queued or running for
+  // this case, show it again instead of leaving the analyst guessing.
+  resumePipelineIfActive(caseId).catch(() => {});
+
   const uploadBtn = document.getElementById("upload-btn");
   uploadBtn.addEventListener("click", async () => {
     const fileInput = document.getElementById("upload-file");
@@ -5403,6 +5413,18 @@ function wireEvidenceHeader(caseId) {
     paint();
 
     try {
+      if (document.getElementById("upload-auto-analyze")?.checked) {
+        // Automatic mode runs on the SERVER: the file is sent in
+        // resumable chunks, then a persisted pipeline job discovers,
+        // imports and analyzes it. Closing the tab, losing the network
+        // or restarting the server does not lose the work.
+        const uploadId = await uploadResumable(caseId, file, (p) => {
+          stage = { phase: "uploading", loaded: p.loaded, total: p.total, lengthComputable: true };
+          paint();
+        });
+        await runServerPipeline(caseId, progress, { upload_id: uploadId });
+        return;
+      }
       const disc = await apiUpload(`/cases/${caseId}/evidence`, file, (p) => {
         if (p.uploadComplete) {
           // Every byte is on the server; it is now hashing and
@@ -5570,6 +5592,220 @@ const SOURCE_FILE_STATUS_LABELS = {
 const evidenceCatalogs = new Map();
 
 const PRIORITY_LABELS = { critical: "Critical", high: "High", medium: "Medium", low: "Low", unknown: "Unknown" };
+
+// ---------------- resumable upload and server pipeline ----------------
+
+// UPLOAD_CHUNK_BYTES is how much of a file travels in one request. Small
+// enough that a failed chunk costs little to resend, large enough that
+// per-request overhead is negligible on a multi-gigabyte image. The server
+// accepts up to 64 MiB per chunk.
+const UPLOAD_CHUNK_BYTES = 8 * 1024 * 1024;
+const UPLOAD_MAX_RETRIES = 6;
+
+function uploadStorageKey(caseId, file) {
+  return `tracefall.upload.${caseId}.${file.name}.${file.size}.${file.lastModified}`;
+}
+
+const sleepMs = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// uploadResumable sends file to the server in chunks and returns the
+// upload id once every byte is confirmed.
+//
+// It never reads the whole file: each chunk is a Blob slice. The server's
+// "received" count is the only source of truth for where to continue, so
+// after a dropped connection, a 409, a server restart or even a page
+// reload followed by choosing the SAME file again (same name, size and
+// modification time), the upload carries on from the bytes the server
+// really holds rather than from what this page believes it sent.
+async function uploadResumable(caseId, file, onProgress) {
+  const key = uploadStorageKey(caseId, file);
+  const base = `/cases/${caseId}/uploads`;
+  let session = null;
+
+  const saved = localStorage.getItem(key);
+  if (saved) {
+    try {
+      const s = await api(`${base}/${saved}`);
+      if (s.status === "open" && s.size === file.size) session = s;
+    } catch (_) {
+      /* stale or unknown: start over */
+    }
+    if (!session) localStorage.removeItem(key);
+  }
+  if (!session) {
+    session = await api(base, { method: "POST", body: JSON.stringify({ filename: file.name, size: file.size }) });
+    localStorage.setItem(key, session.upload_id);
+  }
+
+  const id = session.upload_id;
+  let offset = session.received || 0;
+  if (onProgress) onProgress({ loaded: offset, total: file.size });
+
+  let failures = 0;
+  while (offset < file.size) {
+    const end = Math.min(offset + UPLOAD_CHUNK_BYTES, file.size);
+    try {
+      const headers = { "Content-Type": "application/octet-stream", "Upload-Offset": String(offset) };
+      const t = csrfToken();
+      if (t) headers["X-Tracefall-CSRF"] = t;
+      const res = await fetch(`/api${base}/${id}`, { method: "PUT", headers, body: file.slice(offset, end) });
+      const body = await res.json().catch(() => null);
+      if (res.status === 409 && body && typeof body.received === "number") {
+        // Our idea of the offset was wrong (a retry that actually landed,
+        // or a restart). Adopt the server's.
+        offset = body.received;
+        if (++failures > UPLOAD_MAX_RETRIES) throw new Error("The server and browser could not agree on the upload offset");
+        continue;
+      }
+      if (!res.ok) {
+        if (res.status >= 400 && res.status < 500) throw apiError(res, body);
+        throw new Error((body && body.error) || `server error ${res.status}`);
+      }
+      offset = body.received;
+      failures = 0;
+      if (onProgress) onProgress({ loaded: offset, total: file.size });
+    } catch (e) {
+      // A 4xx other than 409 is a refusal, not a glitch: retrying cannot help.
+      if (e && e.status >= 400 && e.status < 500) throw e;
+      if (++failures > UPLOAD_MAX_RETRIES) throw new Error(`Upload failed after ${UPLOAD_MAX_RETRIES} retries: ${e.message || e}`);
+      await sleepMs(Math.min(1000 * 2 ** (failures - 1), 15000)); // retry with backoff
+      try {
+        // Resynchronize before sending anything again.
+        offset = (await api(`${base}/${id}`)).received;
+      } catch (_) {
+        /* still unreachable: the next loop iteration retries */
+      }
+    }
+  }
+
+  await api(`${base}/${id}/complete`, { method: "POST" });
+  localStorage.removeItem(key);
+  return id;
+}
+
+const PIPELINE_STAGE_LABELS = {
+  queued: "Waiting in the queue",
+  discover: "Inspecting the upload and cataloging its contents",
+  import: "Importing every supported file",
+  analyze: "Running deterministic detection and correlation",
+};
+
+function pipelineJobKey(caseId) {
+  return `tracefall.job.${caseId}`;
+}
+
+function renderPipelinePanel(job, note) {
+  const label = PIPELINE_STAGE_LABELS[job.stage] || job.stage;
+  const prog = job.progress || {};
+  const counts =
+    prog.files_imported != null
+      ? `<p class="small muted">${fmtCount(prog.files_imported || 0)} file(s) imported${prog.files_failed ? `, ${fmtCount(prog.files_failed)} failed to parse` : ""}.</p>`
+      : "";
+  return `<div class="panel import-progress">
+    <h3>${esc(label)}</h3>
+    <p class="small muted">This runs on the server. You can close this page; progress is kept and shown again when you return.${job.attempts > 1 ? " The job was resumed after an interruption." : ""}</p>
+    <div class="progress-track indeterminate" role="progressbar" aria-valuetext="in progress"><div class="progress-fill"></div></div>
+    ${counts}
+    ${note ? `<p class="small muted">${esc(note)}</p>` : ""}
+    <button type="button" class="secondary small" id="pipeline-cancel-btn" ${job.cancel_requested ? "disabled" : ""}>${job.cancel_requested ? "Cancelling..." : "Cancel"}</button>
+  </div>`;
+}
+
+function renderPipelineOutcome(job) {
+  const r = job.result || {};
+  const cont = `<div style="margin-top:12px"><button id="import-continue-btn">Continue to case dashboard</button></div>`;
+  if (job.status === "succeeded") {
+    const analysis = r.analyzed
+      ? `<p class="small">Analysis completed across the case: ${fmtCount(r.findings || 0)} finding(s) and ${fmtCount(r.correlations || 0)} correlation(s). Review the timeline and findings on the case dashboard.</p>`
+      : `<p class="small muted">Analysis was not requested for this job.</p>`;
+    return `<div class="panel" style="background:var(--bg-panel); margin-top:12px; margin-bottom:0">
+      <h3>Import and analysis complete</h3>
+      ${analysis}
+      ${uploadStep(`${fmtCount(r.files_imported || 0)} file(s) imported`, true)}
+      ${r.files_skipped ? uploadStep(`${fmtCount(r.files_skipped)} file(s) skipped`, true) : ""}
+      ${r.files_failed ? `<p class="small" style="color:var(--high)">${fmtCount(r.files_failed)} supported file(s) failed to parse -- not the same as unsupported evidence. Per-file reasons are in the Evidence tab.</p>` : ""}
+      ${uploadStep(`${fmtCount(r.events || 0)} event(s) in the case`, true)}
+      ${job.attempts > 1 ? `<p class="small muted">The job was resumed after an interruption; it continued from its last checkpoint.</p>` : ""}
+      ${cont}
+    </div>`;
+  }
+  const title = job.status === "cancelled" ? "Pipeline cancelled" : "Pipeline failed";
+  const detail =
+    job.status === "cancelled"
+      ? "Stopped at the analyst's request. Anything already imported is valid evidence."
+      : job.error || "The pipeline failed.";
+  return `<div class="panel" style="background:var(--bg-panel); margin-top:12px; margin-bottom:0">
+    <h3>${title}</h3>
+    <div class="error-box">${esc(detail)}</div>
+    <p class="small muted">The uploaded staging file is removed when a job ends; to retry, upload the file again.</p>
+    ${cont}
+  </div>`;
+}
+
+// runServerPipeline starts (or, given an existing job, re-attaches to) a
+// server-side ingest job and follows it until it ends.
+//
+// The job id is kept in localStorage so a reloaded page can find it, but
+// the SERVER is the source of truth: resumePipelineIfActive asks it. Poll
+// failures are tolerated for a minute, because a restarting server is
+// exactly the situation this exists to survive.
+async function runServerPipeline(caseId, container, params, existingJob) {
+  let job = existingJob || (await api(`/cases/${caseId}/pipeline/jobs`, { method: "POST", body: JSON.stringify(params) }));
+  localStorage.setItem(pipelineJobKey(caseId), job.job_id);
+  const path = `/cases/${caseId}/pipeline/jobs/${job.job_id}`;
+
+  let note = "";
+  let misses = 0;
+  for (;;) {
+    if (job.status === "succeeded" || job.status === "failed" || job.status === "cancelled") break;
+    container.innerHTML = renderPipelinePanel(job, note);
+    const cancel = container.querySelector("#pipeline-cancel-btn");
+    if (cancel) {
+      cancel.addEventListener("click", async () => {
+        cancel.disabled = true;
+        try {
+          await api(`${path}/cancel`, { method: "POST" });
+        } catch (e) {
+          note = e.message || String(e);
+        }
+      });
+    }
+    await sleepMs(1000);
+    try {
+      job = await api(path);
+      misses = 0;
+      note = "";
+    } catch (e) {
+      if (e && e.status >= 400 && e.status < 500 && e.status !== 401) throw e;
+      if (++misses > 60) throw new Error("Lost contact with the server while the job was running. The job is kept; reload this page to check on it.");
+      note = "Waiting for the server to respond...";
+    }
+  }
+
+  localStorage.removeItem(pipelineJobKey(caseId));
+  container.innerHTML = renderPipelineOutcome(job);
+  const cont = container.querySelector("#import-continue-btn");
+  if (cont) cont.addEventListener("click", () => window.location.reload());
+  return job;
+}
+
+// resumePipelineIfActive re-attaches the evidence tab to a job that is
+// still queued or running, e.g. after the page was reloaded.
+async function resumePipelineIfActive(caseId) {
+  const jobs = await api(`/cases/${caseId}/pipeline/jobs`);
+  const active = (jobs || []).find((j) => j.status === "queued" || j.status === "running");
+  if (!active) {
+    localStorage.removeItem(pipelineJobKey(caseId));
+    return;
+  }
+  const host = document.getElementById("upload-progress");
+  const form = document.getElementById("add-evidence-form");
+  const addBtn = document.getElementById("add-evidence-btn");
+  if (!host) return;
+  if (form) form.classList.remove("hidden");
+  if (addBtn) addBtn.textContent = "Cancel";
+  await runServerPipeline(caseId, host, null, active);
+}
 
 // renderDiscoveryResults is the FILE SELECTION SCREEN.
 //
@@ -6294,7 +6530,7 @@ async function runImportWithProgress(caseId, collectionId, ids, progressHost, co
     const cont = container.querySelector("#import-continue-btn");
     if (cont) cont.addEventListener("click", () => window.location.reload());
     wireParseFailureToggle(container, (p.result || {}).parse_failures);
-    return;
+    return p;
   }
 }
 
@@ -6578,11 +6814,18 @@ function renderImportSkips(skips) {
 // how many files were imported, how many events (new vs. already known
 // from another collection), plus a button to continue into the case
 // dashboard.
-function renderImportResults(res, cancelled) {
+function renderImportResults(res, cancelled, analysisOutcome = null) {
   const wasCancelled = cancelled || res.cancelled;
   return `
     <div class="panel" style="background:var(--bg-panel); margin-top:12px; margin-bottom:0">
-      <h3>${wasCancelled ? "Import cancelled" : "Import complete"}</h3>
+      <h3>${wasCancelled ? "Import cancelled" : analysisOutcome ? "Import and analysis complete" : "Import complete"}</h3>
+      ${
+        analysisOutcome
+          ? analysisOutcome.error
+            ? `<p class="small critical">Import finished, but automatic analysis failed: ${esc(analysisOutcome.error)}. The imported evidence is retained; run analysis from the case dashboard.</p>`
+            : `<p class="small">Analysis completed across the case: ${fmtCount(analysisOutcome.findings)} finding(s) and ${fmtCount(analysisOutcome.correlations)} correlation(s). Review the full timeline and findings on the case dashboard.</p>`
+          : ""
+      }
       ${
         wasCancelled
           ? `<p class="small muted import-cancel-note">

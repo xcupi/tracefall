@@ -428,4 +428,48 @@ CREATE TABLE IF NOT EXISTS audit_log (
 	summary     TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_audit_log_case ON audit_log(case_id, timestamp);
+
+-- Roadmap item 2: server-side pipeline jobs and resumable uploads.
+-- OPERATIONAL state, not evidence: nothing here feeds detection or any
+-- finding. Both are scoped to a case and are removed with it.
+--
+-- A job's (stage, collection_id) is its resume point: after a restart a
+-- running job is put back to 'queued' and continues from there rather
+-- than starting over.
+CREATE TABLE IF NOT EXISTS pipeline_jobs (
+	id               TEXT PRIMARY KEY,
+	case_id          TEXT NOT NULL REFERENCES cases(id),
+	kind             TEXT NOT NULL,
+	status           TEXT NOT NULL,
+	stage            TEXT NOT NULL DEFAULT 'queued',
+	collection_id    TEXT NOT NULL DEFAULT '',
+	params           TEXT NOT NULL DEFAULT '{}',
+	progress         TEXT NOT NULL DEFAULT '',
+	result           TEXT NOT NULL DEFAULT '',
+	error            TEXT NOT NULL DEFAULT '',
+	attempts         INTEGER NOT NULL DEFAULT 0,
+	cancel_requested INTEGER NOT NULL DEFAULT 0,
+	created_by       TEXT NOT NULL DEFAULT '',
+	created_at       TEXT NOT NULL,
+	started_at       TEXT NOT NULL DEFAULT '',
+	finished_at      TEXT NOT NULL DEFAULT '',
+	updated_at       TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_pipeline_jobs_case ON pipeline_jobs(case_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_pipeline_jobs_queue ON pipeline_jobs(status, created_at);
+
+CREATE TABLE IF NOT EXISTS upload_sessions (
+	id            TEXT PRIMARY KEY,
+	case_id       TEXT NOT NULL REFERENCES cases(id),
+	filename      TEXT NOT NULL,
+	size          INTEGER NOT NULL,
+	received      INTEGER NOT NULL DEFAULT 0,
+	status        TEXT NOT NULL,
+	client_sha256 TEXT NOT NULL DEFAULT '',
+	created_by    TEXT NOT NULL DEFAULT '',
+	created_at    TEXT NOT NULL,
+	updated_at    TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_upload_sessions_case ON upload_sessions(case_id);
+CREATE INDEX IF NOT EXISTS idx_upload_sessions_status ON upload_sessions(status, updated_at);
 `

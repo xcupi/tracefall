@@ -224,6 +224,19 @@ func populate(t *testing.T, s *store.Store, caseID, name string, events int) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	// Roadmap item 2: operational state that must go with the case.
+	if err := s.CreatePipelineJob(model.PipelineJob{
+		ID: caseID + "-job1", CaseID: caseID, Kind: model.JobKindIngest, Status: model.JobQueued,
+		Stage: model.StageQueued, CreatedBy: "tester", CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CreateUploadSession(model.UploadSession{
+		ID: caseID + "-up1", CaseID: caseID, Filename: "a.zip", Size: 1, Status: model.UploadOpen,
+		CreatedBy: "tester", CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func openStore(t *testing.T, dbPath string) *store.Store {

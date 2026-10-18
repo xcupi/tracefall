@@ -183,6 +183,12 @@ const (
 	// that distinction stops being meaningful for AD1 and isn't tracked
 	// separately).
 	SourceTypeAD1 = "ad1_image"
+	// SourceTypeDiskImage is a whole-disk or whole-volume forensic image
+	// (raw/dd or E01/EWF) holding NTFS file systems. Like an AD1, it is
+	// cataloged without extracting anything; the artifacts the analyst
+	// selects are read out of the image at import time. The collection's
+	// ArchiveHash covers the container file(s) exactly as received.
+	SourceTypeDiskImage = "disk_image"
 )
 
 // Collection ingestion status values.

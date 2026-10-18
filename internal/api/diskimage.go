@@ -1,0 +1,645 @@
+package api
+
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+
+	"github.com/google/uuid"
+
+	"tracefall/internal/image"
+	"tracefall/internal/ingest"
+	"tracefall/internal/model"
+	"tracefall/internal/ntfsvol"
+	"tracefall/internal/parsers"
+	"tracefall/internal/partition"
+	"tracefall/internal/report"
+)
+
+// Disk images (roadmap item 3).
+//
+//	container      internal/image      raw/dd (split sets too), E01/EWF
+//	partitions     internal/partition  MBR + extended, GPT (backup fallback)
+//	file system    internal/ntfsvol    NTFS, read directly from bytes
+//	  -> catalog   artifacts that existing parsers claim
+//	  -> import    selected artifacts are read out of the image into the
+//	               collection's evidence directory
+//	  -> ingest.ParseFile, detect, correlate: unmodified
+//
+// This mirrors the AD1 path on purpose: discovery is cheap and writes
+// nothing but a catalog, extraction happens per selected file at import,
+// and the parsers cannot tell the evidence came from an image.
+//
+// # What is cataloged
+//
+// Only files a registered parser claims by path (and the $UsnJrnl:$J
+// stream). Cataloging every file of a 500 GB disk would write a million
+// rows nobody can act on; the per-volume statistics in the image report
+// say how many files were not cataloged, so nothing is hidden. Deleted
+// MFT entries are counted but not cataloged.
+//
+// # Path naming
+//
+// A file's catalog path is "volN/<path inside the volume>", N being the
+// partition's number in its table. The prefix keeps volumes apart and
+// stays out of the way of the parsers' path rules (they key on names such
+// as "$MFT", "$Extend/$UsnJrnl" and "Windows/Prefetch").
+
+// ErrInvalidDiskImage means the image cannot be read as a disk image.
+var ErrInvalidDiskImage = errors.New("the disk image is invalid or cannot be read")
+
+const usnStream = "$J"
+
+type diskPartitionReport struct {
+	Index       int    `json:"index"`
+	TypeID      string `json:"type_id"`
+	TypeName    string `json:"type_name"`
+	Name        string `json:"name,omitempty"`
+	StartLBA    uint64 `json:"start_lba"`
+	SectorCount uint64 `json:"sector_count"`
+	SizeBytes   int64  `json:"size_bytes"`
+	FS          string `json:"fs"`
+}
+
+type diskVolumeReport struct {
+	Prefix         string `json:"prefix"`
+	Partition      int    `json:"partition"`
+	Label          string `json:"label,omitempty"`
+	Version        string `json:"ntfs_version,omitempty"`
+	Serial         string `json:"serial"`
+	ClusterSize    int    `json:"cluster_size"`
+	MFTRecords     int64  `json:"mft_records"`
+	FilesInUse     int    `json:"files_in_use"`
+	Deleted        int    `json:"deleted_entries"`
+	CorruptRecords int    `json:"corrupt_records"`
+	Cataloged      int    `json:"cataloged"`
+	NotCataloged   int    `json:"not_cataloged"`
+}
+
+// diskImageReport is written next to the collection at discovery.
+type diskImageReport struct {
+	Format         string                `json:"format"`
+	Segments       int                   `json:"segments"`
+	SizeBytes      int64                 `json:"size_bytes"`
+	SectorSize     int                   `json:"sector_size"`
+	Acquisition    map[string]string     `json:"acquisition,omitempty"`
+	StoredMD5      string                `json:"stored_md5,omitempty"`
+	StoredSHA1     string                `json:"stored_sha1,omitempty"`
+	ComputedMD5    string                `json:"computed_md5"`
+	ComputedSHA1   string                `json:"computed_sha1"`
+	ComputedSHA256 string                `json:"computed_sha256"`
+	MD5Match       *bool                 `json:"md5_match,omitempty"`
+	SHA1Match      *bool                 `json:"sha1_match,omitempty"`
+	Partitioning   string                `json:"partitioning"`
+	DiskGUID       string                `json:"disk_guid,omitempty"`
+	Partitions     []diskPartitionReport `json:"partitions"`
+	Volumes        []diskVolumeReport    `json:"volumes"`
+	Notes          []string              `json:"notes,omitempty"`
+}
+
+// verificationSummary is one sentence for the audit trail.
+func (r diskImageReport) verificationSummary() string {
+	switch {
+	case r.MD5Match != nil && r.SHA1Match != nil && *r.MD5Match && *r.SHA1Match:
+		return "acquisition MD5 and SHA-1 verified"
+	case r.MD5Match != nil && *r.MD5Match && r.SHA1Match == nil:
+		return "acquisition MD5 verified"
+	case (r.MD5Match != nil && !*r.MD5Match) || (r.SHA1Match != nil && !*r.SHA1Match):
+		return "acquisition hash MISMATCH: the image differs from what was acquired"
+	}
+	return "no acquisition hash stored in the container, so none could be verified"
+}
+
+// sniffDiskImage reports whether a regular file is a disk image Tracefall
+// reads: an EWF container, or a raw disk/volume with a partition table or
+// an NTFS boot sector. It looks at the contents only.
+func sniffDiskImage(path string) bool {
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil || st.IsDir() || st.Size() < 512 {
+		return false
+	}
+	var head [8]byte
+	if _, err := f.ReadAt(head[:], 0); err != nil {
+		return false
+	}
+	if string(head[:]) == "EVF\x09\x0d\x0a\xff\x00" {
+		return true
+	}
+	if string(head[:4]) == "PK\x03\x04" || string(head[:4]) == "PK\x05\x06" {
+		return false // an archive that happens to have 55 AA in its tail
+	}
+	tb, err := partition.Read(f, st.Size(), 512)
+	return err == nil && len(tb.Partitions) > 0
+}
+
+func (s *Service) discoverDiskImageFromPath(caseID, path string) (DiscoverResult, error) {
+	segs, err := image.FindSegments(path)
+	if err != nil {
+		return DiscoverResult{}, fmt.Errorf("%w: locating segments: %v", ErrInvalidDiskImage, err)
+	}
+	hash, integrity, err := hashAD1Segments(segs) // ordered concatenation of the container files
+	if err != nil {
+		return DiscoverResult{}, fmt.Errorf("fingerprinting disk image: %w", err)
+	}
+	if err := s.checkDuplicateEvidence(caseID, hash); err != nil {
+		return DiscoverResult{}, err
+	}
+	collectionID := uuid.NewString()
+	collection := model.Collection{
+		ID: collectionID, CaseID: caseID, CreatedAt: time.Now().UTC(),
+		SourceType: model.SourceTypeDiskImage, ArchiveHash: hash, IntegritySHA512: integrity,
+		OriginalFilename:  path, // reopened at import time; never modified, never copied
+		EvidenceDirectory: s.files.EvidenceDir(caseID, collectionID),
+		IngestionStatus:   model.CollectionStatusPending,
+	}
+	if err := s.files.EnsureCollectionDir(caseID, collectionID); err != nil {
+		return DiscoverResult{}, fmt.Errorf("preparing collection storage: %w", err)
+	}
+	ok := false
+	defer func() {
+		if !ok {
+			_ = s.files.RemoveCollectionDir(caseID, collectionID)
+		}
+	}()
+	res, rep, err := s.catalogDiskImage(caseID, collection, segs)
+	if err != nil {
+		return DiscoverResult{}, err
+	}
+	ok = true
+	s.audit(caseID, model.AuditEvidenceDiscovered, model.TargetCollection, collectionID,
+		fmt.Sprintf("disk image discovered from local path %q: %s, %d file(s) cataloged, %d supported; %s",
+			path, strings.ToUpper(rep.Format), res.DiscoveredCount, res.SupportedCount, rep.verificationSummary()))
+	return res, nil
+}
+
+func (s *Service) discoverDiskImageUpload(caseID, stagingPath string, stagingClaimed *bool, uploadSize int64, archiveHash, integrity, filename string) (DiscoverResult, error) {
+	collectionID := uuid.NewString()
+	if filename == "" {
+		filename = "Disk image"
+	}
+	collection := model.Collection{
+		ID: collectionID, CaseID: caseID, CreatedAt: time.Now().UTC(),
+		SourceType: model.SourceTypeDiskImage, ArchiveHash: archiveHash, IntegritySHA512: integrity,
+		OriginalFilename:  filename, // display only; the stored copy is found by id, never by this name
+		EvidenceDirectory: s.files.EvidenceDir(caseID, collectionID),
+		IngestionStatus:   model.CollectionStatusPending,
+	}
+	if err := s.files.EnsureCollectionDir(caseID, collectionID); err != nil {
+		return DiscoverResult{}, fmt.Errorf("preparing collection storage: %w", err)
+	}
+	ok := false
+	defer func() {
+		if !ok {
+			_ = s.files.RemoveCollectionDir(caseID, collectionID)
+		}
+	}()
+	dest := s.files.DiskImagePath(caseID, collectionID)
+	if err := os.Rename(stagingPath, dest); err != nil {
+		return DiscoverResult{}, fmt.Errorf("finalizing uploaded disk image: %w", err)
+	}
+	*stagingClaimed = true
+	res, rep, err := s.catalogDiskImage(caseID, collection, []string{dest})
+	if err != nil {
+		return DiscoverResult{}, err
+	}
+	res.UploadSizeBytes = uploadSize
+	ok = true
+	s.audit(caseID, model.AuditEvidenceDiscovered, model.TargetCollection, collectionID,
+		fmt.Sprintf("disk image discovered from upload: %s, %d file(s) cataloged, %d supported; %s",
+			strings.ToUpper(rep.Format), res.DiscoveredCount, res.SupportedCount, rep.verificationSummary()))
+	return res, nil
+}
+
+// diskImageSegmentPaths re-resolves a collection's container file(s).
+func (s *Service) diskImageSegmentPaths(caseID, collectionID string) ([]string, error) {
+	c, err := s.store.GetCollection(collectionID)
+	if err != nil || c.CaseID != caseID {
+		return nil, ErrCollectionNotFound
+	}
+	if up := s.files.DiskImagePath(caseID, collectionID); fileExists(up) {
+		return []string{up}, nil
+	}
+	return image.FindSegments(c.OriginalFilename)
+}
+
+func volumePrefix(partitionIndex int) string { return fmt.Sprintf("vol%d", partitionIndex) }
+
+// openDiskImageVolumes opens the image and every NTFS volume in it.
+type openedVolume struct {
+	part partition.Partition
+	vol  *ntfsvol.Volume
+}
+
+func openDiskImage(paths []string) (image.Image, partition.Table, []openedVolume, []string, error) {
+	img, err := image.Open(paths...)
+	if err != nil {
+		return nil, partition.Table{}, nil, nil, fmt.Errorf("%w: %v", ErrInvalidDiskImage, err)
+	}
+	tb, err := partition.Read(img, img.Size(), img.Info().SectorSize)
+	if err != nil {
+		img.Close()
+		return nil, partition.Table{}, nil, nil, fmt.Errorf("%w: %v", ErrInvalidDiskImage, err)
+	}
+	var vols []openedVolume
+	var notes []string
+	for _, w := range tb.Warnings {
+		notes = append(notes, "partition table: "+w)
+	}
+	for _, p := range tb.Partitions {
+		switch p.FS {
+		case "ntfs":
+			v, err := ntfsvol.Open(p.Reader(img), p.SizeBytes)
+			if err != nil {
+				notes = append(notes, fmt.Sprintf("partition %d: the NTFS volume could not be opened (%v)", p.Index, err))
+				continue
+			}
+			vols = append(vols, openedVolume{part: p, vol: v})
+		case "bitlocker":
+			notes = append(notes, fmt.Sprintf("partition %d is BitLocker-encrypted and cannot be read without its key: its contents are NOT part of this analysis", p.Index))
+		default:
+			notes = append(notes, fmt.Sprintf("partition %d (%s): file system %q is not read by Tracefall, so its contents are NOT part of this analysis", p.Index, p.TypeName, p.FS))
+		}
+	}
+	return img, tb, vols, notes, nil
+}
+
+// diskCandidate says whether a file in a volume is worth cataloging, and
+// under what name and stream.
+func diskCandidate(f ntfsvol.File, registry []parsers.ArtifactParser) (relPath, stream string, size int64, ok bool) {
+	if f.IsDir || !f.InUse || f.Orphan {
+		return "", "", 0, false
+	}
+	rel := strings.TrimPrefix(f.Path, "/")
+	// $UsnJrnl keeps its journal in the named stream $J.
+	if strings.EqualFold(rel, "$Extend/$UsnJrnl") {
+		for _, st := range f.Streams {
+			if st.Name == usnStream && st.Size > 0 {
+				return rel + "/" + usnStream, usnStream, st.Size, true
+			}
+		}
+		return "", "", 0, false
+	}
+	if ingest.MatchParser(rel, nil, registry) == nil {
+		return "", "", 0, false
+	}
+	return rel, "", f.Size, true
+}
+
+// catalogDiskImage opens the image, verifies it against the hashes its
+// container recorded, reads its partitions, and catalogs the artifacts
+// inside every NTFS volume. Nothing is written to the database until the
+// catalog is complete.
+func (s *Service) catalogDiskImage(caseID string, collection model.Collection, segs []string) (DiscoverResult, diskImageReport, error) {
+	img, tb, vols, notes, err := openDiskImage(segs)
+	if err != nil {
+		return DiscoverResult{}, diskImageReport{}, err
+	}
+	defer img.Close()
+
+	ver, err := image.Verify(img, nil)
+	if err != nil {
+		return DiscoverResult{}, diskImageReport{}, fmt.Errorf("%w: the image cannot be read to the end: %v", ErrInvalidDiskImage, err)
+	}
+	info := img.Info()
+	rep := diskImageReport{
+		Format: string(info.Format), Segments: info.Segments, SizeBytes: info.Size, SectorSize: info.SectorSize,
+		Acquisition: info.Meta, StoredMD5: info.StoredMD5, StoredSHA1: info.StoredSHA1,
+		ComputedMD5: ver.MD5, ComputedSHA1: ver.SHA1, ComputedSHA256: ver.SHA256, MD5Match: ver.MD5Match, SHA1Match: ver.SHA1Match,
+		Partitioning: string(tb.Scheme), DiskGUID: tb.DiskGUID, Notes: notes,
+	}
+	if (ver.MD5Match != nil && !*ver.MD5Match) || (ver.SHA1Match != nil && !*ver.SHA1Match) {
+		rep.Notes = append(rep.Notes, "the decoded image does NOT match the hash recorded when it was acquired: it was altered or damaged after acquisition")
+	}
+	for _, p := range tb.Partitions {
+		rep.Partitions = append(rep.Partitions, diskPartitionReport{
+			Index: p.Index, TypeID: p.TypeID, TypeName: p.TypeName, Name: p.Name, StartLBA: p.StartLBA,
+			SectorCount: p.SectorCount, SizeBytes: p.SizeBytes, FS: p.FS,
+		})
+	}
+
+	registry := ingest.Registry()
+	now := time.Now().UTC()
+	sourceFiles := make([]model.SourceFile, 0, 64)
+	var supported, unsupported int
+	for _, ov := range vols {
+		prefix := volumePrefix(ov.part.Index)
+		vr := diskVolumeReport{
+			Prefix: prefix, Partition: ov.part.Index, Label: ov.vol.Info().Label, Version: ov.vol.Info().Version,
+			Serial: fmt.Sprintf("%016X", ov.vol.Info().Serial), ClusterSize: ov.vol.Info().ClusterSize, MFTRecords: ov.vol.Info().MFTRecords,
+		}
+		seen := map[string]bool{}
+		stats, err := ov.vol.Walk(func(f ntfsvol.File) error {
+			if f.InUse && !f.IsDir {
+				vr.FilesInUse++
+			}
+			rel, stream, size, ok := diskCandidate(f, registry)
+			if !ok {
+				return nil
+			}
+			full := prefix + "/" + rel
+			if seen[full] {
+				return nil
+			}
+			seen[full] = true
+			// Confirm by content, as the other catalogs do, so a text file
+			// that merely carries a hive's name is not claimed.
+			var header []byte
+			if dr, err := ov.vol.OpenStream(f.Record, stream); err == nil {
+				buf := make([]byte, parsers.SniffLength)
+				n, _ := dr.ReadAt(buf, 0)
+				header = buf[:n]
+			}
+			var artifactType, parserName string
+			supportedFile := false
+			if p := ingest.MatchParser(rel, header, registry); p != nil {
+				artifactType, parserName, supportedFile = p.ArtifactType(), p.Name(), true
+			} else {
+				artifactType = ingest.RecognizeUnparsed(rel, header)
+			}
+			name := f.Name
+			if stream != "" {
+				name = stream
+			}
+			sf := model.SourceFile{
+				ID: uuid.NewString(), CaseID: caseID, CollectionID: collection.ID,
+				OriginalFilename: name, Path: full, ArtifactType: artifactType, Parser: parserName,
+				Supported: supportedFile, SizeBytes: size, DiscoveredAt: now,
+			}
+			if supportedFile {
+				sf.ImportStatus = model.SourceFileDiscovered
+				supported++
+			} else {
+				sf.ImportStatus = model.SourceFileUnsupported
+				unsupported++
+			}
+			sourceFiles = append(sourceFiles, sf)
+			vr.Cataloged++
+			return nil
+		})
+		if err != nil {
+			return DiscoverResult{}, diskImageReport{}, fmt.Errorf("%w: reading the file system of partition %d: %v", ErrInvalidDiskImage, ov.part.Index, err)
+		}
+		vr.Deleted, vr.CorruptRecords = stats.Deleted, stats.CorruptCount
+		vr.NotCataloged = vr.FilesInUse - vr.Cataloged
+		if stats.CorruptCount > 0 {
+			rep.Notes = append(rep.Notes, fmt.Sprintf("partition %d: %d MFT record(s) are damaged and could not be read; files described only by them are missing", ov.part.Index, stats.CorruptCount))
+		}
+		rep.Volumes = append(rep.Volumes, vr)
+	}
+
+	if len(sourceFiles) == 0 {
+		return DiscoverResult{}, diskImageReport{}, fmt.Errorf("%w: the image holds no file Tracefall has a parser for (%s)", ErrNoEvidenceFound, strings.Join(rep.Notes, "; "))
+	}
+
+	raw, _ := json.MarshalIndent(rep, "", " ")
+	if err := os.WriteFile(s.files.DiskImageReportPath(caseID, collection.ID), raw, 0o644); err != nil {
+		return DiscoverResult{}, diskImageReport{}, fmt.Errorf("recording the image report: %w", err)
+	}
+
+	collection.IngestionStatus = model.CollectionStatusPending
+	collection.FileCount = len(sourceFiles)
+	collection.SupportedFileCount = supported
+	collection.UnsupportedFileCount = unsupported
+	full, err := s.commitDiscovery(collection, sourceFiles)
+	if err != nil {
+		return DiscoverResult{}, diskImageReport{}, err
+	}
+	triaged := triageAll(sourceFiles)
+	return DiscoverResult{
+		Collection: full, SourceFiles: firstEvidencePage(triaged), Coverage: computeCoverage(triaged),
+		SourceFilesTotal: len(triaged), SourceFilesPageSize: defaultEvidencePageSize,
+		DiscoveredCount: len(sourceFiles), SupportedCount: supported, UnsupportedCount: unsupported,
+	}, rep, nil
+}
+
+// loadDiskImageReport reads a collection's image report, if it has one.
+func (s *Service) loadDiskImageReport(caseID, collectionID string) (diskImageReport, bool) {
+	b, err := os.ReadFile(s.files.DiskImageReportPath(caseID, collectionID))
+	if err != nil {
+		return diskImageReport{}, false
+	}
+	var r diskImageReport
+	if json.Unmarshal(b, &r) != nil {
+		return diskImageReport{}, false
+	}
+	return r, true
+}
+
+// ---- extraction
+
+type diskLocator struct {
+	vol    *ntfsvol.Volume
+	record uint64
+	stream string
+}
+
+// diskExtractor reads selected artifacts out of an image. It is opened
+// once per import and indexes only the cataloged candidates (a few
+// hundred entries, not the whole disk).
+type diskExtractor struct {
+	svc          *Service
+	caseID       string
+	collectionID string
+	img          image.Image
+	byPath       map[string]diskLocator
+}
+
+func (s *Service) newDiskExtractor(caseID, collectionID string) (*diskExtractor, error) {
+	segs, err := s.diskImageSegmentPaths(caseID, collectionID)
+	if err != nil {
+		return nil, err
+	}
+	img, _, vols, _, err := openDiskImage(segs)
+	if err != nil {
+		return nil, err
+	}
+	x := &diskExtractor{svc: s, caseID: caseID, collectionID: collectionID, img: img, byPath: map[string]diskLocator{}}
+	registry := ingest.Registry()
+	for _, ov := range vols {
+		prefix := volumePrefix(ov.part.Index)
+		ov := ov
+		if _, err := ov.vol.Walk(func(f ntfsvol.File) error {
+			if rel, stream, _, ok := diskCandidate(f, registry); ok {
+				key := prefix + "/" + rel
+				if _, dup := x.byPath[key]; !dup {
+					x.byPath[key] = diskLocator{vol: ov.vol, record: f.Record, stream: stream}
+				}
+			}
+			return nil
+		}); err != nil {
+			img.Close()
+			return nil, fmt.Errorf("%w: %v", ErrInvalidDiskImage, err)
+		}
+	}
+	return x, nil
+}
+
+func (x *diskExtractor) Close() error {
+	if x == nil || x.img == nil {
+		return nil
+	}
+	return x.img.Close()
+}
+
+// extract writes one cataloged file's bytes under the collection's
+// evidence directory and records Tracefall's own SHA-256 of them.
+func (x *diskExtractor) extract(sf model.SourceFile) error {
+	loc, ok := x.byPath[sf.Path]
+	if !ok {
+		return fmt.Errorf("%w: %q is no longer found in the disk image", ntfsvol.ErrNotFound, sf.Path)
+	}
+	dr, err := loc.vol.OpenStream(loc.record, loc.stream)
+	if err != nil {
+		return err
+	}
+	root, err := filepath.Abs(x.svc.files.EvidenceDir(x.caseID, x.collectionID))
+	if err != nil {
+		return fmt.Errorf("resolving evidence directory: %w", err)
+	}
+	dest := filepath.Join(root, filepath.FromSlash(sf.Path))
+	if rel, relErr := filepath.Rel(root, dest); relErr != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("%w: entry path %q would resolve outside the extraction directory", ntfsvol.ErrCorrupt, sf.Path)
+	}
+	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+		return fmt.Errorf("creating destination directory: %w", err)
+	}
+	out, err := os.OpenFile(dest, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+	if err != nil {
+		return fmt.Errorf("creating extracted file: %w", err)
+	}
+	defer out.Close()
+
+	// The hash covers the whole LOGICAL stream, holes included, which is
+	// what the file contains. Only allocated ranges are written, so a
+	// sparse $UsnJrnl:$J does not become gigabytes of zeros on disk.
+	h := sha256.New()
+	buf := make([]byte, 1<<20)
+	ranges := dr.AllocatedRanges()
+	var pos int64
+	zeros := make([]byte, 1<<20)
+	hashZeros := func(n int64) {
+		for n > 0 {
+			k := int64(len(zeros))
+			if n < k {
+				k = n
+			}
+			h.Write(zeros[:k])
+			n -= k
+		}
+	}
+	for _, r := range ranges {
+		if r[0] > pos {
+			hashZeros(r[0] - pos)
+		}
+		for off := r[0]; off < r[1]; {
+			n := int64(len(buf))
+			if r[1]-off < n {
+				n = r[1] - off
+			}
+			got, rerr := dr.ReadAt(buf[:n], off)
+			if int64(got) < n && rerr != nil && !errors.Is(rerr, io.EOF) {
+				return rerr
+			}
+			if int64(got) == 0 {
+				return fmt.Errorf("%w: short read at offset %d of %q", ntfsvol.ErrCorrupt, off, sf.Path)
+			}
+			h.Write(buf[:got])
+			if _, werr := out.WriteAt(buf[:got], off); werr != nil {
+				return werr
+			}
+			off += int64(got)
+		}
+		pos = r[1]
+	}
+	if dr.Size() > pos {
+		hashZeros(dr.Size() - pos)
+	}
+	if err := out.Truncate(dr.Size()); err != nil {
+		return err
+	}
+	if err := x.svc.store.SetSourceFileSHA256(sf.ID, hex.EncodeToString(h.Sum(nil))); err != nil {
+		return fmt.Errorf("recording extracted file hash: %w", err)
+	}
+	return nil
+}
+
+// extractDiskImageEntry is the one-file convenience used where a single
+// artifact is needed outside an import.
+func (s *Service) extractDiskImageEntry(caseID, collectionID string, sf model.SourceFile) error {
+	x, err := s.newDiskExtractor(caseID, collectionID)
+	if err != nil {
+		return err
+	}
+	defer x.Close()
+	return x.extract(sf)
+}
+
+// attachImageInfo adds each disk-image collection's container, verification
+// and layout record to its evidence entry. The record is the one written at
+// discovery; nothing is re-read from the image here.
+func (s *Service) attachImageInfo(ev []report.Evidence, collections []model.Collection) {
+	for i, col := range collections {
+		if i >= len(ev) || col.SourceType != model.SourceTypeDiskImage {
+			continue
+		}
+		r, ok := s.loadDiskImageReport(col.CaseID, col.ID)
+		if !ok {
+			ev[i].Image = &report.ImageInfo{Verification: "The image record for this collection is missing, so its acquisition details cannot be shown."}
+			continue
+		}
+		info := &report.ImageInfo{
+			Format: strings.ToUpper(r.Format), Segments: r.Segments, Size: humanBytes(r.SizeBytes),
+			StoredMD5: r.StoredMD5, StoredSHA1: r.StoredSHA1, ComputedMD5: r.ComputedMD5, ComputedSHA1: r.ComputedSHA1,
+			Verification: r.verificationSummary(), Partitioning: strings.ToUpper(r.Partitioning), Notes: r.Notes,
+		}
+		if r.DiskGUID != "" {
+			info.Partitioning += " (disk GUID " + r.DiskGUID + ")"
+		}
+		for _, k := range []struct{ key, label string }{
+			{"case_number", "Case number"}, {"evidence_number", "Evidence number"}, {"examiner", "Examiner"},
+			{"description", "Description"}, {"notes", "Acquisition notes"}, {"acquisition_date", "Acquired"},
+			{"software_version", "Acquisition software"}, {"operating_system", "Acquisition OS"},
+		} {
+			if v := r.Acquisition[k.key]; v != "" {
+				info.Acquisition = append(info.Acquisition, report.KV{Key: k.label, Value: v})
+			}
+		}
+		for _, p := range r.Partitions {
+			info.Partitions = append(info.Partitions, report.ImagePartition{
+				Index: p.Index, Type: p.TypeName, Name: p.Name, FS: p.FS, Start: p.StartLBA, Size: humanBytes(p.SizeBytes),
+			})
+		}
+		for _, v := range r.Volumes {
+			info.Volumes = append(info.Volumes, report.ImageVolume{
+				Prefix: v.Prefix, Label: v.Label, FilesInUse: v.FilesInUse, Deleted: v.Deleted,
+				Cataloged: v.Cataloged, NotCataloged: v.NotCataloged, Corrupt: v.CorruptRecords,
+			})
+		}
+		ev[i].Image = info
+	}
+}
+
+func humanBytes(n int64) string {
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%d bytes", n)
+	}
+	div, exp := int64(unit), 0
+	for m := n / unit; m >= unit; m /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %ciB (%d bytes)", float64(n)/float64(div), "KMGTPE"[exp], n)
+}

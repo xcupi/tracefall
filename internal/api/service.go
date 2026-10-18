@@ -173,6 +173,9 @@ type Service struct {
 	// deletions tracks case deletions in progress, in memory only. See
 	// deleteprogress.go for why it must not be backed by the database.
 	deletions *deletionTracker
+	// pipe runs persisted pipeline jobs. Shared by every request-scoped
+	// copy of the Service, which is why it is a pointer.
+	pipe *pipelineManager
 	// actor is the identity behind the CURRENT request, set by
 	// WithActor on a per-request copy. The shared Service always has the
 	// zero value; only request-scoped copies carry an identity.
@@ -184,7 +187,7 @@ func NewService(s *store.Store, files *casefiles.Store) *Service {
 		store: s, files: files,
 		extractLimits: archive.DefaultLimits, ad1Limits: ad1.DefaultLimits,
 		jobs: newImportJobs(), throttle: newLoginThrottle(),
-		deletions: newDeletionTracker(),
+		deletions: newDeletionTracker(), pipe: newPipelineManager(),
 	}
 }
 
@@ -611,6 +614,10 @@ func (s *Service) DiscoverEvidenceFromPath(caseID, path string) (DiscoverResult,
 			}
 			return s.discoverAD1FromPath(caseID, path)
 		}
+		// A disk image (E01/EWF or raw), recognised by its contents.
+		if sniffDiskImage(path) {
+			return s.discoverDiskImageFromPath(caseID, path)
+		}
 	}
 
 	// Check the path before fingerprinting it, so the common mistake --
@@ -691,6 +698,19 @@ func (s *Service) DiscoverEvidenceFromUpload(caseID string, zipData io.Reader, f
 	if err != nil {
 		return DiscoverResult{}, err
 	}
+	return s.discoverStaged(caseID, stagingPath, uploadSize, archiveHash, integrity, filename)
+}
+
+// discoverStaged is everything DiscoverEvidenceFromUpload does once the
+// uploaded bytes are on disk and hashed: duplicate check, format
+// sniffing, extraction or AD1 cataloging, and committing the collection.
+//
+// It TAKES OWNERSHIP of stagingPath: on any failure the file is removed,
+// on success it becomes the collection's stored archive. The resumable
+// upload path relies on this being the single implementation, so a file
+// that arrives in chunks is treated exactly like one that arrives in a
+// single request.
+func (s *Service) discoverStaged(caseID, stagingPath string, uploadSize int64, archiveHash, integrity, filename string) (DiscoverResult, error) {
 	stagingClaimed := false
 	defer func() {
 		if !stagingClaimed {
@@ -714,6 +734,9 @@ func (s *Service) DiscoverEvidenceFromUpload(caseID string, zipData io.Reader, f
 			return DiscoverResult{}, fmt.Errorf("%w: %v", ErrInvalidAD1, ad1.ErrEncrypted)
 		}
 		return s.discoverAD1Upload(caseID, stagingPath, &stagingClaimed, uploadSize, archiveHash, integrity, filename)
+	}
+	if sniffDiskImage(stagingPath) {
+		return s.discoverDiskImageUpload(caseID, stagingPath, &stagingClaimed, uploadSize, archiveHash, integrity, filename)
 	}
 
 	collectionID := uuid.NewString()
@@ -1192,6 +1215,17 @@ func (s *Service) importEvidence(caseID, collectionID string, sourceFileIDs []st
 		// error returns below, so a stopped import leaks no file handle.
 		defer extractor.Close()
 	}
+	// A disk image works the same way: opened once, indexed by path,
+	// each selected artifact read out of the image just before it is parsed.
+	var diskExtractor *diskExtractor
+	if collection.SourceType == model.SourceTypeDiskImage {
+		var err error
+		diskExtractor, err = s.newDiskExtractor(caseID, collectionID)
+		if err != nil {
+			return ImportResult{}, err
+		}
+		defer diskExtractor.Close()
+	}
 	// cancelled tracks whether the analyst stopped this import, and
 	// unprocessed counts what was consequently never reached. Both are
 	// reported; neither is inferred.
@@ -1236,15 +1270,22 @@ func (s *Service) importEvidence(caseID, collectionID string, sourceFileIDs []st
 			continue
 		}
 
-		if collection.SourceType == model.SourceTypeAD1 {
-			// AD1 entries aren't extracted during discovery (see
-			// catalogAD1) -- materialize exactly this one selected
-			// entry's bytes under EvidenceDirectory now, immediately
+		if collection.SourceType == model.SourceTypeAD1 || collection.SourceType == model.SourceTypeDiskImage {
+			// AD1 entries and disk-image files aren't extracted during
+			// discovery (see catalogAD1, catalogDiskImage) -- materialize
+			// exactly this one selected entry's bytes under
+			// EvidenceDirectory now, immediately
 			// before ParseFile reads them below exactly as it does for
 			// every other collection type. This also computes and
 			// records Tracefall's own SHA-256 for the file, which isn't
 			// known until this point (see extractAD1Entry's doc comment).
-			if err := extractor.extract(sf); err != nil {
+			var err error
+			if collection.SourceType == model.SourceTypeDiskImage {
+				err = diskExtractor.extract(sf)
+			} else {
+				err = extractor.extract(sf)
+			}
+			if err != nil {
 				_ = s.store.MarkSourceFileFailed(id)
 				errs = append(errs, fmt.Sprintf("%s: %v", sf.Path, err))
 				failures = append(failures, parseFailure(sf, ParseStageExtract, err))
@@ -2023,7 +2064,7 @@ func (s *Service) DeleteSourceFiles(caseID string, sourceFileIDs []string) (Dele
 		touchedCollections[sf.CollectionID] = true
 
 		if collection, cerr := s.store.GetCollection(sf.CollectionID); cerr == nil &&
-			(collection.SourceType == model.SourceTypeUpload || collection.SourceType == model.SourceTypeAD1) {
+			(collection.SourceType == model.SourceTypeUpload || collection.SourceType == model.SourceTypeAD1 || collection.SourceType == model.SourceTypeDiskImage) {
 			// Only for evidence Tracefall itself extracted and owns. A
 			// local-path (non-AD1) collection's EvidenceDirectory is
 			// wherever the investigator's own evidence already lives on

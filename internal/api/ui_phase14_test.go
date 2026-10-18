@@ -1171,3 +1171,68 @@ func TestUI_RecordsAreShownForFilesWithNoEvents(t *testing.T) {
 		t.Error("the source-file provenance panel does not render the records")
 	}
 }
+
+func TestUI_AutomaticUploadUsesTheResumableServerPipeline(t *testing.T) {
+	src := appJS(t)
+	if !strings.Contains(string(src), `id="upload-auto-analyze" checked`) {
+		t.Error("automatic import and analysis must be enabled by default for uploads")
+	}
+	header := functionBody(t, src, "function wireEvidenceHeader(")
+	for _, want := range []string{"uploadResumable(", "runServerPipeline(", "resumePipelineIfActive(", "apiUpload("} {
+		if !strings.Contains(header, want) {
+			t.Errorf("the upload flow does not use %s", want)
+		}
+	}
+	if !strings.Contains(header, "upload-auto-analyze") {
+		t.Error("the upload flow ignores the automatic-analysis checkbox: the manual selection flow must stay available")
+	}
+}
+
+func TestUI_ResumableUploadSendsOffsetsInChunksAndSurvivesAFailure(t *testing.T) {
+	src := appJS(t)
+	up := functionBody(t, src, "async function uploadResumable(")
+	for _, want := range []string{
+		"/uploads", "Upload-Offset", ".slice(", "/complete", "received", "409",
+		"localStorage", "retry", "X-Tracefall-CSRF", "onProgress",
+	} {
+		if !strings.Contains(up, want) {
+			t.Errorf("resumable upload is missing %q", want)
+		}
+	}
+	for _, banned := range []string{".arrayBuffer()", "FileReader", "readAsArrayBuffer"} {
+		if strings.Contains(up, banned) {
+			t.Errorf("resumable upload reads the whole file into memory with %s; an image is tens of GB", banned)
+		}
+	}
+	if !strings.Contains(up, "UPLOAD_CHUNK_BYTES") {
+		t.Error("chunk size is not a named constant")
+	}
+}
+
+func TestUI_ServerPipelinePanelPollsCancelsAndReportsEveryOutcome(t *testing.T) {
+	src := appJS(t)
+	// The panel is the polling loop plus the two renderers it calls.
+	run := functionBody(t, src, "async function runServerPipeline(") +
+		functionBody(t, src, "function renderPipelinePanel(") +
+		functionBody(t, src, "function renderPipelineOutcome(")
+	for _, want := range []string{
+		"/pipeline/jobs", "/cancel", "succeeded", "failed", "cancelled",
+		"files_imported", "findings", "correlations", "localStorage", "import-continue-btn",
+	} {
+		if !strings.Contains(run, want) {
+			t.Errorf("pipeline panel does not handle %q", want)
+		}
+	}
+	if strings.Contains(run, ".innerHTML = job.error") || strings.Contains(run, "${job.error}") {
+		t.Error("a server error string is inserted into HTML unescaped")
+	}
+	if !strings.Contains(run, "esc(") {
+		t.Error("pipeline panel never escapes server text")
+	}
+	resume := functionBody(t, src, "async function resumePipelineIfActive(")
+	for _, want := range []string{"/pipeline/jobs", "queued", "running", "runServerPipeline("} {
+		if !strings.Contains(resume, want) {
+			t.Errorf("resume-on-load does not handle %q", want)
+		}
+	}
+}

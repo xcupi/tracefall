@@ -5,6 +5,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"log/slog"
@@ -28,6 +29,12 @@ import (
 )
 
 func main() {
+	// Offline subcommand: checking a report bundle needs no database,
+	// no server and no configuration, so it runs before any of them.
+	if len(os.Args) > 1 && os.Args[1] == "verify-report" {
+		os.Exit(verifyReportCmd(os.Args[2:], os.Stdout))
+	}
+
 	cfg, err := config.Load(os.Args[1:], os.Getenv)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "tracefall:", err)
@@ -60,6 +67,19 @@ func main() {
 			os.Exit(1)
 		}
 	}
+
+	// Server-side pipeline: work a previous process left running is put
+	// back in the queue (or failed if it keeps killing the server), then
+	// the single worker starts. Nothing here is graceful-shutdown
+	// dependent: a job cut off mid-stage resumes from its checkpoint on
+	// the next start.
+	if requeued, failed, err := svc.RecoverPipeline(); err != nil {
+		logger.Error("failed to recover pipeline jobs", "error", err)
+	} else if requeued+failed > 0 {
+		logger.Warn("recovered interrupted pipeline jobs", "requeued", requeued, "failed", failed)
+	}
+	stopPipeline := svc.StartPipeline(context.Background())
+	defer stopPipeline()
 
 	authCfg := api.AuthConfig{
 		Enabled:       cfg.AuthEnabled,

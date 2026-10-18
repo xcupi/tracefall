@@ -1,12 +1,28 @@
 # Evidence triage
 
-Adding evidence to a case has always been four steps:
+A browser upload can run the complete default workflow automatically:
+
+```
+Upload → Discover → Import all supported files → Analyze → Review results
+```
+
+Automatic import is enabled by default and can be disabled before upload to
+keep the manual review workflow. Unsupported files are never imported;
+the discovery coverage summary and per-file reasons remain visible in
+either mode. The automatic workflow uses the same stable file IDs,
+background import job, progress/cancellation handling, and analysis engine
+as the manual path. Analysis runs only after a non-empty import selection
+finishes without cancellation. Parse failures are reported separately
+from unsupported evidence.
+
+The manual workflow remains:
 
 ```
 Discover → Select → Import → Analyze
 ```
 
-Phase 9A did not change that. It changed what an investigator can *see*
+It is useful when an investigator wants to review and choose specific
+files before parsing. Phase 9A improved what an investigator can see
 during **Select**, and what they are told during **Import**. Phase 10A
 then added upload progress, three new parsers, and honest handling of
 artifacts that record no timestamp. Phase 10B made **Select** scale:

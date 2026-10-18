@@ -127,26 +127,18 @@ not just the most recent upload.
 2. Fill in **New case** (e.g. name "WKSTN-042 Phishing Triage") and click
    **Create case**.
 3. Click **+ Add Evidence**, choose a ZIP archive of a KAPE triage
-   collection, and click **Upload KAPE Package**. Tracefall safely
-   extracts it, discovers which files are supported artifacts
-   (EvtxECmd/PECmd/RECmd CSV, Scheduled Task XML), and parses them —
-   the resulting counts (files discovered, supported/unsupported
-   artifacts, events parsed, and how many were new vs. already known
-   from another collection) are shown immediately. Click **Continue to
-   case dashboard**.
-4. Click **Run analysis**.
-5. Explore the **Timeline**, **Findings**, **ATT&CK**, **Activity
-   Chains**, and **Evidence** tabs. Click any finding to expand its
-   supporting events, then click **raw** on an event to see the exact
-   source CSV/XML row it was normalized from — and which collection(s)
-   it was observed in.
-6. Click **+ Add Evidence** again to add a second collection (e.g. a
-   follow-up triage) to the same case, then click **Re-run analysis**.
-   The dashboard now reflects both collections together: a single
-   unified timeline, case-level findings, and correlations that can span
-   evidence from either collection when the deterministic rules support
-   it (e.g. an execution event from collection #1 and a persistence
-   event collection #2 later found).
+   collection or a single AD1 forensic image, and click **Upload Evidence**.
+   By default Tracefall discovers the files, imports every supported file,
+   and runs analysis automatically; progress, parse failures, unsupported
+   files, and coverage remain visible. Turn off **Automatically import all
+   supported files and run analysis after upload** to choose files manually.
+4. Review the **Timeline**, **Findings**, **ATT&CK**, **Activity Chains**,
+   and **Evidence** tabs. Click any finding to expand its supporting events,
+   then click **raw** on an event to see the exact source record it was
+   normalized from and which collection(s) it was observed in.
+5. Click **+ Add Evidence** again to add a second collection (e.g. a
+   follow-up triage) to the same case; automatic analysis reruns across
+   both collections after import.
 
 To try this immediately without a real KAPE collection, zip up the
 bundled synthetic dataset at [testdata/synthetic_case](testdata/synthetic_case)
@@ -176,7 +168,28 @@ GET  /api/cases/{id}/findings              case-level findings list
 GET  /api/cases/{id}/findings/{fid}        finding + resolved evidence (each event labeled with its collection)
 GET  /api/cases/{id}/attack                ATT&CK technique coverage
 GET  /api/cases/{id}/correlations          process/entity/temporal/activity chains (may span collections)
+GET  /api/cases/{id}/report.html           deterministic forensic report (self-contained HTML)
+GET  /api/cases/{id}/report.zip            report + manifest.json (SHA-256) + timeline.csv + findings.csv
+GET  /api/cases/{id}/report.pdf            the report as PDF (needs headless Chrome/Chromium; 501 otherwise)
 ```
+
+Verify a downloaded bundle offline with `tracefall verify-report report.zip`.
+
+Disk images (raw/dd and E01, MBR/GPT, NTFS) are added like any other evidence; Tracefall
+finds the partitions and reads the artifacts itself. See `docs/disk-images.md` for what is
+supported, how it was validated, and its limits.
+
+Resumable upload and server-side pipeline (details in `docs/pipeline.md`):
+
+```
+POST /api/cases/{id}/uploads                          open a session {"filename","size","sha256"?}
+PUT  /api/cases/{id}/uploads/{uploadId}               append a chunk (Upload-Offset header)
+GET  /api/cases/{id}/uploads/{uploadId}               bytes received so far
+POST /api/cases/{id}/uploads/{uploadId}/complete|abort
+POST /api/cases/{id}/pipeline/jobs                    discover -> import -> analyze on the server
+GET  /api/cases/{id}/pipeline/jobs[/{jobId}]          status; POST .../cancel
+```
+See [docs/forensic-report.md](docs/forensic-report.md).
 
 Two paths changed meaning from an earlier version of this API:
 `GET/POST /cases/{id}/evidence` used to mean "source files" / "upload a

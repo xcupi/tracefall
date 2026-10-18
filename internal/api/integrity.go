@@ -84,6 +84,7 @@ type IntegrityResult struct {
 const (
 	EvidenceKindUpload    = "uploaded archive bytes"
 	EvidenceKindAD1       = "AD1 segment bytes, in order"
+	EvidenceKindDiskImage = "disk image container bytes, in order"
 	EvidenceKindDirectory = "directory content digest"
 )
 
@@ -160,6 +161,16 @@ func (s *Service) recomputeCollectionSHA512(caseID string, c model.Collection) (
 		_, sha512Hex, err := hashAD1Segments(paths)
 		return sha512Hex, err
 
+	case model.SourceTypeDiskImage:
+		// The container file(s) as received -- E01 segments or the raw
+		// file -- never the decoded disk or anything extracted from it.
+		paths, err := s.diskImageSegmentPaths(caseID, c.ID)
+		if err != nil {
+			return "", err
+		}
+		_, sha512Hex, err := hashAD1Segments(paths)
+		return sha512Hex, err
+
 	case model.SourceTypeUpload:
 		// The received bytes, still on disk exactly as uploaded. NOT the
 		// extraction directory: hashing what came out of the archive
@@ -204,6 +215,8 @@ func evidenceKindFor(sourceType string) string {
 	switch sourceType {
 	case model.SourceTypeAD1:
 		return EvidenceKindAD1
+	case model.SourceTypeDiskImage:
+		return EvidenceKindDiskImage
 	case model.SourceTypeUpload:
 		return EvidenceKindUpload
 	case model.SourceTypeLocalPath:

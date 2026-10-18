@@ -158,6 +158,18 @@ func (s *Service) ExportTimelineCSV(caseID string, w io.Writer) error {
 	if err != nil {
 		return fmt.Errorf("loading events: %w", err)
 	}
+	if err := writeTimelineCSV(events, w); err != nil {
+		return err
+	}
+	s.audit(caseID, model.AuditExport, model.TargetCase, caseID, fmt.Sprintf("Timeline exported as CSV (%d events)", len(events)))
+	return nil
+}
+
+// writeTimelineCSV is the one place the timeline CSV is produced. The
+// forensic report attaches a timeline.csv and records its hash, so the
+// file in a report bundle and the file from the export endpoint must be
+// the same bytes by construction rather than by two copies agreeing.
+func writeTimelineCSV(events []model.Event, w io.Writer) error {
 	cw := csv.NewWriter(w)
 	if err := cw.Write(timelineCSVHeader); err != nil {
 		return err
@@ -174,11 +186,7 @@ func (s *Service) ExportTimelineCSV(caseID string, w io.Writer) error {
 		}
 	}
 	cw.Flush()
-	if err := cw.Error(); err != nil {
-		return err
-	}
-	s.audit(caseID, model.AuditExport, model.TargetCase, caseID, fmt.Sprintf("Timeline exported as CSV (%d events)", len(events)))
-	return nil
+	return cw.Error()
 }
 
 var findingsCSVHeader = []string{
@@ -201,7 +209,16 @@ func (s *Service) ExportFindingsCSV(caseID string, w io.Writer) error {
 	if err != nil {
 		return fmt.Errorf("loading analyst statuses: %w", err)
 	}
+	if err := writeFindingsCSV(findings, statusIdx, w); err != nil {
+		return err
+	}
+	s.audit(caseID, model.AuditExport, model.TargetCase, caseID, fmt.Sprintf("Findings exported as CSV (%d findings)", len(findings)))
+	return nil
+}
 
+// writeFindingsCSV is the shared writer behind ExportFindingsCSV and the
+// report bundle's findings.csv. See writeTimelineCSV.
+func writeFindingsCSV(findings []model.Finding, statusIdx map[string]model.AnalystStatus, w io.Writer) error {
 	cw := csv.NewWriter(w)
 	if err := cw.Write(findingsCSVHeader); err != nil {
 		return err
@@ -221,11 +238,7 @@ func (s *Service) ExportFindingsCSV(caseID string, w io.Writer) error {
 		}
 	}
 	cw.Flush()
-	if err := cw.Error(); err != nil {
-		return err
-	}
-	s.audit(caseID, model.AuditExport, model.TargetCase, caseID, fmt.Sprintf("Findings exported as CSV (%d findings)", len(findings)))
-	return nil
+	return cw.Error()
 }
 
 func joinStrings(vals []string) string {

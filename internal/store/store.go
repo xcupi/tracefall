@@ -1415,6 +1415,10 @@ func (s *Store) DeleteCaseWithCounts(caseID string) (DeletedCaseCounts, error) {
 		// from a LIVE case does not touch runs; only deleting the case
 		// itself does.
 		`DELETE FROM analysis_runs WHERE case_id = ?`,
+		// Roadmap item 2: pipeline jobs and upload sessions are
+		// operational state about work on this case, and go with it.
+		`DELETE FROM pipeline_jobs WHERE case_id = ?`,
+		`DELETE FROM upload_sessions WHERE case_id = ?`,
 		`DELETE FROM cases WHERE id = ?`,
 	}
 	for _, stmt := range stmts {

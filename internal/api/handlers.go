@@ -105,6 +105,17 @@ func NewRouterWithAuth(svc *Service, logger *slog.Logger, maxUploadBytes int64, 
 	// The stable IDs of every importable file matching a filter -- what
 	// "select all matching" materializes its selection from.
 	mux.HandleFunc("GET /api/cases/{id}/evidence/{collectionID}/files/ids", h.evidenceFileIDs)
+
+	// Roadmap item 2: resumable uploads and the server-side pipeline.
+	mux.HandleFunc("POST /api/cases/{id}/uploads", h.createUpload)
+	mux.HandleFunc("GET /api/cases/{id}/uploads/{uploadID}", h.uploadStatus)
+	mux.HandleFunc("PUT /api/cases/{id}/uploads/{uploadID}", h.uploadChunk)
+	mux.HandleFunc("POST /api/cases/{id}/uploads/{uploadID}/complete", h.completeUpload)
+	mux.HandleFunc("POST /api/cases/{id}/uploads/{uploadID}/abort", h.abortUpload)
+	mux.HandleFunc("POST /api/cases/{id}/pipeline/jobs", h.enqueuePipelineJob)
+	mux.HandleFunc("GET /api/cases/{id}/pipeline/jobs", h.listPipelineJobs)
+	mux.HandleFunc("GET /api/cases/{id}/pipeline/jobs/{jobID}", h.getPipelineJob)
+	mux.HandleFunc("POST /api/cases/{id}/pipeline/jobs/{jobID}/cancel", h.cancelPipelineJob)
 	mux.HandleFunc("DELETE /api/cases/{id}/evidence/{sourceFileID}", h.deleteSourceFile)
 	// Collection-level deletion. Registered on a more specific pattern
 	// than the source-file route above so Go's ServeMux routes them
@@ -172,6 +183,11 @@ func NewRouterWithAuth(svc *Service, logger *slog.Logger, maxUploadBytes int64, 
 	mux.HandleFunc("GET /api/cases/{id}/export", h.exportCase)
 	mux.HandleFunc("GET /api/cases/{id}/export/timeline.csv", h.exportTimelineCSV)
 	mux.HandleFunc("GET /api/cases/{id}/export/findings.csv", h.exportFindingsCSV)
+	// The forensic report: a self-contained HTML document, a hashed
+	// bundle (report + manifest + CSV attachments), and an optional PDF.
+	mux.HandleFunc("GET /api/cases/{id}/report.html", h.reportHTML)
+	mux.HandleFunc("GET /api/cases/{id}/report.zip", h.reportBundle)
+	mux.HandleFunc("GET /api/cases/{id}/report.pdf", h.reportPDF)
 
 	mux.HandleFunc("GET /api/healthz", h.healthz)
 
@@ -830,6 +846,7 @@ func (h *handlers) fail(w http.ResponseWriter, err error) bool {
 		return false
 	}
 	var dupErr *DuplicateEvidenceError
+	var offErr *UploadOffsetError
 	var dupCaseErr *DuplicateCaseError
 	switch {
 	case errors.Is(err, ErrEvidenceLocked), errors.Is(err, ErrPriorityLocked):
@@ -867,8 +884,18 @@ func (h *handlers) fail(w http.ResponseWriter, err error) bool {
 		writeError(w, http.StatusRequestEntityTooLarge, err.Error())
 	case errors.Is(err, archive.ErrInvalidArchive), errors.Is(err, archive.ErrUnsafeEntry):
 		writeError(w, http.StatusBadRequest, err.Error())
-	case errors.Is(err, ErrUnsupportedEvidence), errors.Is(err, ErrInvalidAD1), errors.Is(err, ad1.ErrLimitExceeded):
+	case errors.Is(err, ErrUnsupportedEvidence), errors.Is(err, ErrInvalidAD1), errors.Is(err, ErrInvalidDiskImage), errors.Is(err, ad1.ErrLimitExceeded):
 		writeError(w, http.StatusBadRequest, err.Error())
+	case errors.Is(err, store.ErrJobNotFound), errors.Is(err, store.ErrUploadNotFound):
+		writeError(w, http.StatusNotFound, err.Error())
+	case errors.Is(err, ErrUploadInvalid):
+		writeError(w, http.StatusBadRequest, err.Error())
+	case errors.Is(err, ErrUploadIncomplete), errors.Is(err, ErrUploadNotReady), errors.Is(err, store.ErrUploadClosed):
+		writeError(w, http.StatusConflict, err.Error())
+	case errors.Is(err, ErrUploadHashMismatch):
+		writeError(w, http.StatusUnprocessableEntity, err.Error())
+	case errors.As(err, &offErr):
+		writeJSON(w, http.StatusConflict, map[string]any{"error": offErr.Error(), "received": offErr.Received})
 	case errors.Is(err, ErrEvidencePathNotFound), errors.Is(err, ErrNoEvidenceFound):
 		// Investigator-actionable: the path is wrong, or the source is
 		// empty. Both used to fall through to the default branch below

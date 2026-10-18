@@ -42,6 +42,24 @@ func (s *Store) CaseDir(caseID string) string {
 	return filepath.Join(s.root, "cases", caseID)
 }
 
+// UploadsDir returns the directory holding a case's in-progress resumable
+// uploads.
+func (s *Store) UploadsDir(caseID string) string {
+	return filepath.Join(s.CaseDir(caseID), "uploads")
+}
+
+// UploadSessionPath returns where a resumable upload's bytes accumulate.
+//
+// The name is built from the session id alone, which the server generates
+// itself (a UUID), so no part of it comes from a client-supplied filename
+// and there is nothing for path traversal to act on. It lives under the
+// case directory, so deleting the case deletes it, and on the same
+// filesystem as the collection directories, so a finished upload can be
+// hard-linked into place instead of copied.
+func (s *Store) UploadSessionPath(caseID, uploadID string) string {
+	return filepath.Join(s.UploadsDir(caseID), uploadID+".part")
+}
+
 // CollectionDir returns the root directory for one collection's files.
 func (s *Store) CollectionDir(caseID, collectionID string) string {
 	return filepath.Join(s.CaseDir(caseID), "collections", collectionID)
@@ -62,6 +80,19 @@ func (s *Store) UploadPath(caseID, collectionID string) string {
 // pointed Tracefall, and are never copied (see docs/ad1-ingestion.md).
 func (s *Store) AD1Path(caseID, collectionID string) string {
 	return filepath.Join(s.CollectionDir(caseID, collectionID), "upload.ad1")
+}
+
+// DiskImagePath returns where an UPLOADED disk image is stored. A
+// local-path image is never copied; it stays where the examiner put it.
+func (s *Store) DiskImagePath(caseID, collectionID string) string {
+	return filepath.Join(s.CollectionDir(caseID, collectionID), "upload.img")
+}
+
+// DiskImageReportPath returns the JSON record of what was found in a disk
+// image at discovery: acquisition hashes and their verification, the
+// partition layout, and each volume's statistics.
+func (s *Store) DiskImageReportPath(caseID, collectionID string) string {
+	return filepath.Join(s.CollectionDir(caseID, collectionID), "diskimage.json")
 }
 
 // EvidenceDir returns where a collection's extracted evidence lives --

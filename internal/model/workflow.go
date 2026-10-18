@@ -178,6 +178,13 @@ const (
 	// of custody: one says a selection was taken in whole, the other
 	// says it was taken in part and names how much.
 	AuditEvidenceImportCancelled = "evidence_import_cancelled"
+	// AuditPipelineQueued / AuditPipelineFinished (roadmap item 2) record
+	// that a server-side ingest pipeline was requested and how it ended.
+	// They are the record of the ANALYST's request and of the system's
+	// outcome; the individual steps keep their own entries
+	// (evidence_discovered, evidence_imported, analysis_completed...).
+	AuditPipelineQueued   = "pipeline_queued"
+	AuditPipelineFinished = "pipeline_finished"
 )
 
 // ActorLocalUser is the only Actor value Tracefall currently produces --

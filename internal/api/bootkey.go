@@ -219,11 +219,17 @@ func (s *Service) materializeForRead(caseID, collectionID string, collection mod
 	if info, err := os.Stat(path); err == nil && info.Size() > 0 {
 		return path, true
 	}
-	if collection.SourceType != model.SourceTypeAD1 {
-		// Not an AD1, and not on disk: there is nothing to materialize.
-		return "", false
-	}
-	if err := s.extractAD1Entry(caseID, collectionID, sf); err != nil {
+	switch collection.SourceType {
+	case model.SourceTypeAD1:
+		if err := s.extractAD1Entry(caseID, collectionID, sf); err != nil {
+			return "", false
+		}
+	case model.SourceTypeDiskImage:
+		if err := s.extractDiskImageEntry(caseID, collectionID, sf); err != nil {
+			return "", false
+		}
+	default:
+		// Not a container, and not on disk: there is nothing to materialize.
 		return "", false
 	}
 	if info, err := os.Stat(path); err != nil || info.Size() == 0 {
