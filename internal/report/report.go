@@ -73,6 +73,21 @@ type Evidence struct {
 	// Image is set for a disk-image collection: what the container said
 	// about its own acquisition, how it checked out, and what is inside.
 	Image *ImageInfo
+	// Memory is set for a memory-image collection: how Volatility was run
+	// and what the image reported about itself.
+	Memory *MemoryInfo
+}
+
+// MemoryInfo describes a memory-image analysis.
+type MemoryInfo struct {
+	Volatility string
+	Isolation  string
+	Size       string
+	// Info is what windows.info reported, in order.
+	Info []KV
+	// Plugins is one line per plugin: what ran and whether it worked.
+	Plugins []KV
+	Notes   []string
 }
 
 // KV is an ordered label/value pair.

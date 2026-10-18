@@ -85,6 +85,7 @@ const (
 	EvidenceKindUpload    = "uploaded archive bytes"
 	EvidenceKindAD1       = "AD1 segment bytes, in order"
 	EvidenceKindDiskImage = "disk image container bytes, in order"
+	EvidenceKindMemory    = "memory image bytes"
 	EvidenceKindDirectory = "directory content digest"
 )
 
@@ -161,6 +162,14 @@ func (s *Service) recomputeCollectionSHA512(caseID string, c model.Collection) (
 		_, sha512Hex, err := hashAD1Segments(paths)
 		return sha512Hex, err
 
+	case model.SourceTypeMemoryImage:
+		// The memory image exactly as received, not Volatility's output.
+		paths, err := s.memoryImageSegmentPaths(caseID, c.ID)
+		if err != nil {
+			return "", err
+		}
+		return hashFileSHA512(paths[0])
+
 	case model.SourceTypeDiskImage:
 		// The container file(s) as received -- E01 segments or the raw
 		// file -- never the decoded disk or anything extracted from it.
@@ -215,6 +224,8 @@ func evidenceKindFor(sourceType string) string {
 	switch sourceType {
 	case model.SourceTypeAD1:
 		return EvidenceKindAD1
+	case model.SourceTypeMemoryImage:
+		return EvidenceKindMemory
 	case model.SourceTypeDiskImage:
 		return EvidenceKindDiskImage
 	case model.SourceTypeUpload:

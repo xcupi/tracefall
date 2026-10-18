@@ -841,6 +841,7 @@ const SOURCE_TYPE_LABELS = {
   legacy: "Legacy",
   ad1_image: "AD1 Forensic Image",
   disk_image: "Disk Image",
+  memory_image: "Memory Image",
 };
 
 // ARTIFACT_TYPE_LABELS renders internal/model's Artifact* constants for
@@ -896,6 +897,7 @@ const ARTIFACT_TYPE_LABELS = {
   filezilla_server: "FileZilla server entry",
   image_metadata: "Image metadata (EXIF)",
   image_gps: "Image location (EXIF GPS)",
+  memory_analysis: "Memory Analysis",
 };
 
 // artifactLabel names an artifact type for display.
@@ -1024,6 +1026,13 @@ const EVENT_CATEGORIES = {
   // the timeline as something having happened on this machine.
   image_metadata_recorded: "image_metadata",
   image_gps_recorded: "image_metadata",
+  // Memory-image events. The first two are what a process or socket was
+  // doing; a malfind hit is a heuristic indicator of injected code, and a
+  // service in memory is a state, not an installation.
+  network_listener: "network",
+  memory_injection_suspect: "execution",
+  service_in_memory: "persistence",
+  memory_snapshot: "other",
 };
 const EVENT_CATEGORY_LABELS = {
   authentication: "Authentication",
@@ -4648,7 +4657,7 @@ function renderOverviewTab(content, caseId) {
         <h3>Upload evidence</h3>
         <p class="muted small">Upload a disk image (a raw/dd file or a single-file E01 with NTFS volumes; Tracefall finds the partitions and reads the artifacts inside), a ZIP archive of a KAPE triage collection, or a single AD1 forensic image (FTK Imager's logical/custom-content format, detected from the file's contents, not just its <code>.ad1</code> extension). Tracefall safely inspects it and catalogs every file inside. By default, it imports all supported files and runs analysis automatically; turn off the automatic option below if you want to review/select files manually. Unsupported files and parse failures remain clearly reported.</p>
         <div class="row">
-          <input type="file" id="upload-file" accept=".zip,.ad1,.e01,.dd,.raw,.img,.001,application/zip" />
+          <input type="file" id="upload-file" accept=".zip,.ad1,.e01,.dd,.raw,.img,.001,.vmem,.mem,.dmp,.lime,application/zip" />
           <button id="upload-btn">Upload Evidence</button>
         </div>
         <label class="small" for="upload-auto-analyze"><input type="checkbox" id="upload-auto-analyze" checked /> Automatically import all supported files and run analysis after upload</label>

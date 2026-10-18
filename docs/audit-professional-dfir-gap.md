@@ -40,6 +40,18 @@ reporting.
   reason, never as an empty success.
 
 ### 2. No memory analysis
+
+**Status: Partly done (roadmap item 4).** Volatility 3 is wrapped in a bubblewrap
+sandbox and its output normalised to events; see `docs/memory-analysis.md`.
+Validated on real authorised Reveal, Ramnit and RedLine dumps. The baseline
+found identity collisions after parsing; the scoped P0 fix now preserves all
+regions, nonempty service names and distinct socket endpoint/state tuples in
+fresh cases (42/42 selected checks pass). See `docs/validation-memory-p0.md` for
+results and old-case recovery. Broader acceptance remains blocked on detection
+and coverage gaps. `docs/validation-cyberdefenders-baseline.md` retains the original
+measurements. The historical audit bullets below describe the pre-implementation
+state, not current memory capability.
+
 - `ARCHITECTURE.md:15` lists memory forensics as out of scope.
 - `hiberfil.sys`, `memory.dmp`, `memory.raw` are only cataloged and
   hashed (`docs/evidence-triage.md:135-151`).

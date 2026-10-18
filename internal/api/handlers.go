@@ -9,6 +9,7 @@ import (
 
 	"tracefall/internal/ad1"
 	"tracefall/internal/archive"
+	"tracefall/internal/memory"
 	"tracefall/internal/model"
 	"tracefall/internal/store"
 )
@@ -886,6 +887,10 @@ func (h *handlers) fail(w http.ResponseWriter, err error) bool {
 		writeError(w, http.StatusBadRequest, err.Error())
 	case errors.Is(err, ErrUnsupportedEvidence), errors.Is(err, ErrInvalidAD1), errors.Is(err, ErrInvalidDiskImage), errors.Is(err, ad1.ErrLimitExceeded):
 		writeError(w, http.StatusBadRequest, err.Error())
+	case errors.Is(err, ErrMemoryNotConfigured):
+		writeError(w, http.StatusNotImplemented, err.Error())
+	case errors.Is(err, memory.ErrSymbols), errors.Is(err, memory.ErrUnrecognised), errors.Is(err, memory.ErrTimeout):
+		writeError(w, http.StatusUnprocessableEntity, err.Error())
 	case errors.Is(err, store.ErrJobNotFound), errors.Is(err, store.ErrUploadNotFound):
 		writeError(w, http.StatusNotFound, err.Error())
 	case errors.Is(err, ErrUploadInvalid):

@@ -12,6 +12,8 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
+	"time"
 
 	// tzdata is embedded so timezone conversion works identically on
 	// every host, including a container or a Windows machine with no
@@ -24,6 +26,7 @@ import (
 	"tracefall/internal/api"
 	"tracefall/internal/casefiles"
 	"tracefall/internal/config"
+	"tracefall/internal/memory"
 	"tracefall/internal/store"
 	"tracefall/internal/web"
 )
@@ -66,6 +69,33 @@ func main() {
 			logger.Error("failed to create the initial administrator", "error", err)
 			os.Exit(1)
 		}
+	}
+
+	// Memory analysis is optional: it needs Volatility 3, which Tracefall
+	// does not ship. Without it, memory images are refused with a message
+	// that says how to enable it; everything else works as before.
+	if vol := os.Getenv("TRACEFALL_VOLATILITY"); vol != "" {
+		mcfg := memory.Config{
+			Vol:              vol,
+			SymbolDirs:       splitList(os.Getenv("TRACEFALL_VOLATILITY_SYMBOLS")),
+			CacheDir:         os.Getenv("TRACEFALL_VOLATILITY_CACHE"),
+			AllowUnsandboxed: os.Getenv("TRACEFALL_VOLATILITY_ALLOW_UNSANDBOXED") == "1",
+		}
+		if v := os.Getenv("TRACEFALL_VOLATILITY_TIMEOUT"); v != "" {
+			d, err := time.ParseDuration(v)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "TRACEFALL_VOLATILITY_TIMEOUT: %v\n", err)
+				os.Exit(1)
+			}
+			mcfg.Timeout = d
+		}
+		runner, err := memory.NewRunner(mcfg)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "memory analysis: %v\n", err)
+			os.Exit(1)
+		}
+		svc.SetMemoryRunner(runner)
+		slog.Info("memory analysis enabled", "isolation", string(runner.Isolation()))
 	}
 
 	// Server-side pipeline: work a previous process left running is put
@@ -154,4 +184,14 @@ func requestLogger(logger *slog.Logger, next http.Handler) http.Handler {
 		logger.Debug("request", "method", r.Method, "path", r.URL.Path)
 		next.ServeHTTP(w, r)
 	})
+}
+
+func splitList(v string) []string {
+	var out []string
+	for _, p := range filepath.SplitList(v) {
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }

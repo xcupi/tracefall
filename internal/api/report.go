@@ -176,6 +176,7 @@ func (s *Service) assembleReportData(in reportInputs) report.Data {
 
 	d.Evidence = reportEvidence(in.collections, in.audit)
 	s.attachImageInfo(d.Evidence, in.collections)
+	s.attachMemoryInfo(d.Evidence, in.collections)
 	d.Analysis = reportAnalysis(c, in.summary, in.runs)
 
 	// Findings, ordered most severe first, then by when they began.
@@ -290,6 +291,8 @@ func sourceTypeLabel(t string) string {
 		return "AD1 logical image"
 	case model.SourceTypeDiskImage:
 		return "Disk image"
+	case model.SourceTypeMemoryImage:
+		return "Memory image"
 	case model.SourceTypeUpload:
 		return "KAPE ZIP upload"
 	case model.SourceTypeLocalPath:

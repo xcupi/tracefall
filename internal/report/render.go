@@ -148,6 +148,24 @@ const reportHTML = `<!DOCTYPE html>
   <tr><th>Integrity</th><td>{{.Integrity}}</td></tr>
   <tr><th>Ingestion</th><td>{{.Status}}; {{.Files}} file(s) cataloged ({{.Supported}} supported, {{.Unsupported}} unsupported), {{.Imported}} imported, {{.Events}} event(s)</td></tr>
 </table>
+{{with .Memory}}
+<h3>Memory image: how it was analysed</h3>
+<table>
+  <tr><th>Tool</th><td>Volatility 3 Framework {{.Volatility}}, driven by Tracefall</td></tr>
+  <tr><th>Isolation</th><td>{{.Isolation}}</td></tr>
+  <tr><th>Image size</th><td>{{.Size}}</td></tr>
+  {{range .Info}}<tr><th>{{.Key}}</th><td class="wrap">{{.Value}}</td></tr>{{end}}
+</table>
+{{if .Plugins}}
+<table>
+  <tr><th>Plugin</th><th>Outcome</th></tr>
+  {{range .Plugins}}<tr><td class="mono">{{.Key}}</td><td class="wrap">{{.Value}}</td></tr>{{end}}
+</table>
+{{end}}
+<p class="small">Memory evidence is a snapshot. Processes and sockets that record their own creation time are placed at that time. Everything else (services, suspicious memory regions, sockets with no creation time) is dated to the system clock captured in the image and is marked <code>memory_snapshot</code> in the timeline: it shows what was present when the image was taken, not when it began. A plugin that failed is listed above and contributes no events.</p>
+<p class="small">Memory findings are indicators. A hidden-process flag means a process was found by scanning memory but is absent from the active process list; it is not proof of a rootkit. A memory-injection hit means private executable memory, which legitimate JIT-compiled code also produces.</p>
+{{range .Notes}}<p class="small"><strong>Note:</strong> {{.}}</p>{{end}}
+{{end}}
 {{with .Image}}
 <h3>Disk image: container and layout</h3>
 <table>

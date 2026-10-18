@@ -288,3 +288,7 @@ See also: [ARCHITECTURE.md](ARCHITECTURE.md),
 - No LLM/AI anywhere in this phase, by design.
 
 See ARCHITECTURE.md's "Recommended Phase 2" section for what's next.
+
+## Memory images
+
+Set `TRACEFALL_VOLATILITY` to a Volatility 3 `vol` executable and upload a memory image (`.vmem`, `.mem`, `.dmp`, `.lime`, `.raw`, or a known format). It runs sandboxed and feeds the same timeline, findings and report. See `docs/memory-analysis.md` for what is and is not validated.

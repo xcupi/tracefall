@@ -50,6 +50,7 @@ import (
 	"tracefall/internal/parsers/registry"
 	"tracefall/internal/parsers/scheduledtasks"
 	"tracefall/internal/parsers/usnjrnl"
+	"tracefall/internal/parsers/volatility"
 	"tracefall/internal/regf"
 )
 
@@ -76,6 +77,10 @@ func Registry() []parsers.ArtifactParser {
 		// came from classifies each by its own most specific match.
 		prefetchraw.New(),
 		pshistory.New(),
+		// Roadmap item 4: the combined Volatility output for a memory
+		// image. Detected by its fixed name and confirmed by its schema
+		// marker, so nothing else can be claimed as one.
+		volatility.New(),
 		browserhistory.New(),
 		// Phase 16: Windows Timeline. Registered AFTER the browser
 		// parsers: its content detector can only see the SQLite

@@ -46,6 +46,7 @@ import (
 	"tracefall/internal/ingest"
 	"tracefall/internal/investigate"
 	jumplist "tracefall/internal/jumplist"
+	"tracefall/internal/memory"
 	"tracefall/internal/model"
 	"tracefall/internal/ntfs"
 	"tracefall/internal/parsers"
@@ -176,6 +177,9 @@ type Service struct {
 	// pipe runs persisted pipeline jobs. Shared by every request-scoped
 	// copy of the Service, which is why it is a pointer.
 	pipe *pipelineManager
+	// mem runs Volatility for memory images; nil means memory analysis is
+	// not configured. Set once at startup (SetMemoryRunner).
+	mem *memory.Runner
 	// actor is the identity behind the CURRENT request, set by
 	// WithActor on a per-request copy. The shared Service always has the
 	// zero value; only request-scoped copies carry an identity.
@@ -618,6 +622,10 @@ func (s *Service) DiscoverEvidenceFromPath(caseID, path string) (DiscoverResult,
 		if sniffDiskImage(path) {
 			return s.discoverDiskImageFromPath(caseID, path)
 		}
+		// A memory image, recognised by magic or a memory-style name.
+		if sniffMemoryImage(path, path) {
+			return s.discoverMemoryImageFromPath(caseID, path)
+		}
 	}
 
 	// Check the path before fingerprinting it, so the common mistake --
@@ -737,6 +745,9 @@ func (s *Service) discoverStaged(caseID, stagingPath string, uploadSize int64, a
 	}
 	if sniffDiskImage(stagingPath) {
 		return s.discoverDiskImageUpload(caseID, stagingPath, &stagingClaimed, uploadSize, archiveHash, integrity, filename)
+	}
+	if sniffMemoryImage(stagingPath, filename) {
+		return s.discoverMemoryImageUpload(caseID, stagingPath, &stagingClaimed, uploadSize, archiveHash, integrity, filename)
 	}
 
 	collectionID := uuid.NewString()
@@ -1270,6 +1281,18 @@ func (s *Service) importEvidence(caseID, collectionID string, sourceFileIDs []st
 			continue
 		}
 
+		if collection.SourceType == model.SourceTypeMemoryImage {
+			// The analysis is produced here, not at discovery: running
+			// the plugin set is the expensive step, and discovery only
+			// had to prove Volatility can read the image.
+			if err := s.extractMemoryAnalysis(caseID, collectionID, sf); err != nil {
+				_ = s.store.MarkSourceFileFailed(id)
+				errs = append(errs, fmt.Sprintf("%s: %v", sf.Path, err))
+				failures = append(failures, parseFailure(sf, ParseStageExtract, err))
+				prog.fileParsed(0, true)
+				continue
+			}
+		}
 		if collection.SourceType == model.SourceTypeAD1 || collection.SourceType == model.SourceTypeDiskImage {
 			// AD1 entries and disk-image files aren't extracted during
 			// discovery (see catalogAD1, catalogDiskImage) -- materialize
@@ -2064,7 +2087,7 @@ func (s *Service) DeleteSourceFiles(caseID string, sourceFileIDs []string) (Dele
 		touchedCollections[sf.CollectionID] = true
 
 		if collection, cerr := s.store.GetCollection(sf.CollectionID); cerr == nil &&
-			(collection.SourceType == model.SourceTypeUpload || collection.SourceType == model.SourceTypeAD1 || collection.SourceType == model.SourceTypeDiskImage) {
+			(collection.SourceType == model.SourceTypeUpload || collection.SourceType == model.SourceTypeAD1 || collection.SourceType == model.SourceTypeDiskImage || collection.SourceType == model.SourceTypeMemoryImage) {
 			// Only for evidence Tracefall itself extracted and owns. A
 			// local-path (non-AD1) collection's EvidenceDirectory is
 			// wherever the investigator's own evidence already lives on

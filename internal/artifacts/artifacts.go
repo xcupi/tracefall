@@ -359,6 +359,15 @@ var supportedTypeInfo = map[string]typeInfo{
 			"is evidence that a connection succeeded, that anyone authenticated, or that a file moved. " +
 			"Stored passwords are never extracted -- only their presence is reported.",
 	},
+	model.ArtifactMemoryAnalysis: {
+		label: "Memory Analysis", family: FamilyMemory, priority: PriorityHigh,
+		why: "Memory holds what disk and logs do not: processes unlinked from the process list, command lines, " +
+			"live sockets and code injected into running processes.",
+		note: "A SNAPSHOT of one instant, produced by Volatility 3. Processes and sockets that record their own " +
+			"creation time sit at that time; everything else is dated to the system clock in the image and marked " +
+			"memory_snapshot -- present when captured, not proof of when it began. A hidden-process flag and a " +
+			"malfind hit are heuristics: JIT-compiled code legitimately produces the latter.",
+	},
 	model.ArtifactImageMetadata: {
 		label: "Image metadata (EXIF)", family: FamilyMedia, priority: PriorityMedium,
 		why: "Records the device and software that produced an image and when the exposure was taken, which " +

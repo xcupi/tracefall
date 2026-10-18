@@ -17,6 +17,7 @@ import (
 	"github.com/google/uuid"
 
 	"tracefall/internal/archive"
+	"tracefall/internal/memory"
 	"tracefall/internal/model"
 	"tracefall/internal/store"
 )
@@ -445,7 +446,7 @@ func pipelineErrorMessage(err error) string {
 	case errors.As(err, &dup), errors.As(err, &locked),
 		errors.Is(err, ErrUploadHashMismatch), errors.Is(err, ErrUploadNotReady),
 		errors.Is(err, ErrUploadTooLarge), errors.Is(err, ErrUnsupportedEvidence),
-		errors.Is(err, ErrInvalidAD1), errors.Is(err, ErrInvalidDiskImage), errors.Is(err, ErrEvidencePathNotFound),
+		errors.Is(err, ErrInvalidAD1), errors.Is(err, ErrInvalidDiskImage), errors.Is(err, ErrMemoryNotConfigured), errors.Is(err, memory.ErrSymbols), errors.Is(err, memory.ErrUnrecognised), errors.Is(err, memory.ErrTimeout), errors.Is(err, ErrEvidencePathNotFound),
 		errors.Is(err, ErrNoEvidenceFound), errors.Is(err, ErrNotIngested),
 		errors.Is(err, ErrCaseNotFound), errors.Is(err, ErrCollectionNotFound):
 		return err.Error()

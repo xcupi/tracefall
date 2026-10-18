@@ -189,6 +189,12 @@ const (
 	// selects are read out of the image at import time. The collection's
 	// ArchiveHash covers the container file(s) exactly as received.
 	SourceTypeDiskImage = "disk_image"
+	// SourceTypeMemoryImage is a Windows memory image analysed with
+	// Volatility 3 in a sandbox. Like the other container types, nothing
+	// is derived at discovery beyond identifying the image; the analysis
+	// itself runs at import. The collection's ArchiveHash covers the
+	// image file exactly as received.
+	SourceTypeMemoryImage = "memory_image"
 )
 
 // Collection ingestion status values.
@@ -507,6 +513,12 @@ const (
 	// an analyst filters a case down to, and merging the two would bury
 	// it among thousands of images that carry no location at all.
 	ArtifactImageGPS = "image_gps"
+
+	// ArtifactMemoryAnalysis is the combined Volatility 3 output for one
+	// memory image (see internal/memory and internal/parsers/volatility).
+	// Everything in it is a statement about the machine's state AT THE
+	// MOMENT OF ACQUISITION; only some of it carries a time of its own.
+	ArtifactMemoryAnalysis = "memory_analysis"
 )
 
 // Event types recognized in Phase 1. EventType is the normalized,
@@ -784,6 +796,33 @@ const (
 	// exposure was recorded according to the writing device's own clock.
 	// It is never a filesystem timestamp.
 	EventImageMetadataRecorded = "image_metadata_recorded"
+
+	// Memory-image events (internal/parsers/volatility). Processes and
+	// connections found in memory reuse EventProcessCreate and
+	// EventNetworkConnection, because "a process was created at T" and
+	// "this socket connected to X" are what they state, and the existing
+	// rules already know how to read them; Extra["evidence_kind"]="memory"
+	// and the artifact type say where they came from. The four below have
+	// no disk or log equivalent.
+
+	// EventNetworkListener is a socket that was listening (or bound) when
+	// memory was captured. It has no remote end.
+	EventNetworkListener = "network_listener"
+
+	// EventMemoryInjection is a malfind hit: a private, executable region
+	// of a process's memory. It is a HEURISTIC indicator, common in
+	// benign JIT-compiled code, and never proof of injection.
+	EventMemoryInjection = "memory_injection_suspect"
+
+	// EventMemoryService is a service present in the service table at
+	// capture. It is a state, not an installation: it says nothing about
+	// when or how the service was installed.
+	EventMemoryService = "service_in_memory"
+
+	// EventMemorySnapshot marks the moment the memory image was taken
+	// (the system's own clock) and records what the analysis could and
+	// could not produce.
+	EventMemorySnapshot = "memory_snapshot"
 
 	// EventImageGPSRecorded is a coordinate an image's EXIF GPS block
 	// recorded. The position is OBSERVED in the file; any country derived

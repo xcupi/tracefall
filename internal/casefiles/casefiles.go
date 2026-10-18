@@ -88,6 +88,18 @@ func (s *Store) DiskImagePath(caseID, collectionID string) string {
 	return filepath.Join(s.CollectionDir(caseID, collectionID), "upload.img")
 }
 
+// MemoryImagePath returns where an UPLOADED memory image is stored. A
+// local-path image is never copied.
+func (s *Store) MemoryImagePath(caseID, collectionID string) string {
+	return filepath.Join(s.CollectionDir(caseID, collectionID), "upload.mem")
+}
+
+// MemoryReportPath returns the JSON record of how a memory image was
+// identified at discovery (Volatility version, isolation, OS details).
+func (s *Store) MemoryReportPath(caseID, collectionID string) string {
+	return filepath.Join(s.CollectionDir(caseID, collectionID), "memory.json")
+}
+
 // DiskImageReportPath returns the JSON record of what was found in a disk
 // image at discovery: acquisition hashes and their verification, the
 // partition layout, and each volume's statistics.

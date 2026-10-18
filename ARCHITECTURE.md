@@ -12,8 +12,11 @@ KAPE ZIP upload (or local path) -> validate/extract -> ingestion
   -> timeline -> findings
 ```
 
-Explicitly out of scope (and not attempted): memory forensics, full disk
-imaging or raw disk analysis, malware sandboxing, automatic malware
+Memory images are analysed by driving Volatility 3 in a sandbox (see
+docs/memory-analysis.md); Tracefall does not implement memory parsing
+itself. Disk images are read and extracted per docs/disk-images.md.
+
+Explicitly out of scope (and not attempted): acquiring images, malware sandboxing, automatic malware
 verdicts, LLM/AI integration of any kind, threat intelligence
 integrations, distributed architecture, or Kubernetes.
 
