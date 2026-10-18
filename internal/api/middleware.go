@@ -3,10 +3,67 @@ package api
 import (
 	"context"
 	"crypto/subtle"
+	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
+
+// clientHeaderName is a custom request header the dashboard sends on every
+// state-changing request, in every auth mode. A browser cannot attach a custom
+// header to a cross-origin request without a CORS preflight, and Tracefall
+// never answers a preflight, so a foreign page cannot forge it. This is the
+// control that protects single-operator (no-auth) mode, which has no session
+// cookie and therefore no CSRF token. CLI clients must send it too.
+const clientHeaderName = "X-Tracefall-Client"
+
+// rejectRequest returns a non-empty reason when the request must be refused
+// before any routing, authentication or handler runs. See docs/security.md
+// ("Request source checks").
+func (h *handlers) rejectRequest(r *http.Request) string {
+	// DNS rebinding: a hostile page can point its own hostname at 127.0.0.1
+	// and then read same-origin responses. Only a loopback Host is accepted
+	// when there is no session cookie to stop it. With authentication on, the
+	// cookie is scoped to the hostname the analyst logged in with, so a
+	// rebound hostname never carries it.
+	if !h.auth.Enabled && !isLoopbackHostHeader(r.Host) {
+		return "unexpected Host header"
+	}
+	if safeMethod(r.Method) {
+		return ""
+	}
+	if r.Header.Get("Sec-Fetch-Site") == "cross-site" {
+		return "cross-site request"
+	}
+	// Browsers always send Origin on a cross-origin POST. A missing Origin is
+	// a non-browser client (curl, the CLI), which the client-header rule
+	// still covers. "null" is what a sandboxed or redirected page sends.
+	if origin := r.Header.Get("Origin"); origin != "" {
+		u, err := url.Parse(origin)
+		if origin == "null" || err != nil || u.Host == "" || !strings.EqualFold(u.Host, r.Host) {
+			return "cross-origin request"
+		}
+	}
+	if r.Header.Get(clientHeaderName) == "" {
+		return "missing " + clientHeaderName + " header"
+	}
+	return ""
+}
+
+// isLoopbackHostHeader reports whether a Host header names this machine's
+// loopback interface, with or without a port.
+func isLoopbackHostHeader(host string) bool {
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	host = strings.TrimSuffix(strings.TrimPrefix(host, "["), "]")
+	switch strings.ToLower(host) {
+	case "localhost", "127.0.0.1", "::1":
+		return true
+	}
+	return false
+}
 
 // Request-scoped security middleware (Phase 12).
 //
@@ -60,6 +117,16 @@ const (
 func (h *handlers) withSecurity(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		setSecurityHeaders(w, true)
+
+		// Refused before authentication and routing: a foreign origin or
+		// hostname must not reach any handler, including the public ones.
+		if reason := h.rejectRequest(r); reason != "" {
+			if h.log != nil {
+				h.log.Warn("request refused", "reason", reason, "method", r.Method, "path", redactPath(r.URL.Path))
+			}
+			writeError(w, http.StatusForbidden, "request refused: "+reason)
+			return
+		}
 
 		if !h.auth.Enabled {
 			// Single-operator mode: inject the local principal so handlers

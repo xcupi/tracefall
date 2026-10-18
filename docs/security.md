@@ -83,6 +83,50 @@ power is to prove same-origin, and a cross-site attacker cannot read it.
 `Secure` is opt-in via `TRACEFALL_SECURE_COOKIES` because Tracefall
 speaks plain HTTP; setting it without TLS makes login fail silently.
 
+### Request source checks (all modes)
+
+Before authentication and routing, every request is checked in
+`rejectRequest` (`internal/api/middleware.go`). A refused request gets
+`403 request refused: <reason>` and is logged, never handled.
+
+- **Host (no-auth mode only).** The `Host` header must name loopback
+  (`localhost`, `127.0.0.1`, `::1`, with or without a port). This blocks DNS
+  rebinding, where a hostile page points its own hostname at 127.0.0.1 and
+  reads same-origin responses. Authentication mode does not need this rule:
+  the session cookie is scoped to the hostname the analyst logged in with, so
+  a rebound hostname never carries it.
+- **Origin (writes).** When the browser sends `Origin`, its host must equal
+  the request `Host`. `null` is refused. A cross-origin POST always carries
+  `Origin`, so this stops it.
+- **Sec-Fetch-Site (writes).** `cross-site` is refused.
+- **X-Tracefall-Client (writes).** Every non-GET request must carry this
+  header. The dashboard sends `dashboard`; CLI clients must send any non-empty
+  value. A browser cannot add a custom header to a cross-origin request
+  without a CORS preflight, and Tracefall never answers a preflight, so a
+  foreign page cannot forge it. This is the control that protects no-auth
+  mode, which has no CSRF token.
+
+Known limits of these checks:
+
+- A reverse proxy that rewrites `Host` will fail the Origin match. Configure
+  the proxy to pass `Host` through, or it will refuse dashboard writes.
+- A non-browser client on the same machine can send any header it likes.
+  These checks defend against web pages, not local processes. Anything that
+  can already run code on the analyst's machine can read the evidence
+  directly.
+- In LAN mode (`TRACEFALL_HOST` non-loopback) authentication is mandatory,
+  so the Host rule is off by design and the session cookie carries the
+  protection instead.
+
+### CSV exports and spreadsheet formulas
+
+Every cell of the timeline and findings CSV is passed through `csvSafeRow`
+(`internal/api/export.go`). A cell beginning with `=`, `+`, `-`, `@`, tab or
+CR gets a leading single quote, so Excel or LibreOffice shows it as text
+instead of running it. Evidence fields are attacker-controlled, so this
+matters for a forensic export. The same writers feed the report bundle, so
+the manifest hashes still match the downloaded files.
+
 ### First-run bootstrap
 
 On a first start with authentication enabled and an empty users table,

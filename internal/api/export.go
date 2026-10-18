@@ -181,7 +181,7 @@ func writeTimelineCSV(events []model.Event, w io.Writer) error {
 			e.NetworkSource, e.NetworkDest, fmt.Sprint(e.NetworkDestPort), e.ArtifactType,
 			e.CollectionID, e.SourceFileID, e.Parser, fmt.Sprint(e.EventID),
 		}
-		if err := cw.Write(row); err != nil {
+		if err := cw.Write(csvSafeRow(row)); err != nil {
 			return err
 		}
 	}
@@ -233,12 +233,32 @@ func writeFindingsCSV(findings []model.Finding, statusIdx map[string]model.Analy
 			joinStrings(f.Techniques), f.FirstSeen.UTC().Format(time.RFC3339Nano), f.LastSeen.UTC().Format(time.RFC3339Nano),
 			fmt.Sprint(len(f.SupportingEvents)), status, note,
 		}
-		if err := cw.Write(row); err != nil {
+		if err := cw.Write(csvSafeRow(row)); err != nil {
 			return err
 		}
 	}
 	cw.Flush()
 	return cw.Error()
+}
+
+// csvSafeRow neutralises spreadsheet formula injection. Evidence fields (file
+// names, command lines, registry values, page titles) are attacker-controlled,
+// and an examiner who opens the export in Excel or LibreOffice would execute a
+// cell beginning with = + - @ or a tab/CR. Prefixing a single quote makes the
+// spreadsheet treat the cell as text. The same writers feed the report bundle,
+// so the manifest hash still matches the bytes examiners download.
+func csvSafeRow(row []string) []string {
+	out := make([]string, len(row))
+	for i, cell := range row {
+		if cell != "" {
+			switch cell[0] {
+			case '=', '+', '-', '@', '	', '\r':
+				cell = "'" + cell
+			}
+		}
+		out[i] = cell
+	}
+	return out
 }
 
 func joinStrings(vals []string) string {

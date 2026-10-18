@@ -56,6 +56,8 @@ async function api(path, opts) {
   const method = ((opts && opts.method) || "GET").toUpperCase();
   const headers = { "Content-Type": "application/json", ...((opts && opts.headers) || {}) };
   if (!SAFE_METHODS.has(method)) {
+    // Required on every write in every auth mode; see clientHeader in the server's middleware.
+    headers["X-Tracefall-Client"] = "dashboard";
     const t = csrfToken();
     if (t) headers["X-Tracefall-CSRF"] = t;
   }
@@ -432,6 +434,7 @@ function apiUpload(path, file, onProgress) {
     // connection instead. A browser still uploading then reports
     // net::ERR_CONNECTION_RESET rather than the 403 that actually
     // occurred.
+    xhr.setRequestHeader("X-Tracefall-Client", "dashboard");
     const token = csrfToken();
     if (token) xhr.setRequestHeader("X-Tracefall-CSRF", token);
 
@@ -5654,7 +5657,7 @@ async function uploadResumable(caseId, file, onProgress) {
   while (offset < file.size) {
     const end = Math.min(offset + UPLOAD_CHUNK_BYTES, file.size);
     try {
-      const headers = { "Content-Type": "application/octet-stream", "Upload-Offset": String(offset) };
+      const headers = { "Content-Type": "application/octet-stream", "Upload-Offset": String(offset), "X-Tracefall-Client": "dashboard" };
       const t = csrfToken();
       if (t) headers["X-Tracefall-CSRF"] = t;
       const res = await fetch(`/api${base}/${id}`, { method: "PUT", headers, body: file.slice(offset, end) });

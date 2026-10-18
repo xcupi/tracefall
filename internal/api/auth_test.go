@@ -25,9 +25,9 @@ func newAuthFixture(t *testing.T, ttl time.Duration) *authFixture {
 	t.Helper()
 	svc := newTestService(t)
 	logger := slog.New(slog.NewTextHandler(bytes.NewBuffer(nil), nil))
-	mux := NewRouterWithAuth(svc, logger, testMaxUploadBytes, false, AuthConfig{
+	mux := dashboardLike(NewRouterWithAuth(svc, logger, testMaxUploadBytes, false, AuthConfig{
 		Enabled: true, SessionTTL: ttl,
-	})
+	}))
 	return &authFixture{svc: svc, mux: mux}
 }
 

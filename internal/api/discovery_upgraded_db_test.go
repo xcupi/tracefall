@@ -83,7 +83,7 @@ func newUpgradedTestRouter(t *testing.T) http.Handler {
 
 	svc := NewService(db, casefiles.NewStore(t.TempDir()))
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
-	return NewRouter(svc, logger, testMaxUploadBytes, false)
+	return dashboardLike(NewRouter(svc, logger, testMaxUploadBytes, false))
 }
 
 // TestDiscover_ValidDirectoryOnUpgradedDatabase is THE test for the

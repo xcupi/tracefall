@@ -29,7 +29,24 @@ func newTestService(t *testing.T) *Service {
 
 func routerFor(svc *Service) http.Handler {
 	logger := slog.New(slog.NewTextHandler(bytes.NewBuffer(nil), nil))
-	return NewRouter(svc, logger, testMaxUploadBytes, false)
+	return dashboardLike(NewRouter(svc, logger, testMaxUploadBytes, false))
+}
+
+// dashboardLike makes a test request look like the dashboard's own
+// same-origin request: a loopback Host, and the X-Tracefall-Client header on
+// every write. Without it, httptest's default Host (example.com) and missing
+// client header would be refused by the request-source checks, which have
+// their own dedicated tests in crossorigin_test.go that use the raw router.
+func dashboardLike(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !isLoopbackHostHeader(r.Host) {
+			r.Host = "127.0.0.1:8080"
+		}
+		if !safeMethod(r.Method) && r.Header.Get(clientHeaderName) == "" {
+			r.Header.Set(clientHeaderName, "dashboard")
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func newTestRouter(t *testing.T) http.Handler {
@@ -40,7 +57,7 @@ func newTestRouter(t *testing.T) http.Handler {
 func TestHealthz_ReportsLANExposure(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(bytes.NewBuffer(nil), nil))
 	for _, lanExposed := range []bool{false, true} {
-		mux := NewRouter(newTestService(t), logger, testMaxUploadBytes, lanExposed)
+		mux := dashboardLike(NewRouter(newTestService(t), logger, testMaxUploadBytes, lanExposed))
 		var resp map[string]any
 		doJSON(t, mux, "GET", "/api/healthz", nil, &resp)
 		if resp["lan_exposed"] != lanExposed {
