@@ -35,10 +35,13 @@ package journal
 import (
 	"bytes"
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -86,6 +89,7 @@ var whitelist = map[string]bool{
 	"_BOOT_ID":          true,
 	"_SYSTEMD_UNIT":     true,
 	"_TRANSPORT":        true,
+	"_AUDIT_ID":         true,
 	"SYSLOG_IDENTIFIER": true,
 	"PRIORITY":          true,
 }
@@ -115,6 +119,7 @@ type Stats struct {
 	Emitted            int // entries that became events
 	UnsupportedObjects int // DATA objects compressed with XZ or ZSTD, not decoded
 	UndecodableObjects int // DATA objects whose LZ4 payload failed to decode
+	Executions         int // audit-grouped execution events among Emitted
 }
 
 // Parser implements parsers.ArtifactParser.
@@ -231,6 +236,23 @@ func (p Parser) ParseDetailed(absPath string, ctx parsers.ParseContext) (parsers
 
 	sourceName := filepath.Base(absPath)
 	var out parsers.ParseResult
+
+	emitPlain := func(r rec) {
+		if excludedService(r.fields) {
+			st.Excluded++
+			return
+		}
+		st.Emitted++
+		ev := entryEvent(r.seqnum, r.realtime, r.bootID, r.fields, sourceName)
+		ref := "seqnum:" + strconv.FormatUint(r.seqnum, 10)
+		ev.SourceReference = ref
+		out.Events = append(out.Events, ev)
+		out.Raw = append(out.Raw, model.RawEvidence{SourceReference: ref, Raw: rawText(r.seqnum, r.realtime, r.fields)})
+	}
+
+	// audit records are grouped by their serial, so one execution is one event.
+	audit := map[string][]rec{}
+	var auditOrder []string
 	for _, e := range entries {
 		st.Entries++
 		fields := map[string]string{}
@@ -239,18 +261,38 @@ func (p Parser) ParseDetailed(absPath string, ctx parsers.ParseContext) (parsers
 				fields[f.name] = f.value
 			}
 		}
-		ident := fields["SYSLOG_IDENTIFIER"]
-		comm := fields["_COMM"]
-		if coveredByTextParsers[ident] || coveredByTextParsers[comm] {
+		r := rec{seqnum: e.seqnum, realtime: e.realtime, bootID: bytesHex(e.bootID), fields: fields}
+		if fields["_TRANSPORT"] == "audit" && fields["_AUDIT_ID"] != "" {
+			id := fields["_AUDIT_ID"]
+			if _, seen := audit[id]; !seen {
+				auditOrder = append(auditOrder, id)
+			}
+			audit[id] = append(audit[id], r)
+			continue
+		}
+		emitPlain(r)
+	}
+
+	for _, id := range auditOrder {
+		recs := audit[id]
+		sys := execSyscall(recs)
+		if sys == nil {
+			// Not an execution (login, credential or backlog records): keep
+			// each record as its own entry, as for any other journal entry.
+			for _, r := range recs {
+				emitPlain(r)
+			}
+			continue
+		}
+		if excludedService(sys.fields) {
 			st.Excluded++
 			continue
 		}
 		st.Emitted++
-		ev := entryEvent(e.seqnum, e.realtime, bytesHex(e.bootID), fields, sourceName)
-		ref := "seqnum:" + strconv.FormatUint(e.seqnum, 10)
-		ev.SourceReference = ref
+		st.Executions++
+		ev, raw := executionEvent(id, recs, sys, sourceName)
 		out.Events = append(out.Events, ev)
-		out.Raw = append(out.Raw, model.RawEvidence{SourceReference: ref, Raw: rawText(e.seqnum, e.realtime, fields)})
+		out.Raw = append(out.Raw, model.RawEvidence{SourceReference: "audit:" + id, Raw: raw})
 	}
 	return out, st, nil
 }
@@ -340,4 +382,223 @@ func bytesHex(b []byte) string {
 		out = append(out, hex[c>>4], hex[c&0x0f])
 	}
 	return string(out)
+}
+
+// rec is one journal entry, reduced to the whitelisted fields.
+type rec struct {
+	seqnum, realtime uint64
+	bootID           string
+	fields           map[string]string
+}
+
+// excludedService reports whether a record belongs to a service the text-log
+// parsers already cover.
+func excludedService(f map[string]string) bool {
+	return coveredByTextParsers[f["SYSLOG_IDENTIFIER"]] || coveredByTextParsers[f["_COMM"]]
+}
+
+// auditKV matches auditd's "key=value" pairs. A value is either quoted text
+// or a bare token; a list split across records appears as key[0], key[1]...
+var auditKV = regexp.MustCompile(`([A-Za-z0-9_]+(?:\[[0-9]+\])?)=("[^"]*"|[^\s]+)`)
+
+// parseKV returns the first value for each key in an audit message, unquoted.
+func parseKV(msg string) map[string]string {
+	out := map[string]string{}
+	for _, m := range auditKV.FindAllStringSubmatch(msg, -1) {
+		if _, seen := out[m[1]]; !seen {
+			out[m[1]] = unquote(m[2])
+		}
+	}
+	return out
+}
+
+func unquote(v string) string {
+	if len(v) >= 2 && v[0] == '"' && v[len(v)-1] == '"' {
+		return v[1 : len(v)-1]
+	}
+	return v
+}
+
+// decodeArg turns one EXECVE argument into text. auditd quotes plain text and
+// writes arguments with special characters as bare hex.
+func decodeArg(v string) string {
+	if len(v) >= 2 && v[0] == '"' {
+		return unquote(v)
+	}
+	if b, err := hex.DecodeString(v); err == nil {
+		return string(b)
+	}
+	return v
+}
+
+// execArgs rebuilds argv from an EXECVE message, joining chunked arguments
+// (a0[0], a0[1], ...) in order.
+func execArgs(msg string) []string {
+	argRe := regexp.MustCompile(`\ba([0-9]+)(?:\[([0-9]+)\])?=("[^"]*"|[^\s]+)`)
+	parts := map[int][]string{}
+	for _, m := range argRe.FindAllStringSubmatch(msg, -1) {
+		idx, _ := strconv.Atoi(m[1])
+		parts[idx] = append(parts[idx], decodeArg(m[3]))
+	}
+	idxs := make([]int, 0, len(parts))
+	for i := range parts {
+		idxs = append(idxs, i)
+	}
+	sort.Ints(idxs)
+	args := make([]string, 0, len(idxs))
+	for _, i := range idxs {
+		args = append(args, strings.Join(parts[i], ""))
+	}
+	return args
+}
+
+// execSyscall returns the SYSCALL record of an audit group when it is an
+// execve (59) or execveat (322), or nil for any other group.
+func execSyscall(recs []rec) *rec {
+	for i := range recs {
+		msg := recs[i].fields["MESSAGE"]
+		if !strings.HasPrefix(msg, "SYSCALL ") {
+			continue
+		}
+		kv := parseKV(msg)
+		if isExecSyscall(kv["arch"], kv["syscall"]) {
+			return &recs[i]
+		}
+	}
+	return nil
+}
+
+// execSyscalls maps audit arch (hex) to the syscall numbers that start a
+// program: execve and execveat. The number alone is not enough: 11 is execve
+// on 32-bit x86 but munmap on x86_64, so the arch decides.
+var execSyscalls = map[string]map[string]bool{
+	"c000003e": {"59": true, "322": true},  // x86_64
+	"40000003": {"11": true, "358": true},  // i386, also 32-bit processes on an x86_64 kernel
+	"c00000b7": {"221": true, "281": true}, // aarch64
+}
+
+func isExecSyscall(arch, nr string) bool {
+	return execSyscalls[strings.ToLower(arch)][nr]
+}
+
+const (
+	maxPathsPerExecution = 20
+	maxCommandRunes      = 8192
+)
+
+// executionEvent turns one audit group that is an execve into one
+// process_create event. The SYSCALL record gives the process, the EXECVE
+// record its arguments, CWD its directory, PATH the files it touched, and
+// PROCTITLE its title. Everything is kept; nothing is dropped.
+func executionEvent(id string, recs []rec, sys *rec, sourceName string) (model.Event, string) {
+	sk := parseKV(sys.fields["MESSAGE"])
+	var args, paths []string
+	var cwd, proctitle string
+	var raw []string
+	for _, r := range recs {
+		msg := r.fields["MESSAGE"]
+		raw = append(raw, msg)
+		switch {
+		case strings.HasPrefix(msg, "EXECVE "):
+			args = execArgs(msg)
+		case strings.HasPrefix(msg, "CWD "):
+			cwd = parseKV(msg)["cwd"]
+		case strings.HasPrefix(msg, "PATH "):
+			if n := parseKV(msg)["name"]; n != "" {
+				paths = append(paths, n)
+			}
+		case strings.HasPrefix(msg, "PROCTITLE "):
+			proctitle = titleText(parseKV(msg)["proctitle"])
+		}
+	}
+
+	cmd := strings.Join(args, " ")
+	cmdSource := "execve arguments"
+	if cmd == "" && proctitle != "" {
+		cmd, cmdSource = proctitle, "proctitle (no EXECVE record)"
+	}
+	truncated := false
+	if utf8.RuneCountInString(cmd) > maxCommandRunes {
+		cmd = string([]rune(cmd)[:maxCommandRunes]) + "..."
+		truncated = true
+	}
+
+	var ts time.Time
+	if sys.realtime != 0 {
+		ts = time.UnixMicro(int64(sys.realtime)).UTC()
+	}
+	pid, _ := strconv.ParseInt(sys.fields["_PID"], 10, 64)
+	ppid, _ := strconv.ParseInt(sk["ppid"], 10, 64)
+	comm := sys.fields["_COMM"]
+	if comm == "" {
+		comm = sk["comm"]
+	}
+
+	shown := paths
+	if len(shown) > maxPathsPerExecution {
+		shown = shown[:maxPathsPerExecution]
+	}
+	extra := map[string]string{
+		"timestamp_known": strconv.FormatBool(!ts.IsZero()),
+		"source":          "auditd execve syscall",
+		"audit_id":        id,
+		"syscall":         sk["syscall"],
+		"syscall_success": sk["success"],
+		"exit":            sk["exit"],
+		"uid":             sk["uid"],
+		"auid":            sk["auid"],
+		"euid":            sk["euid"],
+		"gid":             sk["gid"],
+		"argc":            strconv.Itoa(len(args)),
+		"command_source":  cmdSource,
+		"path_count":      strconv.Itoa(len(paths)),
+		"record_count":    strconv.Itoa(len(recs)),
+		"realtime_usec":   strconv.FormatUint(sys.realtime, 10),
+		"seqnum":          strconv.FormatUint(sys.seqnum, 10),
+		"boot_id":         sys.bootID,
+		"journal_file":    sourceName,
+	}
+	if cwd != "" {
+		extra["cwd"] = cwd
+	}
+	if len(shown) > 0 {
+		extra["paths"] = strings.Join(shown, "; ")
+	}
+	if proctitle != "" {
+		extra["proctitle"] = proctitle
+	}
+	if truncated {
+		extra["command_truncated"] = "true"
+	}
+	ev := model.Event{
+		Timestamp:       ts,
+		EventType:       model.EventProcessCreate,
+		Host:            normalize.Host(sys.fields["_HOSTNAME"]),
+		Provider:        "audit",
+		PID:             pid,
+		PPID:            ppid,
+		ProcessName:     comm,
+		ProcessPath:     sk["exe"],
+		CommandLine:     cmd,
+		FilePath:        sourceName,
+		ArtifactType:    model.ArtifactJournal,
+		Parser:          parserName,
+		Confidence:      0.8,
+		SourceReference: "audit:" + id,
+		Extra:           extra,
+	}
+	return ev, strings.Join(raw, "\n")
+}
+
+// titleText decodes a PROCTITLE value: bare hex with NUL separators, or
+// quoted text.
+func titleText(v string) string {
+	if len(v) >= 2 && v[0] == '"' {
+		return unquote(v)
+	}
+	b, err := hex.DecodeString(v)
+	if err != nil {
+		return v
+	}
+	return strings.ReplaceAll(string(b), "\x00", " ")
 }

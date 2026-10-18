@@ -1015,8 +1015,9 @@ Limitations, stated rather than hidden:
   unsupported in the statistics, not guessed.
 - A message that is not valid text is kept with replacement characters.
 - Volume: a journal holds far more entries than the text logs. The lab's 86
-  AzurePot journals contain 904,601 entries, of which 903,182 become events.
-  Importing them all is correct but large.
+  AzurePot journals contain 904,601 entries. Most of them are auditd records,
+  and an execution is spread over several of them (SYSCALL, EXECVE, CWD, PATH,
+  PROCTITLE), so the parser groups them. See "Audit execution grouping".
 
 Validation: every entry of every file on the AzurePot image (86 files) was
 compared against `journalctl`, with the same realtime, process, PID and
@@ -1027,6 +1028,51 @@ exactly 76,762 distinct events.
 The MrGamer image's `system.journal` is zero bytes in its inode, with a
 deletion time. It is reported as failed, not as empty; that status is a known
 wart.
+
+### Audit execution grouping (journal)
+
+auditd writes one execution as several records, and journald stores each
+one as a separate entry. They share an `_AUDIT_ID`. The parser groups records
+with the same serial inside a file:
+
+- a group whose SYSCALL record is `execve` (59) or `execveat` (322) becomes a
+  single `process_create` event. The command line comes from the EXECVE
+  record (chunked `a0[0]`/`a0[1]` arguments are rejoined, bare-hex arguments
+  are decoded), the directory from CWD, the touched files from PATH, and the
+  title from PROCTITLE when there is no EXECVE record;
+- any other group (logins, credential records) stays one event per record,
+  so nothing is merged away;
+- groups from sshd, sudo, su and cron are excluded as before.
+
+Each execution keeps its PID, PPID, process name, executable, uid, auid,
+syscall, success, exit, argument count, cwd, paths (at most 20 are listed, the
+count is kept), the audit serial and the record count. Commands longer than
+8192 characters are cut and marked.
+
+Validation, against journalctl on all 86 AzurePot files: 171,270 executions
+(from 173,332 audit groups), 2,982 plain events, 1,419 excluded, and 881
+non-text messages matched by key. Every execution's time, PID, process name
+and, where the arguments can be rebuilt from journalctl, its full command line
+match.
+
+Limitations, stated rather than hidden:
+
+- The command line joins argv with spaces. An argument that itself contains a
+  space (for example `sh -c "a b"`) is shown joined, so the boundary between
+  arguments is not recoverable from the text. The raw EXECVE record is kept
+  verbatim in the raw evidence, so the original boundaries remain available.
+- Executions whose arguments are bare hex or chunked are not compared
+  character by character in the test; they are compared on time, PID and
+  process name only.
+- The syscall rule is architecture-aware: x86_64 (59, 322), i386 and 32-bit
+  processes on a 64-bit kernel (11, 358), and aarch64 (221, 281). Only x86_64
+  appears in the lab's AzurePot journals, so the 32-bit and aarch64 rows are
+  covered by unit tests built from the kernel's syscall numbers, not by real
+  samples. A mismatch there is a known unvalidated area.
+- Other kernel syscalls in the same journals are kept as plain entries, not
+  turned into events of their own. One example is a `finit_module` (kernel
+  module load, syscall 313) by `modprobe` as root, which stays visible as a
+  journal entry for analysts to read.
 
 Not done: the journal's own integrity hashes are not verified by this parser.
 `journalctl --verify` is the reference used in validation.

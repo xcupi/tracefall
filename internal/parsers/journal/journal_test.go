@@ -2,6 +2,7 @@ package journal
 
 import (
 	"encoding/binary"
+	"encoding/hex"
 	"os"
 	"path/filepath"
 	"strings"
@@ -270,5 +271,142 @@ func TestParse_CorruptSizeStopsCleanly(t *testing.T) {
 	}
 	if len(res.Events) != 1 {
 		t.Errorf("events = %d, want the one valid entry before the corruption", len(res.Events))
+	}
+}
+
+// auditRecord adds one audit record to the journal: the transport and serial
+// fields journald gives every audit record, plus its MESSAGE.
+func auditRecord(b *jbuilder, seq, realtime uint64, id string, extra []string, message string) {
+	refs := []uint64{
+		b.data("_TRANSPORT=audit"),
+		b.data("_AUDIT_ID=" + id),
+		b.data("_HOSTNAME=KarenHacker"),
+		b.data("MESSAGE=" + message),
+	}
+	for _, kv := range extra {
+		refs = append(refs, b.data(kv))
+	}
+	b.entry(seq, realtime, refs...)
+}
+
+func TestParse_ExecutionGroupBecomesOneProcessCreate(t *testing.T) {
+	b := newJournal()
+	const id = "17009727"
+	auditRecord(b, 1, rt, id, []string{"_COMM=pkill", "_PID=18836"},
+		`SYSCALL arch=c000003e syscall=59 success=yes exit=0 a0=55f4 items=2 ppid=15853 pid=18836 auid=1000 uid=1 gid=1 euid=1 exe="/usr/bin/pkill" comm="pkill"`)
+	auditRecord(b, 2, rt+1, id, nil, `EXECVE argc=3 a0="pkill" a1="-9" a2="kdevtmpfsi"`)
+	auditRecord(b, 3, rt+2, id, nil, `CWD cwd="/tmp"`)
+	auditRecord(b, 4, rt+3, id, nil, `PATH item=0 name="/usr/bin/pkill" inode=4307`)
+	auditRecord(b, 5, rt+4, id, nil, "PROCTITLE proctitle="+hex.EncodeToString([]byte("pkill\x00-9\x00kdevtmpfsi")))
+
+	res, st, err := New().ParseDetailed(b.write(t, "system.journal"), parsers.ParseContext{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Events) != 1 || st.Executions != 1 {
+		t.Fatalf("events = %d, executions = %d; five audit records of one execve must be one event", len(res.Events), st.Executions)
+	}
+	ev := res.Events[0]
+	if ev.EventType != model.EventProcessCreate {
+		t.Errorf("type = %q, want process_create", ev.EventType)
+	}
+	if ev.CommandLine != "pkill -9 kdevtmpfsi" {
+		t.Errorf("command line = %q", ev.CommandLine)
+	}
+	if ev.PID != 18836 || ev.PPID != 15853 || ev.ProcessName != "pkill" || ev.ProcessPath != "/usr/bin/pkill" {
+		t.Errorf("pid/ppid/comm/exe = %d/%d/%q/%q", ev.PID, ev.PPID, ev.ProcessName, ev.ProcessPath)
+	}
+	if ev.Extra["cwd"] != "/tmp" || ev.Extra["paths"] != "/usr/bin/pkill" || ev.Extra["record_count"] != "5" {
+		t.Errorf("cwd/paths/records = %q/%q/%q", ev.Extra["cwd"], ev.Extra["paths"], ev.Extra["record_count"])
+	}
+	if ev.Extra["proctitle"] != "pkill -9 kdevtmpfsi" || ev.Extra["syscall_success"] != "yes" || ev.Extra["audit_id"] != id {
+		t.Errorf("proctitle/success/audit_id = %q/%q/%q", ev.Extra["proctitle"], ev.Extra["syscall_success"], ev.Extra["audit_id"])
+	}
+	if ev.SourceReference != "audit:"+id || ev.Timestamp.UnixMicro() != int64(rt) {
+		t.Errorf("reference %q, timestamp %v", ev.SourceReference, ev.Timestamp)
+	}
+}
+
+func TestParse_ChunkedAndHexArgumentsAreRebuilt(t *testing.T) {
+	b := newJournal()
+	const id = "42"
+	auditRecord(b, 1, rt, id, []string{"_COMM=sh", "_PID=7"},
+		`SYSCALL arch=c000003e syscall=59 success=yes exit=0 pid=7 ppid=1 exe="/bin/sh" comm="sh"`)
+	// "curl" split into two chunks, and "-n" written as bare hex (2D6E).
+	auditRecord(b, 2, rt+1, id, nil, `EXECVE argc=3 a0[0]="cu" a0[1]="rl" a1=2D6E a2="http://10.0.0.5/x"`)
+	res, err := New().Parse(b.write(t, "system.journal"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := res.Events[0].CommandLine; got != "curl -n http://10.0.0.5/x" {
+		t.Errorf("command line = %q; chunks must join and hex must decode", got)
+	}
+}
+
+func TestParse_NonExecutionAuditGroupStaysPerRecord(t *testing.T) {
+	b := newJournal()
+	const id = "99"
+	auditRecord(b, 1, rt, id, []string{"_COMM=login"}, `USER_START pid=10 uid=0 auid=1000 msg='op=PAM:session_open'`)
+	auditRecord(b, 2, rt+1, id, []string{"_COMM=login"}, `CRED_ACQ pid=10 uid=0 msg='op=PAM:setcred'`)
+	res, st, err := New().ParseDetailed(b.write(t, "system.journal"), parsers.ParseContext{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Executions != 0 || len(res.Events) != 2 {
+		t.Errorf("executions = %d, events = %d; a login group is not an execution and must keep both records", st.Executions, len(res.Events))
+	}
+	for _, ev := range res.Events {
+		if ev.EventType != model.EventJournalEntry {
+			t.Errorf("type = %q, want journal_entry for a non-execution record", ev.EventType)
+		}
+	}
+}
+
+func TestParse_CronExecutionIsLeftToTheSyslogParser(t *testing.T) {
+	b := newJournal()
+	const id = "5"
+	auditRecord(b, 1, rt, id, []string{"_COMM=cron", "_PID=3"},
+		`SYSCALL arch=c000003e syscall=59 success=yes exit=0 pid=3 ppid=1 exe="/usr/sbin/cron" comm="cron"`)
+	auditRecord(b, 2, rt+1, id, nil, `EXECVE argc=1 a0="run-parts"`)
+	res, st, err := New().ParseDetailed(b.write(t, "system.journal"), parsers.ParseContext{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Excluded != 1 || len(res.Events) != 0 {
+		t.Errorf("excluded = %d, events = %d; a cron execution is emitted by the syslog parser, not here", st.Excluded, len(res.Events))
+	}
+}
+
+// A 32-bit execve on a 64-bit kernel reports arch=40000003 and syscall 11.
+// The same number 11 on x86_64 is munmap, so only the arch makes it an execution.
+func TestParse_ThirtyTwoBitExecveIsRecognisedAndMunmapIsNot(t *testing.T) {
+	b := newJournal()
+	auditRecord(b, 1, rt, "7", []string{"_COMM=legacy", "_PID=21"},
+		`SYSCALL arch=40000003 syscall=11 success=yes exit=0 pid=21 ppid=1 exe="/usr/bin/legacy" comm="legacy"`)
+	auditRecord(b, 2, rt+1, "7", nil, `EXECVE argc=1 a0="legacy"`)
+	auditRecord(b, 3, rt+2, "8", []string{"_COMM=mmapuser", "_PID=22"},
+		`SYSCALL arch=c000003e syscall=11 success=yes exit=0 pid=22 ppid=1 exe="/usr/bin/mmapuser" comm="mmapuser"`)
+
+	res, st, err := New().ParseDetailed(b.write(t, "system.journal"), parsers.ParseContext{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Executions != 1 {
+		t.Fatalf("executions = %d, want 1: the 32-bit execve only", st.Executions)
+	}
+	var sawExec, sawMunmapAsEntry bool
+	for _, ev := range res.Events {
+		if ev.EventType == model.EventProcessCreate && ev.ProcessName == "legacy" {
+			sawExec = true
+		}
+		if ev.EventType == model.EventJournalEntry && ev.ProcessName == "mmapuser" {
+			sawMunmapAsEntry = true
+		}
+	}
+	if !sawExec {
+		t.Error("the 32-bit execve (arch 40000003, syscall 11) was not recognised as process_create")
+	}
+	if !sawMunmapAsEntry {
+		t.Error("the x86_64 munmap (syscall 11) must stay a plain entry, not an execution")
 	}
 }
