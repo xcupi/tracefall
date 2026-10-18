@@ -875,6 +875,8 @@ const ARTIFACT_TYPE_LABELS = {
   registry_hive: "Windows Registry Hive",
   scheduled_task: "Scheduled Task XML",
   powershell_history: "PowerShell console history",
+  bash_history: "Bash history",
+  wtmp: "Login records (wtmp)",
   browser_history: "Browser history (Chromium / Firefox)",
   browser_download: "Browser download",
   ntfs_mft: "NTFS $MFT",
@@ -1017,6 +1019,13 @@ const EVENT_CATEGORIES = {
   opensave_mru: "user_activity",
   muicache_entry: "other",
   powershell_history_command: "execution",
+  // Shell history records a command was TYPED, like PowerShell history.
+  bash_history_command: "execution",
+  // Login records: a session opening or closing is an authentication event.
+  // A boot has no category of its own, so it is "other" rather than invented.
+  session_start: "authentication",
+  session_end: "authentication",
+  system_boot: "other",
   browser_download: "browser_download",
   logoff: "authentication",
   // Phase 20. A FileZilla entry is a CONFIGURATION record naming a

@@ -30,6 +30,7 @@ import (
 	"tracefall/internal/model"
 	"tracefall/internal/parsers"
 	"tracefall/internal/parsers/activitiescache"
+	"tracefall/internal/parsers/bashhistory"
 	browsercacheparser "tracefall/internal/parsers/browsercache"
 	browsercacheindexparser "tracefall/internal/parsers/browsercacheindex"
 	"tracefall/internal/parsers/browserhistory"
@@ -51,6 +52,7 @@ import (
 	"tracefall/internal/parsers/scheduledtasks"
 	"tracefall/internal/parsers/usnjrnl"
 	"tracefall/internal/parsers/volatility"
+	"tracefall/internal/parsers/wtmp"
 	"tracefall/internal/regf"
 )
 
@@ -77,6 +79,10 @@ func Registry() []parsers.ArtifactParser {
 		// came from classifies each by its own most specific match.
 		prefetchraw.New(),
 		pshistory.New(),
+		// Linux shell and login records. Both are recognised by file name
+		// only; neither format has a signature that is safe to sniff.
+		bashhistory.New(),
+		wtmp.New(),
 		// Roadmap item 4: the combined Volatility output for a memory
 		// image. Detected by its fixed name and confirmed by its schema
 		// marker, so nothing else can be claimed as one.

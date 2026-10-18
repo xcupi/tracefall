@@ -96,6 +96,8 @@ what the binary can actually parse:
 | `windows_event_log` | Windows Event Log (EVTX) | Event Log | **Critical** | `evtx@1`, `evtxcsv@1` |
 | `registry_hive` | Windows Registry Hive | Registry | **Critical** | `registry@1` |
 | `powershell_history` | PowerShell console history | PowerShell | High | `pshistory@1` |
+| `bash_history` | Bash history | Shell | High | `bashhistory@1` |
+| `wtmp` | Login records (wtmp) | Log | High | `wtmp@1` |
 | `prefetch` | Prefetch | Prefetch | High | `prefetch@1`, `pecmd@1` |
 | `registry_run_key` | Registry (RECmd export) | Registry | High | `recmd@1` |
 | `scheduled_task` | Scheduled Task XML | Scheduled Task | High | `scheduledtasks@1` |
@@ -881,6 +883,47 @@ commands" is a PowerShell history would misclassify every script, log
 and note in a collection. Recognition is by filename only, and that
 limit is stated rather than papered over with a guess.
 
+
+### Bash history (`bashhistory@1`)
+
+Parses `.bash_history`: one accepted command per line, in order. Blank
+lines are skipped; line references count them, so a reference opens to
+the same line an examiner sees.
+
+Timestamps are present only when the shell ran with `HISTTIMEFORMAT`,
+which writes a `#<epoch>` line before each command. When that line is
+present the event takes its time from it (`timestamp_known = "true"`).
+When it is absent, which is the default, the event is **undated** and the
+file's modification time is not used. The Insider image's root history
+has no epoch lines, so all 95 of its commands are undated.
+
+A command typed twice is two events. Undated events are identified by
+command text and line number together; see "Events with no timestamp".
+
+### Login records (`wtmp@1`)
+
+Parses `/var/log/wtmp`, a sequence of fixed 384-byte utmp records (glibc
+x86-64 layout). Emitted: `session_start` (USER_PROCESS), `session_end`
+(DEAD_PROCESS) and `system_boot` (BOOT_TIME). RUN_LVL, INIT_PROCESS,
+LOGIN_PROCESS, NEW_TIME, OLD_TIME and ACCOUNTING records are bookkeeping
+and produce no event.
+
+Limitations, stated rather than hidden:
+
+- A file whose size is not a multiple of 384 is rejected whole, not read
+  partially, because a truncated record cannot be trusted.
+- A logout record carries the terminal and PID but not the user. Its
+  `user` is empty; pair it with the login by `terminal`.
+- Only `wtmp` is claimed. `btmp` (failed logins) uses the same layout with
+  different meaning, so it is not parsed by this parser.
+- The file is in file order, not time order. Rotations and clock changes
+  break time order, so each event keeps its own timestamp.
+
+`auth.log` is not supported yet. Its lines carry no year, and the AD1
+extraction path does not set file modification times, so there is no
+honest source for the year. The plan is to keep those events undated and
+record an assumed year in `Extra`, not to infer one.
+
 ### Browser history (`browserhistory@1`)
 
 Two schemas, both real SQLite databases, both identified **by their
@@ -932,9 +975,13 @@ design. This is handled consistently rather than hidden:
 - **In storage**, the timestamp stays zero. Excluding these events from
   a displayed range must never become a reason to stamp them with a
   substitute time.
-- **In deduplication**, a zero timestamp causes `CommandLine` to be
-  included in the dedup hash, so N distinct timestamp-less commands keep
-  N distinct identities instead of collapsing into one.
+- **In deduplication**, a zero timestamp causes `CommandLine` *and* the
+  source reference (line or record number) to be included in the dedup
+  hash. Identical text on two different lines is two events: the Insider
+  image's root history had `ls` eleven times, and before the line
+  reference was included 25 of its 95 lines collapsed into 70 events.
+  Re-importing the same file yields the same line numbers, so the same
+  artifact still deduplicates across collections.
 
 ---
 

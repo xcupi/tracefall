@@ -283,6 +283,14 @@ const (
 	// events from it carry a zero Timestamp -- see
 	// docs/evidence-triage.md and Event.ComputeDedupHash's zero-time rule.
 	ArtifactPowerShellHistory = "powershell_history"
+	// ArtifactBashHistory is a POSIX shell history file (~/.bash_history).
+	// Entries carry a timestamp only when the shell was run with
+	// HISTTIMEFORMAT, which writes a "#<epoch>" line before each command;
+	// otherwise the file records no time and events are undated.
+	ArtifactBashHistory = "bash_history"
+	// ArtifactWtmp is the utmp-format login record file (/var/log/wtmp).
+	// Each record has an epoch timestamp, a session type and a user.
+	ArtifactWtmp = "wtmp"
 	// ArtifactBrowserHistory is a browser history database. The exact
 	// formats supported are listed in docs/evidence-triage.md; the
 	// artifact type does not imply every browser is readable.
@@ -587,6 +595,18 @@ const (
 	// entry proves a command was TYPED, not when it ran, or whether it
 	// ran at all.
 	EventPowerShellHistoryCommand = "powershell_history_command"
+	// EventBashHistoryCommand is one command recovered from a POSIX shell
+	// history file. Like EventPowerShellHistoryCommand it proves a command
+	// was entered, not that it ran or succeeded.
+	EventBashHistoryCommand = "bash_history_command"
+	// EventSessionStart is a login session opened (wtmp USER_PROCESS).
+	EventSessionStart = "session_start"
+	// EventSessionEnd is a login session closed (wtmp DEAD_PROCESS). The
+	// record carries the terminal and PID, not the user, so the user is
+	// empty and an analyst pairs it with the start by line.
+	EventSessionEnd = "session_end"
+	// EventSystemBoot is a BOOT_TIME record in wtmp.
+	EventSystemBoot = "system_boot"
 	// EventBrowserVisit is one recorded page visit from a browser history
 	// database.
 	EventBrowserVisit = "browser_visit"

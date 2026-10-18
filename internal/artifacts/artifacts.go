@@ -114,6 +114,7 @@ const (
 	FamilyPrefetch      Family = "prefetch"
 	FamilyScheduledTask Family = "scheduled_task"
 	FamilyPowerShell    Family = "powershell"
+	FamilyShell         Family = "shell"
 	FamilyExecution     Family = "execution"
 	FamilyFileSystem    Family = "filesystem"
 	FamilyBrowser       Family = "browser"
@@ -140,6 +141,7 @@ var FamilyLabels = map[Family]string{
 	FamilyPrefetch:      "Prefetch",
 	FamilyScheduledTask: "Scheduled Task",
 	FamilyPowerShell:    "PowerShell",
+	FamilyShell:         "Shell",
 	FamilyExecution:     "Execution Artifact",
 	FamilyFileSystem:    "File System",
 	FamilyBrowser:       "Browser",
@@ -396,6 +398,14 @@ var supportedTypeInfo = map[string]typeInfo{
 	model.ArtifactPrefetch: {
 		label: "Prefetch", family: FamilyPrefetch, priority: PriorityHigh,
 		why: "Proves a program ran, when, and how often, including programs since deleted.",
+	},
+	model.ArtifactBashHistory: {
+		label: "Bash history", family: FamilyShell, priority: PriorityHigh,
+		why: "Records the commands a user typed on a POSIX host, which often survive after logs are rotated or cleared.",
+	},
+	model.ArtifactWtmp: {
+		label: "Login records (wtmp)", family: FamilyLog, priority: PriorityHigh,
+		why: "Records when accounts logged in and out and the terminal or remote host used, with epoch timestamps.",
 	},
 	model.ArtifactPowerShellHistory: {
 		label: "PowerShell console history", family: FamilyPowerShell, priority: PriorityHigh,
