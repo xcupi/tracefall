@@ -51,6 +51,7 @@ import (
 	_ "modernc.org/sqlite" // the pure-Go driver Tracefall already depends on
 
 	"tracefall/internal/model"
+	"tracefall/internal/normalize"
 	"tracefall/internal/parsers"
 )
 
@@ -157,6 +158,11 @@ type Visit struct {
 
 // Parse reads a browser history database and emits one event per visit.
 func (p Parser) Parse(absPath string) (parsers.ParseResult, error) {
+	return p.ParseWithContext(absPath, parsers.ParseContext{})
+}
+
+// ParseWithContext uses the evidence-relative path for browser context.
+func (p Parser) ParseWithContext(absPath string, ctx parsers.ParseContext) (parsers.ParseResult, error) {
 	info, err := os.Stat(absPath)
 	if err != nil {
 		return parsers.ParseResult{}, err
@@ -198,8 +204,8 @@ func (p Parser) Parse(absPath string) (parsers.ParseResult, error) {
 	}
 
 	sourceName := filepath.Base(absPath)
-	profile := profileFromPath(absPath)
-	user := userFromPath(absPath)
+	profile := profileFromPath(ctx.EvidencePath)
+	user := normalize.UserFromEvidencePath(ctx.EvidencePath)
 
 	var out parsers.ParseResult
 	for i, v := range visits {
@@ -469,19 +475,6 @@ func profileFromPath(path string) string {
 		if strings.EqualFold(p, "Default") || strings.HasPrefix(strings.ToLower(p), "profile ") ||
 			strings.HasSuffix(strings.ToLower(p), ".default-release") || strings.HasSuffix(strings.ToLower(p), ".default") {
 			return p
-		}
-	}
-	return ""
-}
-
-func userFromPath(path string) string {
-	parts := strings.Split(strings.ReplaceAll(path, `\`, "/"), "/")
-	for i := 0; i+1 < len(parts); i++ {
-		if strings.EqualFold(parts[i], "Users") || strings.EqualFold(parts[i], "Documents and Settings") {
-			name := parts[i+1]
-			if name != "" && !strings.EqualFold(name, "Public") && !strings.EqualFold(name, "Default") {
-				return name
-			}
 		}
 	}
 	return ""

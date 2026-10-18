@@ -5,6 +5,32 @@ import (
 	"time"
 )
 
+func TestUserFromEvidencePath(t *testing.T) {
+	cases := map[string]string{
+		`Users\jdoe\AppData\Local\History`:            "jdoe",
+		"Documents and Settings/jdoe/AppData/History": "jdoe",
+		"home/jdoe/.cache/History":                    "jdoe",
+		"Users/Public/AppData/History":                "",
+		"Users/Default/AppData/History":               "",
+		"collected/home/server/History":               "",
+		"Windows/System32/config/SYSTEM":              "",
+	}
+	for path, want := range cases {
+		if got := UserFromEvidencePath(path); got != want {
+			t.Errorf("UserFromEvidencePath(%q) = %q, want %q", path, got, want)
+		}
+	}
+}
+
+func TestUserFromEvidencePathIndependentOfDataDirectory(t *testing.T) {
+	evidencePath := "Users/jdoe/AppData/Local/Chrome/History"
+	for _, dataDir := range []string{"/home/x/data/case", "/Users/x/data/case", "/tmp/tracefall/data/case"} {
+		if got := UserFromEvidencePath(evidencePath); got != "jdoe" {
+			t.Errorf("data dir %q affected evidence attribution: got %q", dataDir, got)
+		}
+	}
+}
+
 func TestTimestamp(t *testing.T) {
 	cases := []struct {
 		in    string

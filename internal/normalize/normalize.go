@@ -53,6 +53,31 @@ func User(s string) string {
 	return s
 }
 
+// UserFromEvidencePath recovers a user directory from a path relative to
+// an evidence root. Never pass an absolute server path: its components
+// describe the Tracefall host, not the evidence. Windows profile paths
+// use Users or Documents and Settings; Linux-style evidence may use home
+// at the root. Public and Default profiles are not named-user evidence.
+func UserFromEvidencePath(evidencePath string) string {
+	p := strings.ReplaceAll(strings.TrimSpace(evidencePath), `\`, "/")
+	if p == "" || strings.HasPrefix(p, "/") || (len(p) >= 2 && p[1] == ':') {
+		return ""
+	}
+	parts := strings.Split(p, "/")
+	for i, part := range parts {
+		if strings.EqualFold(part, "Users") || strings.EqualFold(part, "Documents and Settings") ||
+			(i == 0 && strings.EqualFold(part, "home")) {
+			if i+1 < len(parts) {
+				name := strings.TrimSpace(parts[i+1])
+				if name != "" && !strings.EqualFold(name, "Public") && !strings.EqualFold(name, "Default") {
+					return name
+				}
+			}
+		}
+	}
+	return ""
+}
+
 // Host canonicalizes a hostname, uppercased to match Windows' own
 // case-insensitive convention so entity correlation (internal/correlate)
 // can compare hosts with a plain string match.

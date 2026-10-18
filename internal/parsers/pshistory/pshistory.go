@@ -37,6 +37,7 @@ import (
 	"unicode/utf8"
 
 	"tracefall/internal/model"
+	"tracefall/internal/normalize"
 	"tracefall/internal/parsers"
 )
 
@@ -83,6 +84,11 @@ func (Parser) DetectContent(header []byte) bool { return false }
 
 // Parse reads a console history file and emits one event per command.
 func (p Parser) Parse(absPath string) (parsers.ParseResult, error) {
+	return p.ParseWithContext(absPath, parsers.ParseContext{})
+}
+
+// ParseWithContext uses the evidence-relative path for user attribution.
+func (p Parser) ParseWithContext(absPath string, ctx parsers.ParseContext) (parsers.ParseResult, error) {
 	info, err := os.Stat(absPath)
 	if err != nil {
 		return parsers.ParseResult{}, err
@@ -101,7 +107,7 @@ func (p Parser) Parse(absPath string) (parsers.ParseResult, error) {
 	}
 
 	sourceName := filepath.Base(absPath)
-	user := userFromPath(absPath)
+	user := normalize.UserFromEvidencePath(ctx.EvidencePath)
 
 	var out parsers.ParseResult
 	// Line numbers count EVERY line including blanks, so a reference
@@ -241,20 +247,4 @@ func splitLines(text string) []string {
 	text = strings.ReplaceAll(text, "\r\n", "\n")
 	text = strings.ReplaceAll(text, "\r", "\n")
 	return strings.Split(text, "\n")
-}
-
-// userFromPath recovers the owning username from the evidence path, when
-// it genuinely contains one (".../Users/jdoe/AppData/Roaming/..."). An
-// unknown user stays unknown -- never guessed from the filename.
-func userFromPath(path string) string {
-	parts := strings.Split(strings.ReplaceAll(path, `\`, "/"), "/")
-	for i := 0; i+1 < len(parts); i++ {
-		if strings.EqualFold(parts[i], "Users") || strings.EqualFold(parts[i], "Documents and Settings") {
-			name := parts[i+1]
-			if name != "" && !strings.EqualFold(name, "Public") && !strings.EqualFold(name, "Default") {
-				return name
-			}
-		}
-	}
-	return ""
 }

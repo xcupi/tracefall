@@ -144,7 +144,7 @@ func (p Parser) ParseWithContext(absPath string, ctx parsers.ParseContext) (pars
 	// carries it. Never guessed from anything else.
 	user := ""
 	if hiveType == HiveNTUser || hiveType == HiveUsrClass {
-		user = userFromPath(absPath)
+		user = normalize.UserFromEvidencePath(ctx.EvidencePath)
 	}
 
 	var out parsers.ParseResult
@@ -444,18 +444,6 @@ func hiveTypeFromName(name string) HiveType {
 // evidence path (".../Users/jdoe/NTUSER.DAT"). It returns "" unless the
 // path genuinely contains a Users/<name> segment: an unknown user is
 // recorded as unknown, never invented.
-func userFromPath(path string) string {
-	parts := strings.Split(strings.ReplaceAll(path, `\`, "/"), "/")
-	for i := 0; i+1 < len(parts); i++ {
-		if strings.EqualFold(parts[i], "Users") || strings.EqualFold(parts[i], "Documents and Settings") {
-			name := parts[i+1]
-			if name != "" && !strings.EqualFold(name, "Public") && !strings.EqualFold(name, "Default") {
-				return name
-			}
-		}
-	}
-	return ""
-}
 
 func truncate(s string, n int) string {
 	if len(s) <= n {

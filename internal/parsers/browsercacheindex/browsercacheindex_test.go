@@ -9,6 +9,7 @@ import (
 
 	"tracefall/internal/browsercache/cachegen"
 	"tracefall/internal/model"
+	"tracefall/internal/parsers"
 	parser "tracefall/internal/parsers/browsercacheindex"
 )
 
@@ -186,7 +187,7 @@ func TestIndex_RecoversBrowserContext(t *testing.T) {
 	if err := os.WriteFile(path, data, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	res, err := parser.New().Parse(path)
+	res, err := parser.New().ParseWithContext(path, parsers.ParseContext{EvidencePath: "Users/jdoe/AppData/Local/Google/Chrome/User Data/Default/Cache/index"})
 	if err != nil {
 		t.Fatal(err)
 	}

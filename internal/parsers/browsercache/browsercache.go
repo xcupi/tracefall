@@ -40,6 +40,7 @@ import (
 
 	bc "tracefall/internal/browsercache"
 	"tracefall/internal/model"
+	"tracefall/internal/normalize"
 	"tracefall/internal/parsers"
 )
 
@@ -91,6 +92,11 @@ func (Parser) DetectContent(header []byte) bool {
 
 // Parse reads one cache entry file.
 func (p Parser) Parse(absPath string) (parsers.ParseResult, error) {
+	return p.ParseWithContext(absPath, parsers.ParseContext{})
+}
+
+// ParseWithContext uses the evidence-relative path for browser context.
+func (p Parser) ParseWithContext(absPath string, ctx parsers.ParseContext) (parsers.ParseResult, error) {
 	// The sniff window discovery uses is only 512 bytes, and a Firefox
 	// entry's metadata sits at the END of the file. Both formats are
 	// therefore re-checked here against the whole file.
@@ -108,14 +114,14 @@ func (p Parser) Parse(absPath string) (parsers.ParseResult, error) {
 		if err != nil {
 			return parsers.ParseResult{}, fmt.Errorf("browsercache: %w", err)
 		}
-		return p.multiResult(scan.Entries, absPath, blockfileReport(scan)), nil
+		return p.multiResult(scan.Entries, absPath, ctx.EvidencePath, blockfileReport(scan)), nil
 	case isCache1Block(base):
 		n, _ := bc.IsFirefoxCache1BlockName(base)
 		scan, err := bc.ParseFirefoxCache1Block(absPath, n, p.limits)
 		if err != nil {
 			return parsers.ParseResult{}, fmt.Errorf("browsercache: %w", err)
 		}
-		return p.multiResult(scan.Entries, absPath, cache1Report(scan)), nil
+		return p.multiResult(scan.Entries, absPath, ctx.EvidencePath, cache1Report(scan)), nil
 	}
 
 	// Single-entry formats.
@@ -140,7 +146,7 @@ func (p Parser) Parse(absPath string) (parsers.ParseResult, error) {
 		return parsers.ParseResult{}, fmt.Errorf("browsercache: %w", err)
 	}
 
-	return p.result(entry, absPath), nil
+	return p.result(entry, absPath, ctx.EvidencePath), nil
 }
 
 // isCache1Block reports whether base is a Firefox cache1 block file.
@@ -156,10 +162,10 @@ func isCache1Block(base string) bool {
 // and it must be distinguishable from "this file failed to parse" --
 // which is why a zero-entry scan is a success with a record, not an
 // error.
-func (p Parser) multiResult(entries []bc.Entry, absPath string, report map[string]any) parsers.ParseResult {
+func (p Parser) multiResult(entries []bc.Entry, absPath, evidencePath string, report map[string]any) parsers.ParseResult {
 	var out parsers.ParseResult
 	for _, e := range entries {
-		r := p.result(e, absPath)
+		r := p.result(e, absPath, evidencePath)
 		out.Events = append(out.Events, r.Events...)
 		out.Raw = append(out.Raw, r.Raw...)
 	}
@@ -209,7 +215,7 @@ func pathBase(p string) string {
 	return filepath.Base(filepath.FromSlash(p))
 }
 
-func (p Parser) result(e bc.Entry, absPath string) parsers.ParseResult {
+func (p Parser) result(e bc.Entry, absPath, evidencePath string) parsers.ParseResult {
 	sourceName := filepath.Base(absPath)
 	extra := map[string]string{
 		"browser":              e.Browser,
@@ -239,10 +245,10 @@ func (p Parser) result(e bc.Entry, absPath string) parsers.ParseResult {
 	if host := e.Host(); host != "" {
 		extra["host"] = host
 	}
-	if profile := profileFromPath(absPath); profile != "" {
+	if profile := profileFromPath(evidencePath); profile != "" {
 		extra["browser_profile"] = profile
 	}
-	if user := userFromPath(absPath); user != "" {
+	if user := normalize.UserFromEvidencePath(evidencePath); user != "" {
 		extra["user_profile_path"] = user
 	}
 	if e.StatusLine != "" {
@@ -424,17 +430,6 @@ func profileFromPath(path string) string {
 		if strings.EqualFold(p, "Default") || strings.HasPrefix(p, "Profile ") ||
 			strings.HasSuffix(p, ".default") || strings.HasSuffix(p, ".default-release") {
 			return p
-		}
-	}
-	return ""
-}
-
-// userFromPath recovers the user directory, when present.
-func userFromPath(path string) string {
-	parts := strings.Split(filepath.ToSlash(path), "/")
-	for i, p := range parts {
-		if (strings.EqualFold(p, "Users") || strings.EqualFold(p, "home")) && i+1 < len(parts) {
-			return parts[i+1]
 		}
 	}
 	return ""

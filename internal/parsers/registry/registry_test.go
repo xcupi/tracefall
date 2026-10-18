@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"tracefall/internal/model"
+	"tracefall/internal/parsers"
 	parser "tracefall/internal/parsers/registry"
 	"tracefall/internal/regf/regfgen"
 )
@@ -25,7 +26,11 @@ func writeHive(t *testing.T, name string, data []byte) string {
 
 func parseHive(t *testing.T, path string) []model.Event {
 	t.Helper()
-	res, err := parser.New().Parse(path)
+	relPath := filepath.Base(path)
+	if filepath.Base(filepath.Dir(filepath.Dir(path))) == "Users" {
+		relPath = filepath.ToSlash(filepath.Join("Users", "jdoe", filepath.Base(path)))
+	}
+	res, err := parser.New().ParseWithContext(path, parsers.ParseContext{EvidencePath: relPath})
 	if err != nil {
 		t.Fatalf("Parse(%s): %v", path, err)
 	}

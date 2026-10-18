@@ -72,7 +72,7 @@ func TestParse_ValidDatabaseDecodesWithHonestSemantics(t *testing.T) {
 			activityAt.Unix(), activityAt.Unix(), "device-1")
 	})
 
-	res, err := activitiescache.New().Parse(path)
+	res, err := activitiescache.New().ParseWithContext(path, parsers.ParseContext{EvidencePath: "Users/jdoe/AppData/Local/ConnectedDevicesPlatform/ActivitiesCache.db"})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"tracefall/internal/model"
+	"tracefall/internal/normalize"
 	"tracefall/internal/parsers"
 )
 
@@ -178,6 +179,43 @@ func TestParseFile_SyntheticCase(t *testing.T) {
 // a parser that deliberately produces no events -- the NTFS $LogFile
 // parser validates the transaction log and emits metadata only, so
 // every record it produced was discarded.
+
+func TestParseFileWithContextUserAttributionIgnoresServerRoot(t *testing.T) {
+	const relPath = "Users/jdoe/AppData/Local/Chrome/History"
+	parser := contextUserParser{}
+	for _, rootLabel := range []string{"home/x/data", "Users/x/data", "tmp/tracefall/data"} {
+		t.Run(rootLabel, func(t *testing.T) {
+			root := filepath.Join(t.TempDir(), filepath.FromSlash(rootLabel))
+			full := filepath.Join(root, filepath.FromSlash(relPath))
+			if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(full, []byte("evidence"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			parsed, err := ParseFileWithContext("case", "collection", "source", root, relPath, parser, parsers.ParseContext{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := parsed.Events[0].User; got != "jdoe" {
+				t.Fatalf("server root %q changed evidence user: got %q", rootLabel, got)
+			}
+		})
+	}
+}
+
+type contextUserParser struct{}
+
+func (contextUserParser) Name() string         { return "context-user@1" }
+func (contextUserParser) ArtifactType() string { return "test" }
+func (contextUserParser) Detect(string) bool   { return true }
+func (contextUserParser) Parse(string) (parsers.ParseResult, error) {
+	return parsers.ParseResult{}, fmt.Errorf("Parse called without path context")
+}
+func (contextUserParser) ParseWithContext(_ string, ctx parsers.ParseContext) (parsers.ParseResult, error) {
+	return parsers.ParseResult{Events: []model.Event{{User: normalize.UserFromEvidencePath(ctx.EvidencePath)}}}, nil
+}
+
 func TestParseFile_KeepsRawEvidenceBeyondTheEventCount(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "sample.bin")

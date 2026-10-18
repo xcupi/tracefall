@@ -61,6 +61,11 @@ type ArtifactParser interface {
 // parser must handle -- a SAM parsed with no context still reports every
 // account, with its hashes marked encrypted and the reason stated.
 type ParseContext struct {
+	// EvidencePath is the path relative to the collection evidence root,
+	// forward-slash (the same value as SourceFile.Path). User/profile
+	// attribution must use this rather than the server's absolute path.
+	EvidencePath string
+
 	// BootKey is the machine boot key derived from this collection's
 	// SYSTEM hive, or nil when none was available.
 	BootKey []byte

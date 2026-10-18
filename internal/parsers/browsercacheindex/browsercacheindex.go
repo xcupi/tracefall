@@ -38,6 +38,7 @@ import (
 
 	bc "tracefall/internal/browsercache"
 	"tracefall/internal/model"
+	"tracefall/internal/normalize"
 	"tracefall/internal/parsers"
 )
 
@@ -67,6 +68,11 @@ func (Parser) DetectContent(header []byte) bool {
 
 // Parse reads one container file.
 func (p Parser) Parse(absPath string) (parsers.ParseResult, error) {
+	return p.ParseWithContext(absPath, parsers.ParseContext{})
+}
+
+// ParseWithContext uses the evidence-relative path for browser context.
+func (p Parser) ParseWithContext(absPath string, ctx parsers.ParseContext) (parsers.ParseResult, error) {
 	header, err := readHead(absPath)
 	if err != nil {
 		return parsers.ParseResult{}, err
@@ -77,7 +83,7 @@ func (p Parser) Parse(absPath string) (parsers.ParseResult, error) {
 		if err != nil {
 			return parsers.ParseResult{}, fmt.Errorf("browsercacheindex: %w", err)
 		}
-		return p.record(absPath, bc.FormatChromiumBlockfileIndex, bc.BrowserChromium, map[string]any{
+		return p.record(absPath, ctx.EvidencePath, bc.FormatChromiumBlockfileIndex, bc.BrowserChromium, map[string]any{
 			"format_version":     idx.Version,
 			"declared_entries":   idx.NumEntries,
 			"declared_bytes":     idx.NumBytes,
@@ -93,7 +99,7 @@ func (p Parser) Parse(absPath string) (parsers.ParseResult, error) {
 		if err != nil {
 			return parsers.ParseResult{}, fmt.Errorf("browsercacheindex: %w", err)
 		}
-		return p.record(absPath, bc.FormatFirefoxCache1Map, bc.BrowserFirefox, map[string]any{
+		return p.record(absPath, ctx.EvidencePath, bc.FormatFirefoxCache1Map, bc.BrowserFirefox, map[string]any{
 			"format_version":       m.Version,
 			"declared_entries":     m.EntryCount,
 			"declared_records":     m.RecordCount,
@@ -110,7 +116,7 @@ func (p Parser) Parse(absPath string) (parsers.ParseResult, error) {
 }
 
 // record builds the single metadata record a container yields.
-func (p Parser) record(absPath string, format bc.Format, browser string, fields map[string]any) parsers.ParseResult {
+func (p Parser) record(absPath, evidencePath string, format bc.Format, browser string, fields map[string]any) parsers.ParseResult {
 	fields["browser"] = browser
 	fields["format"] = string(format)
 	fields["format_name"] = format.Description()
@@ -120,10 +126,10 @@ func (p Parser) record(absPath string, format bc.Format, browser string, fields 
 	fields["evidence_meaning"] = "browser cache container metadata: this file describes a cache " +
 		"(size, entry count, layout) and holds no cache keys, so it names no URL and records no request. " +
 		"The cached resources themselves are in the accompanying block files."
-	if profile := profileFromPath(absPath); profile != "" {
+	if profile := profileFromPath(evidencePath); profile != "" {
 		fields["browser_profile"] = profile
 	}
-	if user := userFromPath(absPath); user != "" {
+	if user := normalize.UserFromEvidencePath(evidencePath); user != "" {
 		fields["user_profile_path"] = user
 	}
 
@@ -158,16 +164,6 @@ func profileFromPath(path string) string {
 		if strings.EqualFold(p, "Default") || strings.HasPrefix(p, "Profile ") ||
 			strings.HasSuffix(p, ".default") || strings.HasSuffix(p, ".default-release") {
 			return p
-		}
-	}
-	return ""
-}
-
-func userFromPath(path string) string {
-	parts := strings.Split(filepath.ToSlash(path), "/")
-	for i, p := range parts {
-		if (strings.EqualFold(p, "Users") || strings.EqualFold(p, "home")) && i+1 < len(parts) {
-			return parts[i+1]
 		}
 	}
 	return ""

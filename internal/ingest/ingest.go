@@ -437,6 +437,9 @@ func ParseFile(caseID, collectionID, sourceFileID, root, relPath string, p parse
 // passing context is free for every parser that has no use for it.
 func ParseFileWithContext(caseID, collectionID, sourceFileID, root, relPath string, p parsers.ArtifactParser, ctx parsers.ParseContext) (ParsedFile, error) {
 	abs := filepath.Join(root, filepath.FromSlash(relPath))
+	// Keep evidence-relative identity separate from the absolute server
+	// path used to open the artifact.
+	ctx.EvidencePath = filepath.ToSlash(relPath)
 
 	var parsed parsers.ParseResult
 	var err error

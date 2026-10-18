@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"tracefall/internal/model"
+	"tracefall/internal/parsers"
 	"tracefall/internal/parsers/registry"
 	"tracefall/internal/regf/regfgen"
 	"tracefall/internal/shellbag/sbgen"
@@ -114,7 +115,7 @@ func parseUserHive(t *testing.T, name string, data []byte) []model.Event {
 	if err := os.WriteFile(path, data, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	res, err := registry.New().Parse(path)
+	res, err := registry.New().ParseWithContext(path, parsers.ParseContext{EvidencePath: filepath.ToSlash(filepath.Join("Users", "jdoe", name))})
 	if err != nil {
 		t.Fatalf("parsing %s: %v", name, err)
 	}

@@ -49,6 +49,7 @@ import (
 	_ "modernc.org/sqlite"
 
 	"tracefall/internal/model"
+	"tracefall/internal/normalize"
 	"tracefall/internal/parsers"
 )
 
@@ -171,6 +172,11 @@ var activityTypes = map[int64]string{
 
 // Parse reads the database.
 func (p Parser) Parse(absPath string) (parsers.ParseResult, error) {
+	return p.ParseWithContext(absPath, parsers.ParseContext{})
+}
+
+// ParseWithContext uses the evidence-relative path for user attribution.
+func (p Parser) ParseWithContext(absPath string, ctx parsers.ParseContext) (parsers.ParseResult, error) {
 	work, cleanup, err := copyForReading(absPath)
 	if err != nil {
 		return parsers.ParseResult{}, fmt.Errorf("activitiescache: staging a copy: %w", err)
@@ -197,7 +203,7 @@ func (p Parser) Parse(absPath string) (parsers.ParseResult, error) {
 	}
 
 	sourceName := filepath.Base(absPath)
-	user := userFromPath(absPath)
+	user := normalize.UserFromEvidencePath(ctx.EvidencePath)
 
 	var out parsers.ParseResult
 	for i, a := range activities {
@@ -602,21 +608,6 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return s[:n] + "..."
-}
-
-// userFromPath recovers the account a database belongs to from the
-// evidence path, and only from a path that genuinely carries it.
-func userFromPath(path string) string {
-	parts := strings.Split(strings.ReplaceAll(path, `\`, "/"), "/")
-	for i := 0; i+1 < len(parts); i++ {
-		if strings.EqualFold(parts[i], "Users") || strings.EqualFold(parts[i], "Documents and Settings") {
-			name := parts[i+1]
-			if name != "" && !strings.EqualFold(name, "Public") && !strings.EqualFold(name, "Default") {
-				return name
-			}
-		}
-	}
-	return ""
 }
 
 // copyForReading stages the database and its sidecars, so the evidence

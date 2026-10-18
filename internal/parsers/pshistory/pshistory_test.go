@@ -9,6 +9,7 @@ import (
 	"unicode/utf16"
 
 	"tracefall/internal/model"
+	"tracefall/internal/parsers"
 	"tracefall/internal/parsers/pshistory"
 )
 
@@ -82,7 +83,7 @@ func TestDetect(t *testing.T) {
 // The central promise: commands are recovered, and NO timestamp is
 // invented for any of them.
 func TestParse_ExtractsCommandsWithoutInventingTimestamps(t *testing.T) {
-	res, err := pshistory.New().Parse(writeAtUserPath(t, "jdoe", []byte(commands)))
+	res, err := pshistory.New().ParseWithContext(writeAtUserPath(t, "jdoe", []byte(commands)), parsers.ParseContext{EvidencePath: "Users/jdoe/AppData/Roaming/Microsoft/Windows/PowerShell/PSReadline/ConsoleHost_history.txt"})
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
