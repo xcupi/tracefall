@@ -229,8 +229,15 @@ cells below the root are skipped and counted, not silently ignored.
   is richer here. Detection does not depend on rendered text.
 - Only the event families Tracefall already has detection or timeline
   handling for are normalized into events (see
-  `internal/parsers/winevent`); other records are parsed and counted but
-  not emitted, exactly as the CSV parser already behaves.
+  `internal/parsers/winevent`). Records with any other EventID are read and
+  then **skipped without being counted or reported**: the parser keeps a
+  tally in a local variable that nothing uses yet. On a real Security log
+  this is most of the volume (for example 4907 audit-policy changes), so an
+  analyst currently cannot see how much was left out. Reporting that count
+  is an open item.
+- A log whose records all fail to decode produces zero events, and the
+  `evtx_partial_parse` note is attached only to events, so it has nowhere to
+  go in that case. Same open item.
 - Registry emits events only for the targeted persistence locations plus
   the SYSTEM hostname — not one event per key, which would be noise.
 - Deleted/unallocated registry cells are **not** recovered. Reading

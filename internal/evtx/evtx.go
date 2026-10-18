@@ -554,7 +554,7 @@ func (f *File) parseTokens(c *chunk, r *reader, parent *node, subs []subValue, d
 			parent.text += s
 
 		case tokNormalSub, tokOptionalSub:
-			s, err := f.readSubstitution(c, r, subs, depth)
+			s, err := f.contentSubstitution(c, r, parent, subs, depth)
 			if err != nil {
 				return err
 			}
@@ -680,7 +680,7 @@ func (f *File) parseElementContent(c *chunk, r *reader, n *node, subs []subValue
 			}
 			n.text += s
 		case tokNormalSub, tokOptionalSub:
-			s, err := f.readSubstitution(c, r, subs, depth)
+			s, err := f.contentSubstitution(c, r, n, subs, depth)
 			if err != nil {
 				return err
 			}
@@ -794,8 +794,6 @@ func (f *File) parseTemplateInstance(c *chunk, r *reader, depth int) (*node, err
 	}
 	// Chunk-relative, because the definition offset it is compared
 	// against is chunk-relative.
-	tokenStart := r.at() - 1
-
 	if _, err := r.u8(); err != nil { // version/unknown
 		return nil, err
 	}
@@ -807,25 +805,25 @@ func (f *File) parseTemplateInstance(c *chunk, r *reader, depth int) (*node, err
 		return nil, err
 	}
 
-	// When the definition offset points at the byte right after this
-	// token, the definition is inline and the instance data follows it.
-	// Otherwise the definition lives elsewhere in the chunk (possibly
-	// later -- definitions are not ordered) and the instance data follows
-	// immediately.
-	inline := int(defOffset) == tokenStart+1
+	// The definition is INLINE when its offset equals the position where
+	// the instance header ends (right after the 4-byte definition offset
+	// field, i.e. tokenStart+10). Then the definition (24-byte header +
+	// body) sits between the instance header and the substitution array,
+	// and must be skipped. Otherwise the definition lives elsewhere in the
+	// chunk (definitions are not ordered) and the substitution array
+	// follows the instance header immediately.
+	inline := int(defOffset) == r.at()
 	tmpl, defEnd, err := c.templateAt(defOffset, f.lim)
 	if err != nil {
 		return nil, err
 	}
 	if inline {
-		if defEnd <= r.pos || defEnd > len(c.data) {
+		if defEnd <= r.at() || defEnd > len(c.data) {
 			return nil, fmt.Errorf("%w: inline template definition ends at %d", ErrCorrupt, defEnd)
 		}
-		// Skip past the definition to reach the substitution array. The
-		// reader's slice is a window into the chunk, so translate.
-		skip := defEnd - (tokenStart + 1) - 9
-		if skip < 0 || skip > r.remaining() {
-			return nil, fmt.Errorf("%w: inline template definition size is inconsistent", ErrCorrupt)
+		skip := defEnd - r.at()
+		if skip > r.remaining() {
+			return nil, fmt.Errorf("%w: inline template definition runs past the record", ErrCorrupt)
 		}
 		if _, err := r.bytes(skip); err != nil {
 			return nil, err
@@ -852,6 +850,10 @@ func (f *File) parseBinXMLDepth(c *chunk, data []byte, base int, subs []subValue
 type subValue struct {
 	typ  byte
 	data []byte
+	// off is the chunk-relative offset of data[0]. A BinXML-typed value is
+	// a nested fragment whose own offsets (names, inline definitions) are
+	// chunk-relative, so it must be parsed knowing where it sits.
+	off int
 }
 
 func (f *File) readSubstitutionArray(r *reader) ([]subValue, error) {
@@ -890,11 +892,12 @@ func (f *File) readSubstitutionArray(r *reader) ([]subValue, error) {
 		if sizes[i] > f.lim.MaxValueBytes {
 			return nil, fmt.Errorf("%w: substitution %d is %d bytes", ErrLimitExceeded, i, sizes[i])
 		}
+		off := r.at()
 		data, err := r.bytes(sizes[i])
 		if err != nil {
 			return nil, err
 		}
-		out[i] = subValue{typ: types[i], data: data}
+		out[i] = subValue{typ: types[i], data: data, off: off}
 	}
 	return out, nil
 }
@@ -920,14 +923,52 @@ func (f *File) readSubstitution(c *chunk, r *reader, subs []subValue, depth int)
 		if depth+1 > f.lim.MaxDepth {
 			return "", fmt.Errorf("%w: nested BinXML substitution too deep", ErrLimitExceeded)
 		}
-		sub, err := f.parseBinXMLDepth(c, v.data, 0, nil, depth+1)
+		// Parsed at its real chunk offset, so its inline definitions and
+		// name references resolve. A malformed fragment is an error for
+		// the record, not an empty value: silently rendering it empty is
+		// how EventData disappeared from every Windows log.
+		sub, err := f.parseBinXMLDepth(c, v.data, v.off, nil, depth+1)
 		if err != nil {
-			return "", nil // a malformed nested fragment renders empty rather than failing the record
+			return "", err
 		}
 		return strings.TrimSpace(flatten(sub)), nil
 	}
 	_ = typ
 	return renderValue(v.typ, v.data, f.lim.MaxValueBytes), nil
+}
+
+// contentSubstitution resolves a substitution that sits in ELEMENT CONTENT.
+// Windows puts the whole EventData section into a BinXML-typed (0x21)
+// substitution, so such a value is a nested fragment of elements, not
+// text. Its children are spliced into the parent exactly as an inline
+// template instance is; flattening it to text (as attributes must) loses
+// every Data element, which is how EventData vanished from the tree.
+func (f *File) contentSubstitution(c *chunk, r *reader, parent *node, subs []subValue, depth int) (string, error) {
+	index, err := r.u16()
+	if err != nil {
+		return "", err
+	}
+	if _, err := r.u8(); err != nil { // value type of the reference
+		return "", err
+	}
+	if int(index) >= len(subs) {
+		// An optional substitution with no value is normal (the field was
+		// absent); rendering it as empty is correct, not an error.
+		return "", nil
+	}
+	v := subs[index]
+	if v.typ != 0x21 {
+		return renderValue(v.typ, v.data, f.lim.MaxValueBytes), nil
+	}
+	if depth+1 > f.lim.MaxDepth {
+		return "", fmt.Errorf("%w: nested BinXML substitution too deep", ErrLimitExceeded)
+	}
+	doc, err := f.parseBinXMLDepth(c, v.data, v.off, nil, depth+1)
+	if err != nil {
+		return "", err
+	}
+	parent.children = append(parent.children, doc.children...)
+	return "", nil
 }
 
 func (f *File) readValueText(r *reader) (string, error) {
@@ -1002,13 +1043,17 @@ func (c *chunk) nameAt(offset uint32, maxBytes int) (string, error) {
 // chunk-relative offset, returning the template and the offset one past
 // its body.
 func (c *chunk) templateAt(offset uint32, lim Limits) (*template, int, error) {
-	// Definition header: 9 bytes shared with the instance token, then
-	// next-offset(4) + GUID(16) + data size(4) = 33 total.
-	const defHeader = 33
+	// Definition header, as written by Windows: next-offset(4) +
+	// GUID(16) + data size(4) = 24 bytes, then the BinXML fragment body.
+	// Verified against a real Windows 10 Security.evtx: the size field
+	// sits at +20 and the body starts at +24. An earlier 33-byte
+	// assumption read the size from the wrong place and failed every
+	// record of every real log.
+	const defHeader = 24
 	if uint64(offset)+defHeader > uint64(len(c.data)) {
 		return nil, 0, fmt.Errorf("%w: template offset %d is outside the chunk", ErrCorrupt, offset)
 	}
-	dataSize := int(binary.LittleEndian.Uint32(c.data[int(offset)+29 : int(offset)+33]))
+	dataSize := int(binary.LittleEndian.Uint32(c.data[int(offset)+20 : int(offset)+24]))
 	bodyStart := int(offset) + defHeader
 	if dataSize < 0 || bodyStart+dataSize > len(c.data) {
 		return nil, 0, fmt.Errorf("%w: template at %d claims %d bytes of body", ErrCorrupt, offset, dataSize)

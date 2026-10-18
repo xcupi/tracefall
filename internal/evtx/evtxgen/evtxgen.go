@@ -237,11 +237,13 @@ func (b *chunkBuilder) buildBinXML(e Event, base int) []byte {
 	out = append(out, 0x0f, 0x01, 0x01, 0x00)
 
 	// Template instance token, then the inline template definition.
-	tokenStart := base + len(out)
 	out = append(out, 0x0c)
-	out = append(out, 0x01)             // version
-	out = appendU32(out, 0x1000)        // template identifier
-	defOffset := uint32(tokenStart + 1) // inline: the definition starts here
+	out = append(out, 0x01)      // version
+	out = appendU32(out, 0x1000) // template identifier
+	// Inline: the definition starts immediately after this 10-byte
+	// instance header (token, version, id, definition offset), so the
+	// offset written here is the chunk-relative position just past it.
+	defOffset := uint32(base + len(out) + 4)
 	out = appendU32(out, defOffset)
 
 	// Definition continues: next-definition offset, GUID, data size.
