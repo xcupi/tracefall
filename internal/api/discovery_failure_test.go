@@ -208,7 +208,14 @@ func TestDiscover_ResponseArraysNeverNull(t *testing.T) {
 	if detail.Code != http.StatusOK {
 		t.Fatalf("collection detail: status %d, body %s", detail.Code, detail.Body.String())
 	}
-	assertNoNullArrays(t, detail.Body.Bytes(), "collection detail", "source_files", "hosts_observed", "parser_coverage")
+	assertNoNullArrays(t, detail.Body.Bytes(), "collection detail", "hosts_observed", "parser_coverage")
+
+	// The file list lives on its paged endpoint now; it must not serialize null.
+	files := doJSON(t, mux, "GET", "/api/cases/"+c.ID+"/evidence/"+disc.Collection.ID+"/files?page=1&page_size=10", nil, nil)
+	if files.Code != http.StatusOK {
+		t.Fatalf("collection file list: status %d, body %s", files.Code, files.Body.String())
+	}
+	assertNoNullArrays(t, files.Body.Bytes(), "collection file list", "items")
 
 	// And the case-wide evidence list.
 	list := doJSON(t, mux, "GET", "/api/cases/"+c.ID+"/evidence", nil, nil)
@@ -241,7 +248,15 @@ func TestCollectionDetail_ZeroFileCollectionServesEmptyArray(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("collection detail: status %d, body %s", rec.Code, rec.Body.String())
 	}
-	assertNoNullArrays(t, rec.Body.Bytes(), "legacy zero-file collection detail", "source_files", "hosts_observed", "parser_coverage")
+	assertNoNullArrays(t, rec.Body.Bytes(), "legacy zero-file collection detail", "hosts_observed", "parser_coverage")
+
+	// The file list is served by its own paged endpoint; an empty collection
+	// must answer with "items": [] there, never null.
+	files := doJSON(t, mux, "GET", "/api/cases/"+c.ID+"/evidence/"+legacy.ID+"/files?page=1&page_size=10", nil, nil)
+	if files.Code != http.StatusOK {
+		t.Fatalf("file list: status %d, body %s", files.Code, files.Body.String())
+	}
+	assertNoNullArrays(t, files.Body.Bytes(), "legacy zero-file collection file list", "items")
 }
 
 // TestDiscover_DuplicateDoesNotCreateCollection re-checks the duplicate

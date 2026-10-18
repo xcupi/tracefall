@@ -56,6 +56,15 @@ func migrate(db *sql.DB) error {
 	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_source_files_collection_path ON source_files(collection_id, path)`); err != nil {
 		return fmt.Errorf("creating source_files collection/path index: %w", err)
 	}
+	// Per-collection event queries (CollectionDetail's summary, and the
+	// collection's event list) filter on events.collection_id. Without this
+	// index every such query scans the whole events table; on a 363k-event
+	// disk image that was the bulk of an 11-second collection detail. It
+	// references a column the ALTER above may have just added, so it lives
+	// here and not in the static schema (see the note by idx_events_case).
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_events_collection ON events(collection_id)`); err != nil {
+		return fmt.Errorf("creating events collection index: %w", err)
+	}
 	// Phase 12 bootstrap refinement: gate an account behind a mandatory
 	// password change. Existing accounts default to 0 -- a deployment
 	// that already has users has already chosen their passwords, and

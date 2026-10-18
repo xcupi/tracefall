@@ -117,7 +117,7 @@ func TestEvidenceSelection_OnlySelectedFilesImported(t *testing.T) {
 	var collDetail CollectionDetail
 	doJSON(t, mux, "GET", "/api/cases/"+c.ID+"/evidence/"+disc.Collection.ID, nil, &collDetail)
 	var stillDiscovered, imported int
-	for _, sf := range collDetail.SourceFiles {
+	for _, sf := range collectionFileList(t, mux, c.ID, disc.Collection.ID) {
 		switch sf.ImportStatus {
 		case model.SourceFileDiscovered:
 			stillDiscovered++
@@ -260,8 +260,8 @@ func TestEvidenceDeletion_OtherFileRemains(t *testing.T) {
 
 	var collDetail CollectionDetail
 	doJSON(t, mux, "GET", "/api/cases/"+c.ID+"/evidence/"+disc.Collection.ID, nil, &collDetail)
-	if len(collDetail.SourceFiles) != 1 || collDetail.SourceFiles[0].ID != bobFileID {
-		t.Errorf("collection detail after deletion = %+v, want just bob's file", collDetail.SourceFiles)
+	if files := collectionFileList(t, mux, c.ID, disc.Collection.ID); len(files) != 1 || files[0].ID != bobFileID {
+		t.Errorf("collection file list after deletion = %+v, want just bob's file", files)
 	}
 	if collDetail.ImportedFileCount != 1 || collDetail.ParsedEventCount != 1 {
 		t.Errorf("collection counts after deletion = imported=%d events=%d, want 1/1", collDetail.ImportedFileCount, collDetail.ParsedEventCount)

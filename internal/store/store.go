@@ -780,6 +780,64 @@ func (s *Store) ListEventsByCollection(collectionID string) ([]model.Event, erro
 	return out, rows.Err()
 }
 
+// CollectionEventSummary is what a collection's detail reports about its
+// events, computed in the database rather than by loading every event.
+type CollectionEventSummary struct {
+	Hosts    []string   // distinct non-empty hosts, sorted
+	Earliest *time.Time // earliest dated event; nil when none is dated
+	Latest   *time.Time // latest dated event; nil when none is dated
+	Undated  int        // events whose artifact records no time (zero timestamp)
+}
+
+// SummarizeCollectionEvents answers the detail's event questions with two
+// aggregate queries. Timestamps are stored in one fixed-width UTC layout
+// (timeLayout), so MIN and MAX over the text are the chronological bounds.
+// The zero timestamp is Tracefall's "no time recorded" encoding and is never
+// a bound: it is counted as undated, as ListEventsByCollection's callers
+// have always been told.
+func (s *Store) SummarizeCollectionEvents(collectionID string) (CollectionEventSummary, error) {
+	var out CollectionEventSummary
+	zero := fmtTime(time.Time{})
+
+	var undated int
+	var lo, hi *string
+	if err := s.db.QueryRow(
+		`SELECT COUNT(CASE WHEN timestamp = ? THEN 1 END),
+		        MIN(CASE WHEN timestamp <> ? THEN timestamp END),
+		        MAX(CASE WHEN timestamp <> ? THEN timestamp END)
+		   FROM events WHERE collection_id = ?`,
+		zero, zero, zero, collectionID,
+	).Scan(&undated, &lo, &hi); err != nil {
+		return out, fmt.Errorf("store: collection event bounds: %w", err)
+	}
+	out.Undated = undated
+	if lo != nil {
+		t := parseTime(*lo)
+		out.Earliest = &t
+	}
+	if hi != nil {
+		t := parseTime(*hi)
+		out.Latest = &t
+	}
+
+	rows, err := s.db.Query(
+		`SELECT DISTINCT host FROM events WHERE collection_id = ? AND host <> '' ORDER BY host`,
+		collectionID)
+	if err != nil {
+		return out, fmt.Errorf("store: collection hosts: %w", err)
+	}
+	defer rows.Close()
+	out.Hosts = []string{}
+	for rows.Next() {
+		var h string
+		if err := rows.Scan(&h); err != nil {
+			return out, err
+		}
+		out.Hosts = append(out.Hosts, h)
+	}
+	return out, rows.Err()
+}
+
 // DeleteEvent removes one event row entirely -- only valid once its last
 // EventObservation has also been removed (see
 // Service.deleteSourceFileEvidence), since an Event with no observations

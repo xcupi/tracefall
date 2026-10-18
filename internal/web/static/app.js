@@ -5032,13 +5032,6 @@ function wireCollectionIntegrity(caseId, root) {
       detail.innerHTML = `<p class="empty">Loading...</p>`;
       try {
         const cd = await api(`/cases/${caseId}/evidence/${card.dataset.collection}`);
-        // The backend guarantees these are arrays (see
-        // internal/store.Store.ListSourceFilesByCollection). This is the
-        // secondary safety net for a database written by an older build,
-        // where a collection with no files served `"source_files": null`
-        // and this panel threw "Cannot read properties of null (reading
-        // 'map')" -- taking the whole Evidence tab down with it.
-        const files = Array.isArray(cd.source_files) ? cd.source_files : [];
         detail.innerHTML = `
           <div class="integrity-grid">
             <div><span class="muted small">Collection ID</span><div class="mono small">${esc(cd.collection_id)}</div></div>
@@ -5059,7 +5052,7 @@ function wireCollectionIntegrity(caseId, root) {
           }
           <div class="muted small" style="margin-top:8px">Per-file integrity</div>
           <div id="${integrityTablePagerHost(cd.collection_id)}">${
-            files.length
+            cd.file_count > 0
               ? ""
               : `<p class="empty">No files recorded in this collection.${
                   cd.ingestion_status === "failed"
@@ -5070,7 +5063,7 @@ function wireCollectionIntegrity(caseId, root) {
         `;
         detail.dataset.loaded = "1";
         wireIntegrityHash(detail);
-        mountIntegrityTable(detail, cd.collection_id, files);
+        mountIntegrityTable(detail, caseId, cd.collection_id, cd.file_count);
         wireIntegrityVerify(caseId, card.dataset.collection, detail);
         wireDeleteCollection(caseId, cd, detail);
       } catch (e) {
@@ -7851,28 +7844,50 @@ function integrityTablePagerHost(collectionID) {
   return `integrity-files-${collectionID}`;
 }
 
-// mountIntegrityTable pages the per-file integrity table.
+// mountIntegrityTable pages the per-file integrity table from the server.
 //
 // The table lists EVERY file in the collection -- discovered as well as
 // imported -- because its purpose is the recorded SHA-256 of each file,
-// which exists whether or not the file was parsed. On a logical image
-// that is thousands of rows, and it previously rendered all of them:
-// 1,240 files measured as 1,240 rows and ~10,000 DOM nodes, and a
-// 7,000-file image is proportionally worse.
-//
-// Paged in the browser rather than on the server because
-// CollectionDetail has already delivered the rows -- the cost being
-// removed here is DOM construction, not transfer, so paging the render
-// is the proportionate fix and costs no extra request.
-function mountIntegrityTable(root, collectionID, files) {
+// which exists whether or not the file was parsed. On a disk image that is
+// tens of thousands of rows. The collection detail does not carry the file
+// list (on a 45,618-file image it was 37.8 MB), so each page is requested
+// from /evidence/{id}/files, which is the same paged endpoint the Evidence
+// tab already uses.
+function mountIntegrityTable(root, caseId, collectionID, total) {
   const host = root.querySelector(`#${CSS.escape(integrityTablePagerHost(collectionID))}`);
-  if (!host || !files || files.length === 0) return;
+  if (!host || !total) return;
 
   const prefix = `intg${collectionID}`;
   pagerFor(prefix, { scope: collectionID, sizes: [10, 25, 50, 100, 250], defaultSize: 10 });
 
-  const render = () => {
-    const page = paginate(prefix, files);
+  // Only the newest page request may paint. A click made while an earlier
+  // page is still loading must not be overwritten when that page arrives.
+  let latest = 0;
+  const render = async () => {
+    const st = pagerStates.get(prefix);
+    const ticket = ++latest;
+    let res;
+    try {
+      res = await api(`/cases/${caseId}/evidence/${collectionID}/files?page=${st.page}&page_size=${st.pageSize}`);
+    } catch (err) {
+      if (ticket === latest) {
+        host.innerHTML = `<p class="empty">Could not load this page of files: ${esc(err.message || String(err))}</p>`;
+      }
+      return;
+    }
+    if (ticket !== latest) return;
+    st.page = res.page; // the server clamps an out-of-range page
+    const items = res.items || [];
+    const start = (res.page - 1) * res.page_size;
+    const page = {
+      items,
+      page: res.page,
+      pageSize: res.page_size,
+      total: res.total,
+      totalPages: res.total_pages,
+      from: res.total === 0 ? 0 : start + 1,
+      to: start + items.length,
+    };
     host.innerHTML = `
       <div class="table-wrap"><table class="data-table">
         <thead><tr><th>Filename</th><th>SHA-256</th><th>Size</th><th>Discovered</th><th>Imported</th><th>Status</th><th>Events</th></tr></thead>

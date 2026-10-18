@@ -237,10 +237,15 @@ func TestPagination_IntegrityTableIsPaged(t *testing.T) {
 	}
 	body := functionBody(t, src, "function mountIntegrityTable(")
 
-	for _, want := range []string{"pagerFor(", "paginate(", "renderPager(", "wirePager("} {
+	// Paged on the server now: each page is a request to the paged files
+	// endpoint, rendered through the same pager as every other list.
+	for _, want := range []string{"pagerFor(", "renderPager(", "wirePager(", "/files?page="} {
 		if !strings.Contains(body, want) {
 			t.Errorf("mountIntegrityTable does not use %s; the table would render every file", want)
 		}
+	}
+	if strings.Contains(body, "paginate(") {
+		t.Error("mountIntegrityTable pages in the browser over a full list again; the list is no longer delivered to the page")
 	}
 	if !strings.Contains(body, "defaultSize: 10") {
 		t.Error("the integrity table does not default to 10 rows per page")

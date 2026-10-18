@@ -350,8 +350,8 @@ func TestEndToEnd_SyntheticCase(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("get collection detail: status %d, body %s", rec.Code, rec.Body.String())
 	}
-	if len(collDetail.SourceFiles) != 6 {
-		t.Errorf("collection detail source files = %d, want 6", len(collDetail.SourceFiles))
+	if files := collectionFileList(t, mux, c.ID, collections[0].ID); len(files) != 6 {
+		t.Errorf("collection file list = %d, want 6", len(files))
 	}
 }
 

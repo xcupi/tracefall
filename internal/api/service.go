@@ -446,11 +446,13 @@ type ParserCoverage struct {
 // "Unknown" for these rather than Tracefall guessing.
 type CollectionDetail struct {
 	model.Collection
-	SourceFiles   []TriagedSourceFile `json:"source_files"`
-	Coverage      Coverage            `json:"coverage"`
-	HostsObserved []string            `json:"hosts_observed"`
-	EarliestEvent *time.Time          `json:"earliest_event,omitempty"`
-	LatestEvent   *time.Time          `json:"latest_event,omitempty"`
+	// The file list is not part of the detail: it grows with the evidence
+	// (tens of thousands of rows on a disk image) and is served one page at a
+	// time by GET /evidence/{collectionID}/files.
+	Coverage      Coverage   `json:"coverage"`
+	HostsObserved []string   `json:"hosts_observed"`
+	EarliestEvent *time.Time `json:"earliest_event,omitempty"`
+	LatestEvent   *time.Time `json:"latest_event,omitempty"`
 	// UndatedEvents counts imported events whose artifact records no
 	// timestamp, and which are therefore outside the range above.
 	UndatedEvents  int              `json:"undated_events"`
@@ -466,43 +468,13 @@ func (s *Service) CollectionDetail(caseID, collectionID string) (CollectionDetai
 	if err != nil {
 		return CollectionDetail{}, err
 	}
-	events, err := s.store.ListEventsByCollection(collectionID)
+	// The event questions are answered by the database. Loading every event
+	// of the collection to find its bounds took about 11 seconds on a 363k
+	// event disk image, for four numbers.
+	summary, err := s.store.SummarizeCollectionEvents(collectionID)
 	if err != nil {
 		return CollectionDetail{}, err
 	}
-
-	hostSet := map[string]bool{}
-	var earliest, latest *time.Time
-	var undated int
-	for _, e := range events {
-		if e.Host != "" {
-			hostSet[e.Host] = true
-		}
-		// Artifacts that record no time at all (PowerShell console
-		// history) carry a zero Timestamp by design -- see
-		// internal/parsers/pshistory. Including them here would drag the
-		// reported range back to year 1 and describe the evidence as
-		// spanning two millennia. They are counted separately instead, so
-		// the events are never silently dropped from the summary.
-		ts := e.Timestamp
-		if ts.IsZero() {
-			undated++
-			continue
-		}
-		if earliest == nil || ts.Before(*earliest) {
-			t := ts
-			earliest = &t
-		}
-		if latest == nil || ts.After(*latest) {
-			t := ts
-			latest = &t
-		}
-	}
-	hosts := make([]string, 0, len(hostSet))
-	for h := range hostSet {
-		hosts = append(hosts, h)
-	}
-	sort.Strings(hosts)
 
 	type coverageKey struct{ parser, artifactType string }
 	coverage := map[coverageKey]*ParserCoverage{}
@@ -529,12 +501,11 @@ func (s *Service) CollectionDetail(caseID, collectionID string) (CollectionDetai
 	triaged := triageAll(sources)
 	return CollectionDetail{
 		Collection:     c,
-		SourceFiles:    triaged,
 		Coverage:       computeCoverage(triaged),
-		HostsObserved:  hosts,
-		EarliestEvent:  earliest,
-		LatestEvent:    latest,
-		UndatedEvents:  undated,
+		HostsObserved:  summary.Hosts,
+		EarliestEvent:  summary.Earliest,
+		LatestEvent:    summary.Latest,
+		UndatedEvents:  summary.Undated,
 		ParserCoverage: parserCoverage,
 	}, nil
 }
