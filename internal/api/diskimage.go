@@ -275,26 +275,93 @@ func openDiskImage(paths []string) (image.Image, partition.Table, []openedVolume
 	return img, tb, vols, notes, nil
 }
 
-// diskCandidate says whether a file in a volume is worth cataloging, and
-// under what name and stream.
-func diskCandidate(f ntfsvol.File, registry []parsers.ArtifactParser) (relPath, stream string, size int64, ok bool) {
+// diskEntry is one in-use file of a volume as the catalog sees it.
+type diskEntry struct {
+	Rel       string // path inside the volume, forward-slash, no leading slash
+	Stream    string // named stream to read; "" for the unnamed data
+	Size      int64
+	Sniff     []byte // first bytes, when the content was read to decide
+	Supported bool   // a parser claims the file, by name or by content
+}
+
+// classifyDiskFile says how the catalog treats a file in a volume. ok is
+// false only for entries that are never cataloged: directories, deleted or
+// orphaned records, and $MFTMirr. Every other in-use file is cataloged,
+// supported when a parser claims it and unsupported otherwise, so nothing
+// is dropped without the analyst seeing it.
+//
+// A name is not the only way a file is identified. Amcache.hve is a REGF
+// hive under an ordinary name, and a shortcut keeps its own name wherever
+// it is moved, so a file the name does not decide is sniffed: its first
+// bytes are offered to the same content rules folder discovery uses
+// (ingest.Discover). The bytes are kept on the entry so the caller does not
+// read them a second time.
+func classifyDiskFile(vol *ntfsvol.Volume, f ntfsvol.File, registry []parsers.ArtifactParser) (diskEntry, bool) {
 	if f.IsDir || !f.InUse || f.Orphan {
-		return "", "", 0, false
+		return diskEntry{}, false
 	}
 	rel := strings.TrimPrefix(f.Path, "/")
 	// $UsnJrnl keeps its journal in the named stream $J.
 	if strings.EqualFold(rel, "$Extend/$UsnJrnl") {
 		for _, st := range f.Streams {
 			if st.Name == usnStream && st.Size > 0 {
-				return rel + "/" + usnStream, usnStream, st.Size, true
+				return diskEntry{Rel: rel + "/" + usnStream, Stream: usnStream, Size: st.Size, Supported: true}, true
 			}
 		}
-		return "", "", 0, false
 	}
-	if ingest.MatchParser(rel, nil, registry) == nil {
-		return "", "", 0, false
+	// $MFTMirr repeats the first records of $MFT, so cataloging it would
+	// parse the same records twice and double-count them on the timeline.
+	if mirrorOfMFT(rel) {
+		return diskEntry{}, false
 	}
-	return rel, "", f.Size, true
+	if ingest.MatchParser(rel, nil, registry) != nil {
+		return diskEntry{Rel: rel, Size: f.Size, Supported: true}, true
+	}
+	e := diskEntry{Rel: rel, Size: f.Size}
+	// Name did not decide it. Only a non-empty unnamed stream can hold a
+	// hive or a log; directories and empty files cannot. Files in the
+	// skipped folders are not sniffed (see sniffSkipped).
+	if vol == nil || f.Size == 0 || sniffSkipped(rel) {
+		return e, true
+	}
+	dr, err := vol.OpenStream(f.Record, "")
+	if err != nil {
+		return e, true
+	}
+	buf := make([]byte, parsers.SniffLength)
+	n, _ := dr.ReadAt(buf, 0)
+	if n == 0 {
+		return e, true
+	}
+	e.Sniff = buf[:n]
+	e.Supported = ingest.MatchParser(rel, e.Sniff, registry) != nil
+	return e, true
+}
+
+// sniffSkipPrefixes are folders whose files are not identified by content
+// when their name does not decide. They hold installed applications and
+// wallpapers: 162 of the 168 images that a SysInternals Windows 10 volume
+// added, none of which is evidence, and they would bury the artifacts the
+// sniff exists to find. A file there whose name is a known artifact is still
+// cataloged; only the content sniff is skipped.
+var sniffSkipPrefixes = []string{"Program Files/", "Program Files (x86)/", "Windows/Web/"}
+
+// sniffSkipped reports whether rel lies in a folder whose files are not
+// sniffed. Windows paths are case-insensitive, so the match is too.
+func sniffSkipped(rel string) bool {
+	low := strings.ToLower(rel)
+	for _, p := range sniffSkipPrefixes {
+		if strings.HasPrefix(low, strings.ToLower(p)) {
+			return true
+		}
+	}
+	return false
+}
+
+// mirrorOfMFT reports whether rel is the $MFTMirr copy of the first $MFT
+// records.
+func mirrorOfMFT(rel string) bool {
+	return strings.EqualFold(rel, "$MFTMirr")
 }
 
 // catalogDiskImage opens the image, verifies it against the hashes its
@@ -344,38 +411,42 @@ func (s *Service) catalogDiskImage(caseID string, collection model.Collection, s
 			if f.InUse && !f.IsDir {
 				vr.FilesInUse++
 			}
-			rel, stream, size, ok := diskCandidate(f, registry)
+			e, ok := classifyDiskFile(ov.vol, f, registry)
 			if !ok {
 				return nil
 			}
-			full := prefix + "/" + rel
+			full := prefix + "/" + e.Rel
 			if seen[full] {
 				return nil
 			}
 			seen[full] = true
-			// Confirm by content, as the other catalogs do, so a text file
-			// that merely carries a hive's name is not claimed.
-			var header []byte
-			if dr, err := ov.vol.OpenStream(f.Record, stream); err == nil {
-				buf := make([]byte, parsers.SniffLength)
-				n, _ := dr.ReadAt(buf, 0)
-				header = buf[:n]
+			// Confirm by content, as the other catalogs do, so a text file that
+			// merely carries a hive's name is not claimed. A file the classifier
+			// already sniffed keeps those bytes; a name-claimed file is read
+			// here; a skipped folder is not read at all.
+			header := e.Sniff
+			if header == nil && e.Size > 0 && !sniffSkipped(e.Rel) {
+				if dr, err := ov.vol.OpenStream(f.Record, e.Stream); err == nil {
+					buf := make([]byte, parsers.SniffLength)
+					n, _ := dr.ReadAt(buf, 0)
+					header = buf[:n]
+				}
 			}
 			var artifactType, parserName string
 			supportedFile := false
-			if p := ingest.MatchParser(rel, header, registry); p != nil {
+			if p := ingest.MatchParser(e.Rel, header, registry); p != nil {
 				artifactType, parserName, supportedFile = p.ArtifactType(), p.Name(), true
 			} else {
-				artifactType = ingest.RecognizeUnparsed(rel, header)
+				artifactType = ingest.RecognizeUnparsed(e.Rel, header)
 			}
 			name := f.Name
-			if stream != "" {
-				name = stream
+			if e.Stream != "" {
+				name = e.Stream
 			}
 			sf := model.SourceFile{
 				ID: uuid.NewString(), CaseID: caseID, CollectionID: collection.ID,
 				OriginalFilename: name, Path: full, ArtifactType: artifactType, Parser: parserName,
-				Supported: supportedFile, SizeBytes: size, DiscoveredAt: now,
+				Supported: supportedFile, SizeBytes: e.Size, DiscoveredAt: now,
 			}
 			if supportedFile {
 				sf.ImportStatus = model.SourceFileDiscovered
@@ -471,10 +542,10 @@ func (s *Service) newDiskExtractor(caseID, collectionID string) (*diskExtractor,
 		prefix := volumePrefix(ov.part.Index)
 		ov := ov
 		if _, err := ov.vol.Walk(func(f ntfsvol.File) error {
-			if rel, stream, _, ok := diskCandidate(f, registry); ok {
-				key := prefix + "/" + rel
+			if e, ok := classifyDiskFile(ov.vol, f, registry); ok && e.Supported {
+				key := prefix + "/" + e.Rel
 				if _, dup := x.byPath[key]; !dup {
-					x.byPath[key] = diskLocator{vol: ov.vol, record: f.Record, stream: stream}
+					x.byPath[key] = diskLocator{vol: ov.vol, record: f.Record, stream: e.Stream}
 				}
 			}
 			return nil

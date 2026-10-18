@@ -153,9 +153,13 @@ func TestDiskImage_E01CatalogsTheArtifactsInsideItsFileSystem(t *testing.T) {
 			t.Errorf("a file from the unformatted partition appeared: %s", p)
 		}
 	}
-	// What is not cataloged must not be invented as evidence either.
-	if _, ok := files["vol1/big.bin"]; ok {
-		t.Error("a plain data file was cataloged as an artifact")
+	// A plain data file is listed, so the analyst can see it, but it must
+	// never be invented as evidence: it stays unsupported.
+	sf, ok := files["vol1/big.bin"]
+	if !ok {
+		t.Error("a plain data file was dropped instead of listed as unsupported")
+	} else if sf.Supported || sf.ImportStatus != model.SourceFileUnsupported {
+		t.Errorf("a plain data file was catalogued as an artifact: supported=%v status=%s", sf.Supported, sf.ImportStatus)
 	}
 	_ = m
 }

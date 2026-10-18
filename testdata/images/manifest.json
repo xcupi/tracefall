@@ -1,21 +1,21 @@
 {
  "images": {
   "gpt": {
-   "md5": "aa409bfe01669bed35d001fe4c1d8600",
-   "sha1": "26fbddf59f4fe5278fe8a9654ce13a1c816aee71",
-   "sha256": "16e2acfa147f8e2693a8ee567444d694b0dd316de488fdcbdadcc634b06e321e",
+   "md5": "b41d58130ea3506ad592873258730dea",
+   "sha1": "f906abae6602df1e022900f105922c4d4ecd5ee1",
+   "sha256": "158cbe0ab1279088797f89662581c75243c3f5d6b5c3a884b673054c4d6acf10",
    "size": 29360128
   },
   "mbr": {
-   "md5": "ad4e6fedc66f92d4af90e1652d816937",
-   "sha1": "7d27571d60748bc63ede8c9ea6ba4ac32c146338",
-   "sha256": "934f43b02d95deff563450db0f82aff4912244ecd184a7730072e49ca2efc2c8",
+   "md5": "901aad80340cb224fc460960000c224a",
+   "sha1": "91f5b6baf6c91a36fbec2d3bf2d9c534304d934b",
+   "sha256": "d6b2e80b329c28ed9d525c71659c3ca1ab063527f6ebe6f7b125fa1d27a3b540",
    "size": 29360128
   },
   "store": {
-   "md5": "392b3d24437e2be6fb619ecb08e9f7a5",
-   "sha1": "06b2b22d79a4a43b33bca4322b48aa9ee2d5faba",
-   "sha256": "d31eb6e5423ddcbe3ab667cad77d83f9413de0da3e1c6f3148a064bb41488141",
+   "md5": "c5f0cad029fa445f8d2d4c6f8d0f11ae",
+   "sha1": "a6e4f655c3fb636742097040be99dde29a9f02d1",
+   "sha256": "3f8fed5f47f6b753995bee2524b99d8fea6dd1964d2837eb2260b6f5654679ba",
    "size": 2097152
   }
  },
@@ -73,11 +73,11 @@
     "size": 8192
    },
    "/Windows/System32/winevt/Logs/Microsoft-Windows-Sysmon%4Operational.evtx": {
-    "sha256": "e6f733ff80171fb3ca6e011d4b12c905b7d1b56c770de29843e6c0dda69e7131",
+    "sha256": "b186bd1f8b8d1fa4d4489b3ff222900cad75d2df9b6e5949cd3bd39b1a36f817",
     "size": 69632
    },
    "/Windows/System32/winevt/Logs/Security.evtx": {
-    "sha256": "83042b88cb4a16379007a1e00399a57e129f3dfabbcc12c7a92e4ae4447eafff",
+    "sha256": "c5194198d154727d1d7e5691a802366b29e425f58491ae35fcf41d052cba5984",
     "size": 69632
    },
    "/ads.txt": {
