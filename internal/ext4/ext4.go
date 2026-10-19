@@ -133,6 +133,12 @@ func Open(r io.ReaderAt, size int64) (*Volume, error) {
 	if v.inodes != groups*v.ipg {
 		return nil, corrupt("inode count %d does not match %d groups of %d", v.inodes, groups, v.ipg)
 	}
+	// An inode table that cannot fit in the image is a damaged or hostile
+	// superblock. Refuse it here, before any size taken from it is used to
+	// allocate memory.
+	if v.ipg > uint64(size)/uint64(v.isize) {
+		return nil, corrupt("%d inodes per group of %d bytes do not fit the volume", v.ipg, v.isize)
+	}
 	if incompat&incompatMetaBG != 0 {
 		return nil, fmt.Errorf("%w: meta_bg group layout", fsvol.ErrUnsupported)
 	}
@@ -681,23 +687,32 @@ func (v *Volume) Walk(fn func(fsvol.File) error) (fsvol.WalkStats, error) {
 // through the walk's corrupt count, not here.
 func (v *Volume) forEachInode(fn func(*inode) error) error {
 	perGroup := int64(v.ipg) * v.isize
-	table := make([]byte, perGroup)
+	// Read a group's table in bounded pieces, so memory does not depend on a
+	// size the superblock claims.
+	const chunkInodes = 4096
+	chunk := make([]byte, chunkInodes*v.isize)
 	for g := range v.itable {
 		off := int64(v.itable[g]) * v.bs
 		if off+perGroup > v.size {
 			continue
 		}
-		if n, _ := v.r.ReadAt(table, off); int64(n) < perGroup {
-			continue
-		}
-		for idx := uint64(0); idx < v.ipg; idx++ {
-			num := uint64(g)*v.ipg + idx + 1
-			if num > v.inodes {
+		for first := uint64(0); first < v.ipg; first += chunkInodes {
+			n := uint64(chunkInodes)
+			if first+n > v.ipg {
+				n = v.ipg - first
+			}
+			buf := chunk[:int64(n)*v.isize]
+			if got, _ := v.r.ReadAt(buf, off+int64(first)*v.isize); int64(got) < int64(len(buf)) {
 				break
 			}
-			in := parseInode(num, table[int64(idx)*v.isize:int64(idx+1)*v.isize])
-			if err := fn(in); err != nil {
-				return err
+			for i := uint64(0); i < n; i++ {
+				num := uint64(g)*v.ipg + first + i + 1
+				if num > v.inodes {
+					return nil
+				}
+				if err := fn(parseInode(num, buf[int64(i)*v.isize:int64(i+1)*v.isize])); err != nil {
+					return err
+				}
 			}
 		}
 	}

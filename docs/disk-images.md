@@ -23,7 +23,7 @@ E01 / raw  ->  internal/image      container, per-chunk checksums, hash verifica
 |---|---|---|
 | Container | raw/dd (single or split `.001 .002 ...`), E01 / EWF1 (EnCase, libewf), multi-segment E01 | Ex01 (EWF2), L01 logical evidence, VMDK/VHD/VHDX/AFF4 |
 | Partitions | MBR, extended + logical, GPT (primary or backup), bare NTFS or ext volume with no table | dynamic disks (LDM) are named, not read |
-| File system | NTFS (MFT, attribute lists, data runs, sparse, alternate data streams, deleted entries); ext2, ext3 and ext4, read-only (in-use directory tree, extents and block maps, holes, hard links; symlinks and device nodes listed but not read as content) | NTFS-compressed and EFS-encrypted streams (reported), BitLocker (reported), ext inline data, encrypted ext files and meta_bg layouts (reported); FAT/exFAT/APFS (reported) |
+| File system | NTFS (MFT, attribute lists, data runs, sparse, alternate data streams, deleted entries); ext2, ext3 and ext4, read-only (in-use directory tree, extents and block maps, holes, hard links, freed inodes that still map data); FAT12, FAT16, FAT32 and exFAT, read-only (in-use tree, long names, cluster chains, contiguous exFAT files) | NTFS-compressed and EFS-encrypted streams (reported), BitLocker (reported), ext inline data and encrypted ext files (reported), APFS and HFS+ (reported) |
 
 "Reported" means the image report and the audit trail say so, and the
 partition's contents are listed as **not part of the analysis**. Nothing is
@@ -130,3 +130,21 @@ NTFS: they are reported by the reader, not added to the evidence.
 
 Checked against debugfs lsdel on the validation image: the two freed inodes it
 lists are the two the reader lists, and their content equals debugfs dump.
+
+## FAT12, FAT16, FAT32 and exFAT
+
+The FAT reader (internal/fat) is read-only. It lists the in-use tree with long
+names (LFN entries, checked against their short alias's checksum) and exFAT
+names, follows FAT chains, and reads exFAT files with no FAT chain as a
+contiguous run. Each volume's type comes from its layout (cluster count for
+FAT12/16/32, the signature for exFAT). Deleted entries are not listed: FAT
+frees a deleted file's chain, so its content is generally gone, and a name
+alone is not catalogued. Damaged directory entries and chains are reported
+as corrupt, and the walk continues.
+
+Checked two ways. The fixtures are written by the reader's test code from a
+known tree and then checked by the file system's own checker (fsck.fat and
+fsck.exfat), which rejects a damaged image. Files are read back and compared
+with the source; fragmented files are checked to be read through their chain.
+The fixture writer is test code, and the checker validates its output; no real
+FAT or exFAT image from the validation set has been read yet.

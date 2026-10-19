@@ -3,6 +3,7 @@ package ext4
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -475,4 +476,20 @@ func keys(m map[string]fsvol.File) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// A superblock that claims an inode table far larger than the image must be
+// refused at Open. Before this check, Walk allocated the claimed size in one
+// piece, which is a fatal out-of-memory error that recover() cannot catch.
+func TestOpen_RefusesAnInodeTableLargerThanTheImage(t *testing.T) {
+	img, _ := buildFS(t, "mkfs.ext2", "-b", "1024")
+	m := append(memImage(nil), img...)
+	sb := m[1024:]
+	binary.LittleEndian.PutUint32(sb[32:], 1<<30) // blocks per group
+	binary.LittleEndian.PutUint32(sb[40:], 1<<27) // inodes per group
+	binary.LittleEndian.PutUint32(sb[0:], 1<<27)  // inodes in total
+	binary.LittleEndian.PutUint32(sb[4:], uint32(len(m)/1024))
+	if _, err := Open(m, int64(len(m))); !errors.Is(err, fsvol.ErrCorrupt) {
+		t.Fatalf("want ErrCorrupt for an oversized inode table, got %v", err)
+	}
 }

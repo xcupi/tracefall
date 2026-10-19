@@ -15,6 +15,7 @@ import (
 	"github.com/google/uuid"
 
 	"tracefall/internal/ext4"
+	"tracefall/internal/fat"
 	"tracefall/internal/fsvol"
 	"tracefall/internal/image"
 	"tracefall/internal/ingest"
@@ -268,6 +269,13 @@ func openDiskImage(paths []string) (image.Image, partition.Table, []openedVolume
 				continue
 			}
 			vols = append(vols, openedVolume{part: p, vol: v.AsVolume()})
+		case "fat", "fat32", "exfat":
+			v, err := fat.Open(p.Reader(img), p.SizeBytes)
+			if err != nil {
+				notes = append(notes, fmt.Sprintf("partition %d: the %s volume could not be opened (%v)", p.Index, p.FS, err))
+				continue
+			}
+			vols = append(vols, openedVolume{part: p, vol: v})
 		case "ext":
 			v, err := ext4.Open(p.Reader(img), p.SizeBytes)
 			if err != nil {
