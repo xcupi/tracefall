@@ -176,7 +176,7 @@ func TestParseWithContext_AttributesUserAndRecordsWhy(t *testing.T) {
 	}
 }
 
-// Real-sample test: the Insider Linux image's root .bash_history. Skipped
+// Real-sample test: a Linux root .bash_history. Skipped
 // unless TRACEFALL_REAL_BASH points at an extracted copy. The sample is
 // not committed; the SHA-256 pins that the test runs on the exact file.
 func TestReal_RootBashHistory(t *testing.T) {

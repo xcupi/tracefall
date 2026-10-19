@@ -340,7 +340,7 @@ func classifyDiskFile(vol *ntfsvol.Volume, f ntfsvol.File, registry []parsers.Ar
 
 // sniffSkipPrefixes are folders whose files are not identified by content
 // when their name does not decide. They hold installed applications and
-// wallpapers: 162 of the 168 images that a SysInternals Windows 10 volume
+// wallpapers: most of the images found in a default Windows install are
 // added, none of which is evidence, and they would bury the artifacts the
 // sniff exists to find. A file there whose name is a known artifact is still
 // cataloged; only the content sniff is skipped.

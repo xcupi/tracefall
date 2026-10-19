@@ -139,7 +139,7 @@ func TestParse_EntriesBecomeDatedEvents(t *testing.T) {
 	b := newJournal()
 	refs := []uint64{
 		b.data("MESSAGE=Started Session 4 of user alice."),
-		b.data("_HOSTNAME=KarenHacker"),
+		b.data("_HOSTNAME=host01"),
 		b.data("_COMM=systemd-logind"),
 		b.data("_PID=812"),
 		b.data("SYSLOG_IDENTIFIER=systemd-logind"),
@@ -161,7 +161,7 @@ func TestParse_EntriesBecomeDatedEvents(t *testing.T) {
 	if want := time.UnixMicro(rt).UTC(); !ev.Timestamp.Equal(want) {
 		t.Errorf("timestamp = %v, want %v (the file carries the year, so it must be kept)", ev.Timestamp, want)
 	}
-	if ev.Host != "KARENHACKER" || ev.ProcessName != "systemd-logind" || ev.PID != 812 || ev.Provider != "systemd-logind" {
+	if ev.Host != "HOST01" || ev.ProcessName != "systemd-logind" || ev.PID != 812 || ev.Provider != "systemd-logind" {
 		t.Errorf("host/comm/pid/provider = %q/%q/%d/%q", ev.Host, ev.ProcessName, ev.PID, ev.Provider)
 	}
 	if ev.Extra["message"] != "Started Session 4 of user alice." || ev.Extra["systemd_unit"] != "systemd-logind.service" {
@@ -280,7 +280,7 @@ func auditRecord(b *jbuilder, seq, realtime uint64, id string, extra []string, m
 	refs := []uint64{
 		b.data("_TRANSPORT=audit"),
 		b.data("_AUDIT_ID=" + id),
-		b.data("_HOSTNAME=KarenHacker"),
+		b.data("_HOSTNAME=host01"),
 		b.data("MESSAGE=" + message),
 	}
 	for _, kv := range extra {
@@ -294,10 +294,10 @@ func TestParse_ExecutionGroupBecomesOneProcessCreate(t *testing.T) {
 	const id = "17009727"
 	auditRecord(b, 1, rt, id, []string{"_COMM=pkill", "_PID=18836"},
 		`SYSCALL arch=c000003e syscall=59 success=yes exit=0 a0=55f4 items=2 ppid=15853 pid=18836 auid=1000 uid=1 gid=1 euid=1 exe="/usr/bin/pkill" comm="pkill"`)
-	auditRecord(b, 2, rt+1, id, nil, `EXECVE argc=3 a0="pkill" a1="-9" a2="kdevtmpfsi"`)
+	auditRecord(b, 2, rt+1, id, nil, `EXECVE argc=3 a0="pkill" a1="-9" a2="workerd"`)
 	auditRecord(b, 3, rt+2, id, nil, `CWD cwd="/tmp"`)
 	auditRecord(b, 4, rt+3, id, nil, `PATH item=0 name="/usr/bin/pkill" inode=4307`)
-	auditRecord(b, 5, rt+4, id, nil, "PROCTITLE proctitle="+hex.EncodeToString([]byte("pkill\x00-9\x00kdevtmpfsi")))
+	auditRecord(b, 5, rt+4, id, nil, "PROCTITLE proctitle="+hex.EncodeToString([]byte("pkill\x00-9\x00workerd")))
 
 	res, st, err := New().ParseDetailed(b.write(t, "system.journal"), parsers.ParseContext{})
 	if err != nil {
@@ -310,7 +310,7 @@ func TestParse_ExecutionGroupBecomesOneProcessCreate(t *testing.T) {
 	if ev.EventType != model.EventProcessCreate {
 		t.Errorf("type = %q, want process_create", ev.EventType)
 	}
-	if ev.CommandLine != "pkill -9 kdevtmpfsi" {
+	if ev.CommandLine != "pkill -9 workerd" {
 		t.Errorf("command line = %q", ev.CommandLine)
 	}
 	if ev.PID != 18836 || ev.PPID != 15853 || ev.ProcessName != "pkill" || ev.ProcessPath != "/usr/bin/pkill" {
@@ -319,7 +319,7 @@ func TestParse_ExecutionGroupBecomesOneProcessCreate(t *testing.T) {
 	if ev.Extra["cwd"] != "/tmp" || ev.Extra["paths"] != "/usr/bin/pkill" || ev.Extra["record_count"] != "5" {
 		t.Errorf("cwd/paths/records = %q/%q/%q", ev.Extra["cwd"], ev.Extra["paths"], ev.Extra["record_count"])
 	}
-	if ev.Extra["proctitle"] != "pkill -9 kdevtmpfsi" || ev.Extra["syscall_success"] != "yes" || ev.Extra["audit_id"] != id {
+	if ev.Extra["proctitle"] != "pkill -9 workerd" || ev.Extra["syscall_success"] != "yes" || ev.Extra["audit_id"] != id {
 		t.Errorf("proctitle/success/audit_id = %q/%q/%q", ev.Extra["proctitle"], ev.Extra["syscall_success"], ev.Extra["audit_id"])
 	}
 	if ev.SourceReference != "audit:"+id || ev.Timestamp.UnixMicro() != int64(rt) {

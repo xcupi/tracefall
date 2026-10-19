@@ -25,7 +25,7 @@ import (
 //
 //	TRACEFALL_REAL_EVTX=/path/to/Security.evtx go test ./internal/evtx/ -run Real
 //
-// The sample used during validation is CyberDefenders' SysInternals image
+// Any Security.evtx can be used through TRACEFALL_REAL_EVTX; no sample is shipped.
 // (Windows 10, MSEDGEWIN10), extracted with sleuthkit icat from inode 80826.
 // It is NOT committed: the repository keeps only synthetic fixtures. Its
 // SHA-256 is pinned so the test cannot silently run against another file.

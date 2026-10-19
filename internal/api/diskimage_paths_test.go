@@ -3,7 +3,7 @@ package api
 import "testing"
 
 // Path rules for the disk catalog. The cases are real paths from the
-// SysInternals Windows 10 image: an installed-app wallpaper and a shell
+// A default Windows install: an installed-app wallpaper and a shell
 // wallpaper that must not be sniffed, and the artifacts that must still be
 // reachable. Windows is case-insensitive, so case must not change the answer.
 func TestSniffSkipped(t *testing.T) {
@@ -16,9 +16,9 @@ func TestSniffSkipped(t *testing.T) {
 		{"Windows/Web/Wallpaper/Theme1/img1.jpg", true},
 		{"PROGRAM FILES/WindowsApps/x.jpg", true},
 		{"Windows/appcompat/Programs/Amcache.hve", false},
-		{"Users/IEUser/AppData/Roaming/Microsoft/Windows/Recent/notes.txt.lnk", false},
+		{"Users/alice/AppData/Roaming/Microsoft/Windows/Recent/notes.txt.lnk", false},
 		{"Windows/System32/config/SOFTWARE", false},
-		{"Users/IEUser/Pictures/IMG_0001.jpg", false},
+		{"Users/alice/Pictures/IMG_0001.jpg", false},
 		// A prefix that merely starts the same way is not a folder match.
 		{"Program FilesBackup/x.jpg", false},
 	}

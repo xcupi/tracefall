@@ -155,7 +155,7 @@ func TestUTMPTypeNames(t *testing.T) {
 	}
 }
 
-// Real-sample test: the Insider Linux image's /var/log/wtmp (38 records).
+// Real-sample test: a Linux /var/log/wtmp, read from TRACEFALL_REAL_WTMP.
 // Skipped unless TRACEFALL_REAL_WTMP points at an extracted copy. The
 // SHA-256 pins the exact bytes; the expected counts were computed from
 // the raw bytes independently of this decoder.

@@ -133,7 +133,7 @@ func (Parser) ArtifactType() string { return model.ArtifactJournal }
 // Detect matches the .journal extension. Rotated journals that journald set
 // aside after corruption (system@....journal~) do not match by name; they are
 // claimed by DetectContent instead, because their first bytes carry the same
-// signature and they read correctly (the lab's MrGamer image has three).
+// signature and they read correctly, so they are claimed.
 func (Parser) Detect(relPath string) bool {
 	return strings.EqualFold(filepath.Ext(strings.ReplaceAll(relPath, `\`, "/")), ".journal")
 }

@@ -40,9 +40,9 @@ func TestDetect(t *testing.T) {
 
 func TestParse_CronJobsBecomeEventsWithCommandAndAccount(t *testing.T) {
 	body := "" +
-		"Mar 21 16:25:01 KarenHacker CRON[1705]: (root) CMD (command -v debian-sa1 > /dev/null && debian-sa1 1 1)\n" +
-		"Mar 21 16:30:01 KarenHacker CRON[1800]: (alice) CMD (/home/alice/backup.sh --full)\n" +
-		"Mar 21 17:17:01 KarenHacker CRON[1900]: (root) CMD (  [ -x /usr/lib/php/sessionclean ] && if [ ! -d /run/systemd/system ]; then /usr/lib/php/sessionclean; fi)\n"
+		"Mar 21 16:25:01 host01 CRON[1705]: (root) CMD (command -v debian-sa1 > /dev/null && debian-sa1 1 1)\n" +
+		"Mar 21 16:30:01 host01 CRON[1800]: (alice) CMD (/home/alice/backup.sh --full)\n" +
+		"Mar 21 17:17:01 host01 CRON[1900]: (root) CMD (  [ -x /usr/lib/php/sessionclean ] && if [ ! -d /run/systemd/system ]; then /usr/lib/php/sessionclean; fi)\n"
 	res, err := New().ParseWithContext(writeLog(t, "syslog", body), parsers.ParseContext{})
 	if err != nil {
 		t.Fatal(err)
@@ -51,7 +51,7 @@ func TestParse_CronJobsBecomeEventsWithCommandAndAccount(t *testing.T) {
 		t.Fatalf("events = %d, want 3", len(res.Events))
 	}
 	first := res.Events[0]
-	if first.EventType != model.EventScheduledJobRun || first.User != "root" || first.Host != "KARENHACKER" {
+	if first.EventType != model.EventScheduledJobRun || first.User != "root" || first.Host != "HOST01" {
 		t.Errorf("first = %q user %q host %q", first.EventType, first.User, first.Host)
 	}
 	if first.CommandLine != "command -v debian-sa1 > /dev/null && debian-sa1 1 1" {
@@ -83,10 +83,10 @@ func TestParse_CronJobsBecomeEventsWithCommandAndAccount(t *testing.T) {
 
 func TestParse_NoiseAndUnattributedLinesProduceNothing(t *testing.T) {
 	body := "" +
-		"Mar 22 04:59:43 KarenHacker [1240]: gsd-media-keys: Fatal IO error 11\n" +
-		"Mar 21 16:18:27 KarenHacker anacron[501]: Job `cron.daily' terminated\n" +
-		"Mar 21 16:25:01 KarenHacker CRON[1705]: pam_unix(cron:session): session opened for user root by (uid=0)\n" +
-		"Mar 21 16:25:01 KarenHacker kernel: usb 1-1: new high-speed USB device number 2\n"
+		"Mar 22 04:59:43 host01 [1240]: gsd-media-keys: Fatal IO error 11\n" +
+		"Mar 21 16:18:27 host01 anacron[501]: Job `cron.daily' terminated\n" +
+		"Mar 21 16:25:01 host01 CRON[1705]: pam_unix(cron:session): session opened for user root by (uid=0)\n" +
+		"Mar 21 16:25:01 host01 kernel: usb 1-1: new high-speed USB device number 2\n"
 	res, err := New().Parse(writeLog(t, "syslog", body))
 	if err != nil {
 		t.Fatal(err)
@@ -106,11 +106,11 @@ func TestParse_SingleDigitDayIsKeptAsWritten(t *testing.T) {
 	}
 }
 
-// Real-sample test: the Insider image's /var/log/syslog (5,330 lines).
+// Real-sample test: a Linux /var/log/syslog, read from TRACEFALL_REAL_SYSLOG.
 // Skipped unless TRACEFALL_REAL_SYSLOG points at an extracted copy. The
 // SHA-256 pins the exact bytes. The count of 105 was computed by an
 // independent pass counting "CRON[...]: ... CMD (" lines in the raw file.
-func TestReal_InsiderSyslog(t *testing.T) {
+func TestReal_SyslogSample(t *testing.T) {
 	path := os.Getenv("TRACEFALL_REAL_SYSLOG")
 	if path == "" {
 		t.Skip("set TRACEFALL_REAL_SYSLOG to an extracted /var/log/syslog to run")

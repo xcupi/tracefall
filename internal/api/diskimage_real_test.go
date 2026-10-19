@@ -2,6 +2,7 @@ package api
 
 import (
 	"os"
+	"strings"
 	"testing"
 
 	"tracefall/internal/ingest"
@@ -9,7 +10,7 @@ import (
 )
 
 // Real-image regression for the disk catalog's classifier. Gated because the
-// image is not committed (a CyberDefenders Windows 10 lab image). Set
+// image is not committed. Set
 // TRACEFALL_REAL_DISK to its first segment (the .E01) to run it.
 //
 // What it pins, on the real image:
@@ -36,10 +37,10 @@ func TestReal_ContentOnlyArtifactsAreCandidates(t *testing.T) {
 	}
 	expect := map[string]*want{
 		"Windows/appcompat/Programs/Amcache.hve":                                {},
-		"Users/IEUser/AppData/Roaming/Microsoft/Windows/Recent/notes.txt.lnk":   {},
+		"Users/<user>/AppData/Roaming/Microsoft/Windows/Recent/notes.txt.lnk": {},
 		"Windows/System32/config/SOFTWARE":                                      {},
 		"Windows/System32/sru/SRUDB.dat":                                        {},
-		"Users/IEUser/AppData/Local/Microsoft/Windows/WebCache/WebCacheV01.dat": {},
+		"Users/<user>/AppData/Local/Microsoft/Windows/WebCache/WebCacheV01.dat": {},
 	}
 	for _, ov := range vols {
 		if _, err := ov.vol.Walk(func(f ntfsvol.File) error {
@@ -53,7 +54,7 @@ func TestReal_ContentOnlyArtifactsAreCandidates(t *testing.T) {
 			if e.Sniff != nil && sniffSkipped(e.Rel) {
 				t.Errorf("%s was sniffed by content inside a skipped folder", e.Rel)
 			}
-			if w, tracked := expect[e.Rel]; tracked {
+			if w, tracked := expect[canonicalUserPath(e.Rel)]; tracked {
 				w.seen = true
 				w.supported = e.Supported
 				w.sniffed = e.Sniff != nil
@@ -74,9 +75,19 @@ func TestReal_ContentOnlyArtifactsAreCandidates(t *testing.T) {
 	if w := expect["Windows/System32/config/SOFTWARE"]; w.seen && (!w.supported || w.sniffed) {
 		t.Errorf("SOFTWARE: supported=%v sniffed=%v, want supported and not sniffed (name decides)", w.supported, w.sniffed)
 	}
-	for _, rel := range []string{"Windows/System32/sru/SRUDB.dat", "Users/IEUser/AppData/Local/Microsoft/Windows/WebCache/WebCacheV01.dat"} {
+	for _, rel := range []string{"Windows/System32/sru/SRUDB.dat", "Users/<user>/AppData/Local/Microsoft/Windows/WebCache/WebCacheV01.dat"} {
 		if w := expect[rel]; w.seen && w.supported {
 			t.Errorf("%s: supported=true, but no parser exists for it", rel)
 		}
 	}
+}
+
+// canonicalUserPath replaces the account name in Users/<name>/... with
+// <user>, so the expectations hold for any Windows image, not one account.
+func canonicalUserPath(rel string) string {
+	parts := strings.SplitN(rel, "/", 3)
+	if len(parts) == 3 && strings.EqualFold(parts[0], "Users") {
+		return parts[0] + "/<user>/" + parts[2]
+	}
+	return rel
 }

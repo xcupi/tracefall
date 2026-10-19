@@ -74,7 +74,7 @@ func (e Event) ComputeDedupHash() string {
 	//
 	// The source reference (the line or record number) is included too.
 	// Without it a command typed twice in one history file -- "ls" eleven
-	// times in the Insider image's root history -- collapses into a single
+	// times in one shell history -- collapses into a single
 	// event, and 25 of its 95 lines were silently lost. Re-importing the
 	// same file yields the same line numbers, so cross-collection
 	// deduplication of the same artifact still holds; two different lines

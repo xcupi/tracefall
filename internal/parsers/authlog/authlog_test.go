@@ -40,11 +40,11 @@ func TestDetect(t *testing.T) {
 
 func TestParse_SuSudoAndSSHAreEmittedWithPartialTimestamps(t *testing.T) {
 	body := "" +
-		"Mar 20 11:26:22 KarenHacker su[4060]: Successful su for postgres by root\n" +
-		"Mar 20 11:26:22 KarenHacker su[4061]: FAILED su for root by karen\n" +
-		"Mar 20 11:27:01 KarenHacker sudo:     root : TTY=pts/0 ; PWD=/root/Documents ; USER=root ; COMMAND=/usr/bin/apt install moo\n" +
-		"Mar 20 11:28:00 KarenHacker sshd[900]: Accepted password for alice from 10.0.0.5 port 51234 ssh2\n" +
-		"Mar 20 11:28:09 KarenHacker sshd[901]: Failed password for invalid user bob from 203.0.113.9 port 40022 ssh2\n"
+		"Mar 20 11:26:22 host01 su[4060]: Successful su for postgres by root\n" +
+		"Mar 20 11:26:22 host01 su[4061]: FAILED su for root by carol\n" +
+		"Mar 20 11:27:01 host01 sudo:     root : TTY=pts/0 ; PWD=/root/Documents ; USER=root ; COMMAND=/usr/bin/apt install moo\n" +
+		"Mar 20 11:28:00 host01 sshd[900]: Accepted password for alice from 10.0.0.5 port 51234 ssh2\n" +
+		"Mar 20 11:28:09 host01 sshd[901]: Failed password for invalid user bob from 203.0.113.9 port 40022 ssh2\n"
 	res, err := New().ParseWithContext(writeLog(t, "auth.log", body), parsers.ParseContext{})
 	if err != nil {
 		t.Fatal(err)
@@ -98,10 +98,10 @@ func TestParse_SuSudoAndSSHAreEmittedWithPartialTimestamps(t *testing.T) {
 
 func TestParse_NoiseProducesNoEvents(t *testing.T) {
 	body := "" +
-		"Mar 20 11:25:01 KarenHacker CRON[1542]: pam_unix(cron:session): session opened for user root by (uid=0)\n" +
-		"Mar 20 11:26:22 KarenHacker su[4060]: pam_unix(su:session): session opened for user postgres by (uid=0)\n" +
-		"Mar 20 11:26:22 KarenHacker su[4060]: + ??? root:postgres\n" +
-		"Mar 20 11:26:22 KarenHacker sudo: pam_unix(sudo:session): session closed for user root\n" +
+		"Mar 20 11:25:01 host01 CRON[1542]: pam_unix(cron:session): session opened for user root by (uid=0)\n" +
+		"Mar 20 11:26:22 host01 su[4060]: pam_unix(su:session): session opened for user postgres by (uid=0)\n" +
+		"Mar 20 11:26:22 host01 su[4060]: + ??? root:postgres\n" +
+		"Mar 20 11:26:22 host01 sudo: pam_unix(sudo:session): session closed for user root\n" +
 		"not a syslog line at all\n"
 	res, err := New().Parse(writeLog(t, "auth.log", body))
 	if err != nil {
@@ -133,13 +133,13 @@ func TestParse_LineReferencesCountEveryLine(t *testing.T) {
 	}
 }
 
-// Real-sample test: the Insider image's /var/log/auth.log (1,938 lines).
+// Real-sample test: a Linux /var/log/auth.log, read from TRACEFALL_REAL_AUTHLOG.
 // Skipped unless TRACEFALL_REAL_AUTHLOG points at an extracted copy. The
 // SHA-256 pins the exact bytes. The expected counts were computed with an
 // independent Python pass over the raw file, not from this parser: 6
 // successful su (all Mar 20 11:26:22-23, target postgres, by root), 4 sudo
 // COMMAND lines, and no sshd lines.
-func TestReal_InsiderAuthLog(t *testing.T) {
+func TestReal_AuthLogSample(t *testing.T) {
 	path := os.Getenv("TRACEFALL_REAL_AUTHLOG")
 	if path == "" {
 		t.Skip("set TRACEFALL_REAL_AUTHLOG to an extracted /var/log/auth.log to run")

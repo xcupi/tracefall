@@ -22,7 +22,7 @@ func undatedCommand(ref, cmd string) Event {
 
 // A command typed twice in one history file is two events. Before this rule
 // the hash ignored the line number, so "ls" typed 11 times became one event
-// and 25 of the Insider image's 95 history lines were silently lost.
+// and 25 lines of a real root history were silently lost.
 func TestDedupHash_RepeatedUndatedCommandStaysTwoEvents(t *testing.T) {
 	a := undatedCommand("line:3", "ls")
 	b := undatedCommand("line:17", "ls")

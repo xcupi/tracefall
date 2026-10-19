@@ -14,9 +14,10 @@
 //
 // The rest of a system log is desktop, kernel, and daemon chatter. This
 // parser does not interpret it. In particular it does not emit USB
-// attachment events: on the lab image the only USB device in the log is a
-// VMware virtual mouse, and a rule matching "usb" would report that as
-// removable media.
+// attachment events. A rule that matches the word "usb" cannot tell a
+// removable drive from a virtual input device: both get the same "new USB
+// device" kernel message, so until the parser can tell them apart it reports
+// nothing rather than reporting the wrong thing.
 //
 // # Timestamps are partial
 //
