@@ -3,6 +3,7 @@ package api
 import (
 	"errors"
 	"fmt"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -74,6 +75,9 @@ const (
 	DefaultSessionTTL = 12 * time.Hour
 )
 
+// loginSlots bounds concurrent password verifications.
+var loginSlots = make(chan struct{}, max(2, runtime.NumCPU()))
+
 // loginThrottle rate-limits failed logins per username.
 //
 // In memory, not in the database. Throttling state is operational, not
@@ -115,9 +119,28 @@ func (t *loginThrottle) allowed(key string, now time.Time) bool {
 	return e.count < t.max
 }
 
+// maxThrottleEntries bounds the table. Expired entries are swept first; if the
+// table is still full of live ones, a new username is not recorded, so memory
+// stays fixed under a flood of random usernames.
+const maxThrottleEntries = 10000
+
+func (t *loginThrottle) sweepLocked(now time.Time) {
+	for k, e := range t.failures {
+		if now.Sub(e.first) > t.window {
+			delete(t.failures, k)
+		}
+	}
+}
+
 func (t *loginThrottle) recordFailure(key string, now time.Time) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	if len(t.failures) >= maxThrottleEntries {
+		t.sweepLocked(now)
+		if _, known := t.failures[key]; !known && len(t.failures) >= maxThrottleEntries {
+			return
+		}
+	}
 	e, ok := t.failures[key]
 	if !ok || now.Sub(e.first) > t.window {
 		t.failures[key] = &throttleEntry{count: 1, first: now}
@@ -190,6 +213,16 @@ func (s *Service) Login(username, password string, ttl time.Duration) (string, m
 	if !s.throttle.allowed(key, now) {
 		s.auditSecurity("", model.AuditLoginFailed, model.TargetUser, "", username,
 			"Login blocked: too many failed attempts")
+		return "", model.User{}, ErrTooManyAttempts
+	}
+	// Password verification is deliberately expensive (600k PBKDF2 rounds), so
+	// the number running at once is bounded. Without this, parallel logins
+	// under any usernames, known or not, pin every CPU. Past the limit the
+	// request is refused, not queued.
+	select {
+	case loginSlots <- struct{}{}:
+		defer func() { <-loginSlots }()
+	default:
 		return "", model.User{}, ErrTooManyAttempts
 	}
 

@@ -46,6 +46,13 @@ func main() {
 
 	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
 
+	// Evidence, reports and the case database are sensitive. The data
+	// directory is owner-only, which also covers every file under it whatever
+	// its own mode; the database files are owner-only too.
+	if err := lockDownStorage(cfg.DataDir, cfg.DBPath); err != nil {
+		logger.Error("failed to restrict storage permissions", "error", err)
+		os.Exit(1)
+	}
 	db, err := store.Open(cfg.DBPath)
 	if err != nil {
 		logger.Error("failed to open database", "error", err, "path", cfg.DBPath)
@@ -155,7 +162,18 @@ func main() {
 			"and never port-forward it to the public internet.")
 	}
 
-	if err := http.ListenAndServe(cfg.Addr(), requestLogger(logger, mux)); err != nil {
+	// Timeouts on the connection phases a client controls before the handler
+	// runs. No overall read or write timeout: an evidence upload or a report
+	// download legitimately takes minutes. A client that stalls mid-header, or
+	// holds an idle connection open, is dropped.
+	srv := &http.Server{
+		Addr:              cfg.Addr(),
+		Handler:           requestLogger(logger, mux),
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       2 * time.Minute,
+		MaxHeaderBytes:    64 << 10,
+	}
+	if err := srv.ListenAndServe(); err != nil {
 		logger.Error("server stopped", "error", err)
 		os.Exit(1)
 	}
