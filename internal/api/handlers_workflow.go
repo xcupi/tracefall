@@ -191,6 +191,20 @@ func (h *handlers) verifyAudit(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, st)
 }
 
+// reportLatest serves the newest report bundle the pipeline wrote for the
+// case. Serving a stored file issues nothing: its issuance was audited when it
+// was generated.
+func (h *handlers) reportLatest(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	name, b, err := h.as(r).LatestStoredReport(id)
+	if h.fail(w, err) {
+		return
+	}
+	w.Header().Set("Content-Type", "application/zip")
+	w.Header().Set("Content-Disposition", `attachment; filename="`+name+`"`)
+	w.Write(b)
+}
+
 func (h *handlers) exportCase(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	export, err := h.as(r).ExportCase(id)

@@ -35,6 +35,7 @@ const (
 	StageDiscover  = "discover"
 	StageImport    = "import"
 	StageAnalyze   = "analyze"
+	StageReport    = "report"
 	StageComplete  = "complete"
 	StageFailed    = "failed"
 	StageCancelled = "cancelled"

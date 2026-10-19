@@ -309,7 +309,19 @@ type Data struct {
 	Rules          []RuleInfo
 	Audit          []AuditEntry
 	AuditOmitted   int
+	// TimeZones states the host time zone each collection's SYSTEM hive
+	// recorded, or why none was recorded.
+	TimeZones []TimeZoneRow
 	// Limitations are case-specific caveats the caller computed (stale
 	// analysis, parse failures...). Fixed caveats live in the template.
 	Limitations []string
+}
+
+// TimeZoneRow is one collection's host time zone basis.
+type TimeZoneRow struct {
+	Label    string
+	Recorded bool
+	Basis    string
+	Source   string
+	Reason   string
 }

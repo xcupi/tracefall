@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"tracefall/internal/model"
+	"tracefall/internal/parsers"
 	"tracefall/internal/regf"
 	"tracefall/internal/shellbag"
 	"tracefall/internal/userassist"
@@ -237,7 +238,7 @@ type bagNode struct {
 // The tree is walked breadth-first with an explicit queue rather than by
 // recursion: the depth is attacker-controlled, and a bounded queue
 // cannot overflow the stack however the hive is shaped.
-func (p Parser) shellBagEvents(h *regf.Hive, hiveType HiveType, host, user string) ([]model.Event, []model.RawEvidence) {
+func (p Parser) shellBagEvents(h *regf.Hive, hiveType HiveType, host, user string, basis *parsers.TimeBasis) ([]model.Event, []model.RawEvidence) {
 	roots, ok := bagMRUPaths[hiveType]
 	if !ok {
 		return nil, nil
@@ -260,7 +261,7 @@ func (p Parser) shellBagEvents(h *regf.Hive, hiveType HiveType, host, user strin
 				if len(events) >= lim.MaxEntries {
 					return events, raws
 				}
-				children := p.bagLevel(h, node, hiveType, host, user, lim, &events, &raws)
+				children := p.bagLevel(h, node, hiveType, host, user, lim, &events, &raws, basis)
 				next = append(next, children...)
 			}
 			queue = next
@@ -274,7 +275,7 @@ func (p Parser) shellBagEvents(h *regf.Hive, hiveType HiveType, host, user strin
 // returns the child nodes to visit, each carrying the path reconstructed
 // so far.
 func (p Parser) bagLevel(h *regf.Hive, node bagNode, hiveType HiveType, host, user string,
-	lim shellbag.Limits, events *[]model.Event, raws *[]model.RawEvidence) []bagNode {
+	lim shellbag.Limits, events *[]model.Event, raws *[]model.RawEvidence, basis *parsers.TimeBasis) []bagNode {
 
 	k, err := h.OpenKey(node.keyPath)
 	if err != nil {
@@ -341,7 +342,7 @@ func (p Parser) bagLevel(h *regf.Hive, node bagNode, hiveType HiveType, host, us
 			lastWrite = childKey.LastWrite
 		}
 
-		ev, raw := shellBagEvent(item, segments, childPath, lastWrite, hiveType, host, user)
+		ev, raw := shellBagEvent(item, segments, childPath, lastWrite, hiveType, host, user, basis)
 		*events = append(*events, ev)
 		*raws = append(*raws, raw)
 
@@ -361,7 +362,7 @@ func (p Parser) bagLevel(h *regf.Hive, node bagNode, hiveType HiveType, host, us
 // candidates for this field: they carry no timezone, so there is no
 // instant they can honestly become. See internal/shellbag.
 func shellBagEvent(item shellbag.Item, segments []string, keyPath string,
-	lastWrite time.Time, hiveType HiveType, host, user string) (model.Event, model.RawEvidence) {
+	lastWrite time.Time, hiveType HiveType, host, user string, basis *parsers.TimeBasis) (model.Event, model.RawEvidence) {
 
 	rooted := rootedPath(hiveType, keyPath)
 	path := shellbag.JoinPath(segments)
@@ -463,6 +464,7 @@ func shellBagEvent(item shellbag.Item, segments []string, keyPath string,
 			"two-second resolution, recorded in the machine's local time, with no timezone stored. They are " +
 			"wall-clock readings, not instants, and are not used as this event's timestamp."
 	}
+	addLocalReadingsUTC(extra, item, basis)
 	if len(item.Warnings) > 0 {
 		extra["warnings"] = strings.Join(item.Warnings, "; ")
 	}
@@ -582,4 +584,31 @@ func countUndecoded(segments []string) int {
 		}
 	}
 	return n
+}
+
+// addLocalReadingsUTC adds UTC readings beside the DOS fields of a shell item,
+// but only when the collection's host time zone is recorded. The local
+// readings stay exactly as they were: the UTC value is derived from them with
+// one fixed offset, and the offset's source is named on the event. Daylight
+// saving is not applied, so a reading across a DST change can be off by one
+// hour; the report says so.
+func addLocalReadingsUTC(extra map[string]string, item shellbag.Item, basis *parsers.TimeBasis) {
+	if basis == nil {
+		return
+	}
+	offset := time.Duration(basis.ActiveBiasMinutes) * time.Minute
+	conv := func(name string, d shellbag.DOSTime) {
+		if !d.Valid {
+			return
+		}
+		local := time.Date(d.Year, d.Month, d.Day, d.Hour, d.Minute, d.Second, 0, time.UTC)
+		extra[name] = local.Add(offset).Format("2006-01-02T15:04:05Z")
+	}
+	before := len(extra)
+	conv("shell_item_modified_utc", item.Modified)
+	conv("shell_item_created_utc", item.Created)
+	conv("shell_item_accessed_utc", item.Accessed)
+	if len(extra) > before {
+		extra["shell_item_utc_basis"] = basis.Source + "; one fixed offset, daylight-saving changes not applied"
+	}
 }

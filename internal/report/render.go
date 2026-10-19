@@ -206,6 +206,21 @@ const reportHTML = `<!DOCTYPE html>
   statements (a finding's severity, a rule's reasoning, an ATT&amp;CK mapping) are produced by the rules documented
   in Appendix B and are indications for an examiner to review, not conclusions of fact.
 </p>
+<h4>Host time zone</h4>
+{{if .TimeZones}}
+<table>
+  <tr><th>Collection</th><th>Zone recorded by the SYSTEM hive</th><th>Source</th></tr>
+  {{range .TimeZones}}
+  <tr><td>{{.Label}}</td>{{if .Recorded}}<td>{{.Basis}}</td><td class="mono">{{.Source}}</td>{{else}}<td>not recorded</td><td>{{.Reason}}</td>{{end}}</tr>
+  {{end}}
+</table>
+{{end}}
+<p>
+  Windows shell items (ShellBags) record their DOS dates in the machine's local clock with no zone. Where a SYSTEM
+  hive records the zone, those readings also appear as UTC, computed with one fixed offset. Daylight-saving changes
+  are not applied, so a reading taken across a change can be off by one hour. The local readings are always kept as
+  they were recorded. The event timestamp is never the converted value; it is the registry key's own write time, in UTC.
+</p>
 <h4>Analysis runs</h4>
 {{if .Analysis.Runs}}
 <table>

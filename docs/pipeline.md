@@ -39,7 +39,10 @@ persisted job that runs on the server.
     GET  /api/cases/{id}/pipeline/jobs[/{jobId}]
     POST /api/cases/{id}/pipeline/jobs/{jobId}/cancel
 
-Stages: discover -> import (every supported file) -> analyze. The job row
+Stages: discover -> import (every supported file; the collection's host time zone
+is read from its SYSTEM hive first) -> analyze -> report (a ZIP bundle is written
+to the case's reports folder and its hash is audited; `GET /api/cases/{id}/report/latest`
+serves it). `analyze: false` skips the analyze and report stages. The job row
 (stage + collection id) is the checkpoint. Results report files imported,
 skipped and failed, event, finding and correlation counts.
 

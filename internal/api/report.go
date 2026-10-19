@@ -227,8 +227,42 @@ func (s *Service) assembleReportData(in reportInputs) report.Data {
 	}
 
 	d.Audit, d.AuditOmitted = reportAudit(in.audit)
+	d.TimeZones = reportTimeZones(in.collections)
 	d.Limitations = reportLimitations(d, in)
 	return d
+}
+
+// reportTimeZones states, per collection, the host time zone its SYSTEM hive
+// recorded, or why none was recorded.
+func reportTimeZones(collections []model.Collection) []report.TimeZoneRow {
+	rows := make([]report.TimeZoneRow, 0, len(collections))
+	for i, c := range collections {
+		row := report.TimeZoneRow{Label: fmt.Sprintf("Collection #%d", i+1), Recorded: c.TimeZone.Recorded}
+		if c.TimeZone.Recorded {
+			row.Basis = timeZoneBasisText(c.TimeZone)
+			row.Source = c.TimeZone.Source
+		} else {
+			row.Reason = c.TimeZone.Reason
+		}
+		rows = append(rows, row)
+	}
+	return rows
+}
+
+// timeZoneBasisText renders a recorded bias as the usual UTC offset, e.g.
+// "UTC+07:00 (SE Asia Standard Time)". UTC = local + bias, so the offset from
+// UTC is -bias.
+func timeZoneBasisText(tz model.TimeZoneBasis) string {
+	off := -tz.ActiveBiasMinutes
+	sign := "+"
+	if off < 0 {
+		sign, off = "-", -off
+	}
+	text := fmt.Sprintf("UTC%s%02d:%02d", sign, off/60, off%60)
+	if tz.KeyName != "" {
+		text += " (" + tz.KeyName + ")"
+	}
+	return text
 }
 
 // ---------------------------------------------------------------- pieces
@@ -572,6 +606,11 @@ func reportLimitations(d report.Data, in reportInputs) []string {
 	if !d.Analysis.Current {
 		lim = append(lim, "The analysis does not necessarily describe the current evidence: "+strings.TrimSpace(d.Analysis.Note))
 	}
+	for _, tz := range d.TimeZones {
+		if !tz.Recorded {
+			lim = append(lim, tz.Label+": host time zone not recorded ("+tz.Reason+"). Local-time registry readings in this collection are shown as local readings and are not converted to UTC.")
+		}
+	}
 	if n := d.Coverage.ParseFailed; n > 0 {
 		lim = append(lim, fmt.Sprintf("%d supported file(s) failed to parse; the events they would have contributed are absent from this analysis.", n))
 	}
@@ -715,21 +754,13 @@ func (s *Service) ReportHTML(caseID string) ([]byte, string, error) {
 // files by construction.
 func (s *Service) ReportBundle(caseID string) ([]byte, report.Manifest, error) {
 	now := time.Now().UTC()
-	b, err := s.buildReport(caseID, now)
-	if err != nil {
-		return nil, report.Manifest{}, err
-	}
-	all := append([]report.File{
-		{Name: "report.html", Data: b.HTML},
-		{Name: report.ManifestName, Data: b.ManifestJSON},
-	}, b.Files...)
-	z, err := report.Bundle(now, all)
+	z, manifest, err := s.reportBundleBytes(caseID, now)
 	if err != nil {
 		return nil, report.Manifest{}, err
 	}
 	s.audit(caseID, model.AuditExport, model.TargetCase, caseID,
-		fmt.Sprintf("Forensic report bundle issued (report.html SHA-256 %s)", b.Manifest.Report.SHA256))
-	return z, b.Manifest, nil
+		fmt.Sprintf("Forensic report bundle issued (report.html SHA-256 %s)", manifest.Report.SHA256))
+	return z, manifest, nil
 }
 
 // ReportPDF prints the report to PDF. It returns report.ErrNoRenderer

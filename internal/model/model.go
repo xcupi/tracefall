@@ -141,6 +141,20 @@ const (
 // added later in the investigation); Tracefall's timeline, findings, and
 // correlations always operate across every Collection in the case, never
 // just the most recent one. See docs/data-model.md.
+// TimeZoneBasis is the host time zone a collection's SYSTEM hive records. It
+// is one fixed offset (UTC = local + ActiveBiasMinutes); daylight-saving
+// changes are not applied. Recorded is false when the hive lacks it, and
+// Reason says why.
+type TimeZoneBasis struct {
+	Recorded          bool   `json:"recorded"`
+	KeyName           string `json:"key_name,omitempty"`
+	ActiveBiasMinutes int    `json:"active_bias_minutes"`
+	ValueUsed         string `json:"value_used,omitempty"`
+	ControlSet        string `json:"control_set,omitempty"`
+	Source            string `json:"source,omitempty"`
+	Reason            string `json:"reason,omitempty"`
+}
+
 type Collection struct {
 	ID               string    `json:"collection_id"`
 	CaseID           string    `json:"case_id"`
@@ -167,6 +181,9 @@ type Collection struct {
 	UnsupportedFileCount int    `json:"unsupported_file_count"` // of those, how many no parser recognizes
 	ImportedFileCount    int    `json:"imported_file_count"`    // of the supported files, how many have actually been imported
 	ParsedEventCount     int    `json:"parsed_event_count"`     // total events produced by imported files
+	// TimeZone is the host time zone recorded by this collection's SYSTEM
+	// hive, resolved at import. Zero until then; see internal/api.
+	TimeZone TimeZoneBasis `json:"time_zone"`
 }
 
 // Collection source types.

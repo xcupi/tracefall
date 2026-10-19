@@ -84,6 +84,19 @@ type ParseContext struct {
 	// from -- a SYSTEM hive holds more than one, and which was live is
 	// part of saying where the key came from.
 	BootKeyControlSet int
+
+	// TimeBasis is the host time zone recorded by this collection's SYSTEM
+	// hive, or nil when none was recorded. Parsers that read local-time
+	// values (registry shell items) convert them only when it is set.
+	TimeBasis *TimeBasis
+}
+
+// TimeBasis is a host time zone as one fixed offset: UTC = local +
+// ActiveBiasMinutes. Source names the hive and value it came from, so a
+// converted value can say where its offset was read.
+type TimeBasis struct {
+	ActiveBiasMinutes int
+	Source            string
 }
 
 // ContextualParser is an OPTIONAL interface for a parser that can use

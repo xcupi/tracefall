@@ -1197,7 +1197,13 @@ func (s *Service) importEvidence(caseID, collectionID string, sourceFileIDs []st
 	//
 	// The whole step is skipped when the batch holds no registry hive.
 	batchFiles, _ := s.store.GetSourceFiles(sourceFileIDs)
+	// Host time zone: resolved from this collection's SYSTEM hive before any
+	// parse. A failure is recorded as the reason, never replaced by a guess.
+	tz, tzErr := s.resolveCollectionTimeZone(caseID, collectionID, collection)
+	logTimeZoneFailure(caseID, collectionID, tzErr)
+	collection.TimeZone = tz
 	parseCtx := s.prepareBootKey(caseID, collectionID, collection, batchFiles)
+	parseCtx.TimeBasis = collectionTimeZoneForParse(collection.TimeZone)
 
 	// The AD1 image is opened and indexed ONCE for the whole batch.
 	//

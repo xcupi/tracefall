@@ -250,19 +250,31 @@ func (s *Store) ListCases() ([]model.Case, error) {
 
 // ---------- Collections ----------
 
-const collectionCols = `id, case_id, created_at, source_type, original_filename, archive_hash, integrity_sha512, evidence_directory, ingestion_status, file_count, supported_file_count, unsupported_file_count, imported_file_count, parsed_event_count`
+const collectionCols = `id, case_id, created_at, source_type, original_filename, archive_hash, integrity_sha512, evidence_directory, ingestion_status, file_count, supported_file_count, unsupported_file_count, imported_file_count, parsed_event_count, tz_recorded, tz_key_name, tz_active_bias_minutes, tz_value_used, tz_control_set, tz_source, tz_reason`
 
 func scanCollection(row interface{ Scan(...any) error }) (model.Collection, error) {
 	var c model.Collection
 	var createdAt string
 	err := row.Scan(&c.ID, &c.CaseID, &createdAt, &c.SourceType, &c.OriginalFilename, &c.ArchiveHash,
 		&c.IntegritySHA512, &c.EvidenceDirectory, &c.IngestionStatus, &c.FileCount, &c.SupportedFileCount,
-		&c.UnsupportedFileCount, &c.ImportedFileCount, &c.ParsedEventCount)
+		&c.UnsupportedFileCount, &c.ImportedFileCount, &c.ParsedEventCount,
+		&c.TimeZone.Recorded, &c.TimeZone.KeyName, &c.TimeZone.ActiveBiasMinutes, &c.TimeZone.ValueUsed,
+		&c.TimeZone.ControlSet, &c.TimeZone.Source, &c.TimeZone.Reason)
 	if err != nil {
 		return model.Collection{}, err
 	}
 	c.CreatedAt = parseTime(createdAt)
 	return c, nil
+}
+
+// SetCollectionTimeZone records the host time zone a collection's SYSTEM hive
+// gave, or the reason it gave none. It is written once per import of a
+// collection; a later import with the same hive writes the same value.
+func (s *Store) SetCollectionTimeZone(collectionID string, tz model.TimeZoneBasis) error {
+	_, err := s.db.Exec(`UPDATE collections SET tz_recorded = ?, tz_key_name = ?, tz_active_bias_minutes = ?,
+		tz_value_used = ?, tz_control_set = ?, tz_source = ?, tz_reason = ? WHERE id = ?`,
+		tz.Recorded, tz.KeyName, tz.ActiveBiasMinutes, tz.ValueUsed, tz.ControlSet, tz.Source, tz.Reason, collectionID)
+	return err
 }
 
 // SaveCollection inserts a new collection. If c.ArchiveHash is non-empty
@@ -281,7 +293,10 @@ type execer interface {
 }
 
 func insertCollection(db execer, c model.Collection) error {
-	_, err := db.Exec(`INSERT INTO collections (`+collectionCols+`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+	// The insert names its own columns. collectionCols (what reads select)
+	// grows with new fields; the insert must not silently follow it. Time
+	// zone fields are written later, by SetCollectionTimeZone.
+	_, err := db.Exec(`INSERT INTO collections (id, case_id, created_at, source_type, original_filename, archive_hash, integrity_sha512, evidence_directory, ingestion_status, file_count, supported_file_count, unsupported_file_count, imported_file_count, parsed_event_count) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		c.ID, c.CaseID, fmtTime(c.CreatedAt), c.SourceType, c.OriginalFilename, c.ArchiveHash,
 		c.IntegritySHA512, c.EvidenceDirectory, c.IngestionStatus, c.FileCount, c.SupportedFileCount,
 		c.UnsupportedFileCount, c.ImportedFileCount, c.ParsedEventCount)

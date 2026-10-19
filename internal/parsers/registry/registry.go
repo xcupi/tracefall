@@ -164,7 +164,7 @@ func (p Parser) ParseWithContext(absPath string, ctx parsers.ParseContext) (pars
 	out.Events = append(out.Events, uaEvents...)
 	out.Raw = append(out.Raw, uaRaw...)
 
-	sbEvents, sbRaw := p.shellBagEvents(h, hiveType, host, user)
+	sbEvents, sbRaw := p.shellBagEvents(h, hiveType, host, user, ctx.TimeBasis)
 	out.Events = append(out.Events, sbEvents...)
 	out.Raw = append(out.Raw, sbRaw...)
 

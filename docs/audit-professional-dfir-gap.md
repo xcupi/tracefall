@@ -24,10 +24,14 @@ reporting.
 
 ## P0: blockers for the stated goal
 
-### 1. No disk image reader
-- No code for E01/EWF, raw/dd, VMDK, VHD(X), AFF4, qcow2, MBR/GPT or
-  partitions anywhere under `internal/`.
-- Only containers read: AD1 (`internal/ad1`) and ZIP (`internal/archive`).
+### 1. Disk image reader (partly done)
+- Done: E01 (EWF1) and raw disk images, MBR/GPT partition tables, NTFS
+  reading (`internal/image`, `internal/ntfsvol`). Validated end to end on a
+  real E01 (156/156 file hashes match, see `docs/disk-images.md`).
+- Not done: EWF2 (Ex01) is refused explicitly; VMDK, VHD/VHDX, qcow2 and
+  AFF4 are absent; ext4, FAT/exFAT, APFS and HFS+ filesystems are only
+  recognised from the partition table, not read; BitLocker is detected
+  with no way to supply a key.
 - `internal/ntfs` parses extracted `$MFT`, `$UsnJrnl`, `$LogFile` files;
   it is not a volume or filesystem reader.
 - No BitLocker/encryption detection, no deleted-file carving, no ext4,
@@ -66,9 +70,13 @@ state, not current memory capability.
   with provenance to the image and offsets; a corrupt or unsupported
   image is reported, not silently empty.
 
-### 3. No forensic report
-- Output is JSON and CSV only (`internal/api/export.go`,
-  `handlers_workflow.go:183-219`). No PDF/HTML/report code exists.
+### 3. Forensic report (done for HTML bundle; PDF and spec items open)
+- Done: the pipeline's `report` stage writes a ZIP bundle (report.html,
+  manifest.json, findings.csv, timeline.csv) after analysis
+  (`internal/api/report_stored.go`). Its SHA-256 and report.html's are
+  recorded in the audit log. `GET /api/cases/{id}/report/latest` serves it.
+- Open: PDF output; the report does not yet carry every item of the
+  specification below (e.g. ATT&CK mapping, appendices).
 - Acceptance: see "Report specification" below.
 
 ### 4. Pipeline is not hands-free
@@ -107,9 +115,14 @@ state, not current memory capability.
 
 ### 7. Timestamps and timezones
 - Layouts without offset are treated as UTC (`internal/normalize`).
-- No extraction of the source host timezone (no
-  `TimeZoneInformation` / `ActiveTimeBias` handling found); no clock
-  skew detection.
+- Done for one case of data: the host time zone is read from the
+  collection's own SYSTEM hive (`internal/timezone`, `ActiveTimeBias`).
+  ShellBag DOS dates get a derived `*_utc` value beside the untouched
+  local reading; the report states the zone and the basis.
+- Open: one fixed offset per collection, so daylight-saving changes are
+  NOT applied. Verified on a real image: readings in DST months are off by
+  one hour against the IANA zone. UserAssist and other local-time values
+  are not converted yet. No clock-skew detection.
 - Acceptance: host timezone derived from the SYSTEM hive and recorded
   per collection; local-time artifacts converted with that basis and the
   basis stated in the report.

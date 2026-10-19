@@ -190,6 +190,7 @@ func NewRouterWithAuth(svc *Service, logger *slog.Logger, maxUploadBytes int64, 
 	mux.HandleFunc("GET /api/cases/{id}/report.html", h.reportHTML)
 	mux.HandleFunc("GET /api/cases/{id}/report.zip", h.reportBundle)
 	mux.HandleFunc("GET /api/cases/{id}/report.pdf", h.reportPDF)
+	mux.HandleFunc("GET /api/cases/{id}/report/latest", h.reportLatest)
 
 	mux.HandleFunc("GET /api/healthz", h.healthz)
 
@@ -862,7 +863,7 @@ func (h *handlers) fail(w http.ResponseWriter, err error) bool {
 		writeError(w, http.StatusForbidden, err.Error())
 	case errors.Is(err, ErrEvidenceTreeEscapes):
 		writeError(w, http.StatusUnprocessableEntity, err.Error())
-	case errors.Is(err, ErrCaseNotFound), errors.Is(err, ErrCollectionNotFound),
+	case errors.Is(err, ErrCaseNotFound), errors.Is(err, ErrCollectionNotFound), errors.Is(err, ErrNoStoredReport),
 		errors.Is(err, ErrFindingNotFound), errors.Is(err, ErrSourceFileNotFound),
 		errors.Is(err, store.ErrNoteNotFound):
 		writeError(w, http.StatusNotFound, err.Error())

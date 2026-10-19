@@ -117,7 +117,11 @@ type PipelineResult struct {
 	Analyzed      bool   `json:"analyzed"`
 	Findings      int    `json:"findings"`
 	Correlations  int    `json:"correlations"`
-	Resumed       bool   `json:"resumed,omitempty"`
+	// ReportFile and ReportSHA256 name the report bundle the analysis
+	// produced. Empty when analysis was not requested.
+	ReportFile   string `json:"report_file,omitempty"`
+	ReportSHA256 string `json:"report_sha256,omitempty"`
+	Resumed      bool   `json:"resumed,omitempty"`
 }
 
 // EnqueueIngest validates a request and queues it. Everything that can be
@@ -405,6 +409,19 @@ func (s *Service) executeIngest(job model.PipelineJob, res *PipelineResult) *pip
 		return fail(err)
 	}
 	res.Analyzed, res.Findings, res.Correlations = true, len(sum.Findings), len(sum.Correlations)
+
+	// ---- report: the analysed case is written out as a bundle, so it
+	// exists on disk without anyone asking for it.
+	if st := cancelled(); st != nil {
+		return st
+	}
+	svc.setStage(job.ID, model.StageReport, &collectionID, &PipelineProgress{Stage: model.StageReport})
+	stored, err := svc.GenerateCaseReport(job.CaseID, job.ID)
+	if err != nil {
+		slog.Warn("pipeline: report generation failed", "job", job.ID, "error", err)
+		return fail(err)
+	}
+	res.ReportFile, res.ReportSHA256 = stored.File, stored.SHA256
 	return nil
 }
 

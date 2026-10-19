@@ -98,6 +98,21 @@ func migrate(db *sql.DB) error {
 	if err := addColumnIfMissing(db, "analysis_runs", "invalidation_reason", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return fmt.Errorf("migrating analysis_runs (invalidation_reason): %w", err)
 	}
+	// Host time zone from the SYSTEM hive (internal/timezone). Empty until a
+	// collection's import resolves it.
+	for _, col := range []struct{ name, def string }{
+		{"tz_recorded", "INTEGER NOT NULL DEFAULT 0"},
+		{"tz_key_name", "TEXT NOT NULL DEFAULT ''"},
+		{"tz_active_bias_minutes", "INTEGER NOT NULL DEFAULT 0"},
+		{"tz_value_used", "TEXT NOT NULL DEFAULT ''"},
+		{"tz_control_set", "TEXT NOT NULL DEFAULT ''"},
+		{"tz_source", "TEXT NOT NULL DEFAULT ''"},
+		{"tz_reason", "TEXT NOT NULL DEFAULT ''"},
+	} {
+		if err := addColumnIfMissing(db, "collections", col.name, col.def); err != nil {
+			return fmt.Errorf("migrating collections (%s): %w", col.name, err)
+		}
+	}
 	// Audit hash chain. A row written before the chain existed has an empty
 	// entry_hash; VerifyAuditChain reports those as unchained, never as valid.
 	if err := addColumnIfMissing(db, "audit_log", "prev_hash", "TEXT NOT NULL DEFAULT ''"); err != nil {
