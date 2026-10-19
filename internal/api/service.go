@@ -184,6 +184,9 @@ type Service struct {
 	// WithActor on a per-request copy. The shared Service always has the
 	// zero value; only request-scoped copies carry an identity.
 	actor Principal
+	// pathPolicy decides which server paths ingest may read. The zero value
+	// refuses server-path ingest; see evidence_policy.go.
+	pathPolicy evidencePathPolicy
 }
 
 func NewService(s *store.Store, files *casefiles.Store) *Service {
@@ -578,6 +581,15 @@ func (s *Service) DiscoverEvidenceFromPath(caseID, path string) (DiscoverResult,
 		return DiscoverResult{}, err
 	}
 
+	// The server's path policy comes next, still before the filesystem is
+	// touched. From here on the resolved path is the one read, so a symlink
+	// swapped in after the check cannot redirect the reads.
+	resolved, policyErr := s.checkServerPath(path)
+	if policyErr != nil {
+		return DiscoverResult{}, policyErr
+	}
+	path = resolved
+
 	// path may point at a single AD1 file instead of a KAPE-style
 	// directory -- sniffed (magic bytes, not the .ad1 extension alone;
 	// see ad1.Sniff) only when it's a regular file, so this never changes
@@ -611,6 +623,18 @@ func (s *Service) DiscoverEvidenceFromPath(caseID, path string) (DiscoverResult,
 		return DiscoverResult{}, fmt.Errorf("%w: %s is a file, not an evidence directory", ErrUnsupportedEvidence, path)
 	}
 
+	if err := checkEvidenceTree(path); err != nil {
+		// A link that escapes the folder is the policy's refusal, reported as
+		// such. An unreadable folder is classified like any other unreadable
+		// path, so the investigator gets the same 400 as before.
+		if errors.Is(err, ErrEvidenceTreeEscapes) {
+			return DiscoverResult{}, err
+		}
+		if classified := classifyPathError(err, path); classified != nil {
+			return DiscoverResult{}, classified
+		}
+		return DiscoverResult{}, fmt.Errorf("checking evidence folder for links: %w", err)
+	}
 	hash, integrity, err := hashDirectory(path)
 	if err != nil {
 		if classified := classifyPathError(err, path); classified != nil {
@@ -2256,6 +2280,10 @@ func (s *Service) DeleteCase(caseID string) error {
 	var deleteErr error
 	defer func() { s.deletions.finish(caseID, deleteErr) }()
 
+	// The chain is summarised BEFORE its rows go. The summary is written with
+	// the existing security_log entry for the deletion, at the end of this
+	// function, once the case and its files are gone.
+	tombstone := s.auditChainSummaryForDeletion(caseID)
 	s.deletions.stage(caseID, DeletionStageRemovingRecords)
 	counts, err := s.store.DeleteCaseWithCounts(caseID)
 	if err != nil {
@@ -2299,7 +2327,7 @@ func (s *Service) DeleteCase(caseID string) error {
 	// is system-wide and survives, which is the only place a record of
 	// the deletion can outlive the thing deleted.
 	s.auditSecurity(caseID, model.AuditCaseDeleted, "case", caseID, s.auditActor(),
-		fmt.Sprintf("Deleted case %q and all of its evidence, events and analysis", c.Name))
+		fmt.Sprintf("Deleted case %q and all of its evidence, events and analysis; %s", c.Name, tombstone))
 	return nil
 }
 

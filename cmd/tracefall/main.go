@@ -56,6 +56,23 @@ func main() {
 	files := casefiles.NewStore(cfg.DataDir)
 	svc := api.NewService(db, files)
 
+	// Server-path ingest reads folders that already sit on this machine. The
+	// policy decides which ones; see internal/api/evidence_policy.go.
+	roots := splitList(os.Getenv("TRACEFALL_EVIDENCE_ROOTS"))
+	allowUnrooted := !cfg.AuthEnabled && cfg.IsLoopbackHost()
+	if err := svc.SetEvidencePathPolicy(roots, allowUnrooted); err != nil {
+		logger.Error("invalid TRACEFALL_EVIDENCE_ROOTS", "error", err)
+		os.Exit(1)
+	}
+	switch {
+	case len(roots) > 0:
+		logger.Info("server-path ingest is limited to the evidence roots", "roots", roots)
+	case allowUnrooted:
+		logger.Warn("server-path ingest accepts ANY path on this host (local no-auth, loopback). Set TRACEFALL_EVIDENCE_ROOTS to restrict it")
+	default:
+		logger.Info("server-path ingest is disabled (authentication on, or a non-loopback host); set TRACEFALL_EVIDENCE_ROOTS to allow listed folders")
+	}
+
 	// Bootstrap the first administrator when authentication is on and no
 	// account exists yet. Without this an authenticated deployment would
 	// have no way in at all.

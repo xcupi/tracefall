@@ -34,7 +34,7 @@ func serviceWithPaths(t *testing.T) (*Service, *store.Store, *casefiles.Store, s
 	t.Cleanup(func() { db.Close() })
 	root := t.TempDir()
 	files := casefiles.NewStore(root)
-	return NewService(db, files), db, files, dbPath
+	return newPermissiveService(db, files), db, files, dbPath
 }
 
 // seedUploadedCase creates a case whose evidence arrived as an upload,

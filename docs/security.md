@@ -118,6 +118,30 @@ Known limits of these checks:
   so the Host rule is off by design and the session cookie carries the
   protection instead.
 
+### Server-path ingest
+
+Adding evidence from a folder that already sits on the server's disk
+(`POST /api/cases/{id}/ingest`, and the `local_path` pipeline job) reads
+whatever the server process can read. The policy below decides which paths
+are allowed. It is applied before the filesystem is touched.
+
+- **`TRACEFALL_EVIDENCE_ROOTS` set**: a path is accepted only when, after
+  symbolic links are resolved, it lies inside one of the listed folders.
+  Prefix tricks do not pass (`/cases-evil` is not inside `/cases`). A root
+  that does not exist stops the server at startup, rather than refusing
+  every path quietly.
+- **Not set, local no-auth mode on a loopback host**: any path. This is the
+  single-operator mode, where the operator already has a shell on the machine.
+  The startup log warns that it accepts any path.
+- **Not set, otherwise** (authentication on, or a non-loopback bind): refused
+  with **403**. Upload still works.
+
+Symbolic links inside an evidence folder are checked before anything is
+hashed or catalogued. A link whose target lies outside the folder refuses the
+whole folder with **422**, naming the link, because following it would read
+files the evidence package does not contain. Links that stay inside the
+folder are accepted.
+
 ### CSV exports and spreadsheet formulas
 
 Every cell of the timeline and findings CSV is passed through `csvSafeRow`
@@ -248,12 +272,48 @@ Both logs are **append-only from the application layer**: the store
 exposes only create, there is no update or per-row delete, and no route
 accepts a mutation. Tests assert both.
 
+### Hash chain on `audit_log`
+
+Each case's audit rows form a hash chain. A row stores `prev_hash` (the
+`entry_hash` of the row before it in the same case) and `entry_hash`, a
+SHA-256 over its own fields and `prev_hash`. Fields are JSON-encoded as an
+array, so no field's content can pass for a boundary. The insert and the read
+of the previous link share one transaction, so two writers cannot chain to the
+same predecessor.
+
+`GET /api/cases/{id}/audit/verify` walks the chain and reports whether it is
+intact, how many rows were chained, and the head hash. A broken chain is a
+200 with `valid: false`, the row where it breaks, and why:
+
+- an edited field fails the row's own hash;
+- a removed or reordered row fails the link of the row after it;
+- a hash stripped from a row after the chain began is refused, because only
+  rows written before the chain existed may be unchained.
+
+Rows from before the chain carry no hash. They are reported as `unchained`,
+never as valid, and a case with only such rows verifies with nothing checked.
+
+What the chain does **not** prove, stated plainly:
+
+- **Tail truncation is not detectable from the chain alone.** Removing the
+  newest rows leaves a shorter, still consistent chain. Only comparing the
+  head with a value kept outside the database closes that. Exported seals
+  are the planned place for it; they are not built yet.
+- Someone who can rewrite the whole database can recompute every hash. The
+  chain shows the history is intact relative to its own head, not that the
+  head itself is authentic.
+
+Deleting a case removes its chain. The deletion record in `security_log`
+then carries the chain's state at that moment: row count, chained and
+unchained counts, head, and whether it verified.
+
 ### Case deletion
 
 Deleting a case removes that case's entire `audit_log`, because those
 rows are part of the case. The deletion itself is therefore recorded in
 the **`security_log`**, which is system-wide and survives: action
-`case_deleted`, with the acting username, the case id and the case name.
+`case_deleted`, with the acting username, the case id, the case name, and
+the state of the audit chain just before it was removed (see *Hash chain*).
 
 That is the one record of the case that outlives it, and it is
 deliberate — "this case existed and this person destroyed it" is exactly

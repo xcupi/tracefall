@@ -30,7 +30,7 @@ func seedBenchCase(b *testing.B, n int) (*Service, string) {
 		b.Fatalf("opening bench store: %v", err)
 	}
 	b.Cleanup(func() { db.Close() })
-	svc := NewService(db, casefiles.NewStore(b.TempDir()))
+	svc := newPermissiveService(db, casefiles.NewStore(b.TempDir()))
 
 	now := time.Now().UTC()
 	caseID := "bench-case"

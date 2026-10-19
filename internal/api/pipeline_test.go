@@ -44,7 +44,7 @@ func serviceAt(t *testing.T, dbPath, dataDir string) (*Service, func()) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	svc := NewService(db, casefiles.NewStore(dataDir))
+	svc := newPermissiveService(db, casefiles.NewStore(dataDir))
 	svc.pipe.poll = 10 * time.Millisecond
 	return svc, func() { db.Close() }
 }

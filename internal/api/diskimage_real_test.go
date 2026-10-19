@@ -37,7 +37,7 @@ func TestReal_ContentOnlyArtifactsAreCandidates(t *testing.T) {
 	}
 	expect := map[string]*want{
 		"Windows/appcompat/Programs/Amcache.hve":                                {},
-		"Users/<user>/AppData/Roaming/Microsoft/Windows/Recent/notes.txt.lnk": {},
+		"Users/<user>/AppData/Roaming/Microsoft/Windows/Recent/notes.txt.lnk":   {},
 		"Windows/System32/config/SOFTWARE":                                      {},
 		"Windows/System32/sru/SRUDB.dat":                                        {},
 		"Users/<user>/AppData/Local/Microsoft/Windows/WebCache/WebCacheV01.dat": {},

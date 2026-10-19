@@ -81,7 +81,7 @@ func newUpgradedTestRouter(t *testing.T) http.Handler {
 	}
 	t.Cleanup(func() { db.Close() })
 
-	svc := NewService(db, casefiles.NewStore(t.TempDir()))
+	svc := newPermissiveService(db, casefiles.NewStore(t.TempDir()))
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	return dashboardLike(NewRouter(svc, logger, testMaxUploadBytes, false))
 }

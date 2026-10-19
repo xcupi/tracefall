@@ -98,6 +98,14 @@ func migrate(db *sql.DB) error {
 	if err := addColumnIfMissing(db, "analysis_runs", "invalidation_reason", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return fmt.Errorf("migrating analysis_runs (invalidation_reason): %w", err)
 	}
+	// Audit hash chain. A row written before the chain existed has an empty
+	// entry_hash; VerifyAuditChain reports those as unchained, never as valid.
+	if err := addColumnIfMissing(db, "audit_log", "prev_hash", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return fmt.Errorf("migrating audit_log (prev_hash): %w", err)
+	}
+	if err := addColumnIfMissing(db, "audit_log", "entry_hash", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return fmt.Errorf("migrating audit_log (entry_hash): %w", err)
+	}
 	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_events_case_dedup ON events(case_id, dedup_hash)`); err != nil {
 		return fmt.Errorf("creating events dedup index: %w", err)
 	}

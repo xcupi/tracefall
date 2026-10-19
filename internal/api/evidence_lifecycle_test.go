@@ -62,7 +62,7 @@ func newTestServiceWithFiles(t *testing.T) (*Service, *casefiles.Store) {
 	}
 	t.Cleanup(func() { db.Close() })
 	files := casefiles.NewStore(t.TempDir())
-	return NewService(db, files), files
+	return newPermissiveService(db, files), files
 }
 
 // ---------------- evidence selection ----------------

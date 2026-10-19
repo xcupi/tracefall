@@ -24,7 +24,7 @@ func newTestService(t *testing.T) *Service {
 	}
 	t.Cleanup(func() { db.Close() })
 	files := casefiles.NewStore(t.TempDir())
-	return NewService(db, files)
+	return newPermissiveService(db, files)
 }
 
 func routerFor(svc *Service) http.Handler {

@@ -231,11 +231,28 @@ func (s *Store) ListAnalystStatusForCase(caseID string) ([]model.AnalystStatus, 
 
 // ---------- Audit log ----------
 
+// CreateAuditEvent appends one row to a case's audit chain. The insert and
+// the read of the previous link happen in one transaction, so two writers
+// cannot both chain to the same predecessor. See audit_chain.go.
 func (s *Store) CreateAuditEvent(e model.AuditEvent) error {
-	_, err := s.db.Exec(`INSERT INTO audit_log (id, case_id, timestamp, action, actor, target_type, target_id, summary)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		e.ID, e.CaseID, fmtTime(e.Timestamp), e.Action, e.Actor, e.TargetType, e.TargetID, e.Summary)
-	return err
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	prev, err := auditChainHead(tx, e.CaseID)
+	if err != nil {
+		return err
+	}
+	ts := fmtTime(e.Timestamp)
+	hash := auditEntryHash(prev, e, ts)
+	if _, err := tx.Exec(`INSERT INTO audit_log (id, case_id, timestamp, action, actor, target_type, target_id, summary, prev_hash, entry_hash)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		e.ID, e.CaseID, ts, e.Action, e.Actor, e.TargetType, e.TargetID, e.Summary, prev, hash); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *Store) ListAuditLog(caseID string) ([]model.AuditEvent, error) {

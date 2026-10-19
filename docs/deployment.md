@@ -39,6 +39,7 @@ built-in default. See `internal/config` for the implementation.
 | `-session-ttl-minutes` | `TRACEFALL_SESSION_TTL_MINUTES` | `720` (12 h) | how long one login stays valid |
 | `-secure-cookies` | `TRACEFALL_SECURE_COOKIES` | `false` | mark session cookies `Secure`. Only behind HTTPS -- **breaks login over plain HTTP** |
 | (env only) | `TRACEFALL_ADMIN_PASSWORD` | *(generated)* | password for the bootstrap `admin` account, first start only |
+| (env only) | `TRACEFALL_EVIDENCE_ROOTS` | *(unset)* | folders the server may read for path-based ingest, separated like `PATH` (`:` on Linux). Unset: path ingest is refused, except in local no-auth loopback mode, where any path is accepted. See `docs/security.md`, *Server-path ingest* |
 
 `TRACEFALL_AUTH` accepts `1/true/yes/on/enabled` and their negatives.
 `TRACEFALL_ADMIN_PASSWORD` is environment-only, deliberately: a flag

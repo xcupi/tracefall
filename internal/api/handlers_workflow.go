@@ -180,6 +180,17 @@ func (h *handlers) auditLog(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, events)
 }
 
+// verifyAudit reports whether a case's audit chain is intact. A broken chain
+// is a 200 with valid=false: that is the answer the examiner asked for.
+func (h *handlers) verifyAudit(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	st, err := h.as(r).VerifyAudit(id)
+	if h.fail(w, err) {
+		return
+	}
+	writeJSON(w, http.StatusOK, st)
+}
+
 func (h *handlers) exportCase(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	export, err := h.as(r).ExportCase(id)

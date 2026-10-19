@@ -180,6 +180,7 @@ func NewRouterWithAuth(svc *Service, logger *slog.Logger, maxUploadBytes int64, 
 	mux.HandleFunc("POST /api/cases/{id}/tags", h.addTag)
 	mux.HandleFunc("DELETE /api/cases/{id}/tags", h.removeTag)
 	mux.HandleFunc("GET /api/cases/{id}/audit", h.auditLog)
+	mux.HandleFunc("GET /api/cases/{id}/audit/verify", h.verifyAudit)
 	mux.HandleFunc("GET /api/cases/{id}/analyst-status", h.listAnalystStatus)
 	mux.HandleFunc("GET /api/cases/{id}/export", h.exportCase)
 	mux.HandleFunc("GET /api/cases/{id}/export/timeline.csv", h.exportTimelineCSV)
@@ -856,6 +857,11 @@ func (h *handlers) fail(w http.ResponseWriter, err error) bool {
 		// suggest a permissions problem and send an analyst looking at
 		// their role instead of the case's status.
 		writeError(w, http.StatusConflict, err.Error())
+	case errors.Is(err, ErrServerPathRefused):
+		// 403: the request is well formed; the server's own policy refuses it.
+		writeError(w, http.StatusForbidden, err.Error())
+	case errors.Is(err, ErrEvidenceTreeEscapes):
+		writeError(w, http.StatusUnprocessableEntity, err.Error())
 	case errors.Is(err, ErrCaseNotFound), errors.Is(err, ErrCollectionNotFound),
 		errors.Is(err, ErrFindingNotFound), errors.Is(err, ErrSourceFileNotFound),
 		errors.Is(err, store.ErrNoteNotFound):

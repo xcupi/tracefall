@@ -241,7 +241,7 @@ func TestUploadFlow_PreservesOriginalArchive(t *testing.T) {
 	t.Cleanup(func() { db.Close() })
 	dataRoot := t.TempDir()
 	files := casefiles.NewStore(dataRoot)
-	svc := NewService(db, files)
+	svc := newPermissiveService(db, files)
 	mux := routerFor(svc)
 
 	c := createTestCase(t, mux, "Provenance case")
