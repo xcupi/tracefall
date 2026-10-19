@@ -60,16 +60,17 @@ const (
 
 // Volume is an opened ext2/3/4 file system. It implements fsvol.Volume.
 type Volume struct {
-	r      io.ReaderAt
-	size   int64
-	info   fsvol.Info
-	bs     int64
-	isize  int64 // inode size
-	ipg    uint64
-	inodes uint64
-	blocks uint64
-	first  uint64
-	itable []uint64 // inode table block of each group
+	r        io.ReaderAt
+	size     int64
+	info     fsvol.Info
+	bs       int64
+	isize    int64 // inode size
+	ipg      uint64
+	firstIno uint64 // first non-reserved inode; lower numbers are never listed
+	inodes   uint64
+	blocks   uint64
+	first    uint64
+	itable   []uint64 // inode table block of each group
 	// Notes records conditions the reader saw but did not act on.
 	Notes []string
 	// Version is "ext2", "ext3" or "ext4", from the superblock's feature flags.
@@ -112,6 +113,10 @@ func Open(r io.ReaderAt, size int64) (*Volume, error) {
 	is64 := incompat&incompat64bit != 0
 	v.inodes = uint64(u32(sb, 0))
 	v.first = uint64(u32(sb, 20))
+	v.firstIno = 11
+	if rev >= 1 {
+		v.firstIno = uint64(u32(sb, 84))
+	}
 	v.ipg = uint64(u32(sb, 40))
 	v.blocks = uint64(u32(sb, 4))
 	if is64 {
@@ -237,6 +242,12 @@ func (v *Volume) readInode(ino uint64) (*inode, error) {
 		}
 		return nil, fmt.Errorf("reading inode %d: %w", ino, err)
 	}
+	return parseInode(ino, b), nil
+}
+
+// parseInode decodes one on-disk inode of ino from b, which holds at least the
+// fields read here.
+func parseInode(ino uint64, b []byte) *inode {
 	in := &inode{
 		num: ino, mode: u16(b, 0), links: u16(b, 26), flags: u32(b, 32),
 		dtime: u32(b, 20), atime: u32(b, 8), ctime: u32(b, 12), mtime: u32(b, 16),
@@ -246,7 +257,7 @@ func (v *Volume) readInode(ino uint64) (*inode, error) {
 	if in.isReg() || in.mode&modeTypeMask == 0 {
 		in.size |= int64(u32(b, 108)) << 32
 	}
-	return in, nil
+	return in
 }
 
 // ---- block mapping
@@ -543,6 +554,11 @@ func (v *Volume) Walk(fn func(fsvol.File) error) (fsvol.WalkStats, error) {
 	var st fsvol.WalkStats
 	st.Records = int(v.inodes)
 	seenDir := map[uint64]bool{}
+	// reach holds every in-use inode the tree walk met; stale maps the
+	// inode of a directory entry that points to a free inode to the path it
+	// was listed under, which is the only name a deleted file may still have.
+	reach := map[uint64]bool{}
+	stale := map[uint64]string{}
 	type dirJob struct {
 		ino  uint64
 		path string
@@ -575,8 +591,12 @@ func (v *Volume) Walk(fn func(fsvol.File) error) (fsvol.WalkStats, error) {
 				continue
 			}
 			if !child.inUse() {
+				if _, ok := stale[child.num]; !ok && !child.isDir() {
+					stale[child.num] = job.path + "/" + de.name
+				}
 				continue
 			}
+			reach[child.num] = true
 			path := job.path + "/" + de.name
 			f := fsvol.File{
 				Record: child.num,
@@ -609,7 +629,79 @@ func (v *Volume) Walk(fn func(fsvol.File) error) (fsvol.WalkStats, error) {
 			}
 		}
 	}
-	return st, nil
+	// Deleted files: freed inodes that are no longer reachable from the root
+	// and still map data. Their content is readable only while the blocks they
+	// map have not been reused. Directories are not listed, and neither are
+	// freed inodes whose data map was cleared on deletion.
+	err := v.forEachInode(func(in *inode) error {
+		if reach[in.num] || in.inUse() || in.dtime == 0 || in.num < v.firstIno || in.mode == 0 || in.isDir() {
+			return nil
+		}
+		// Only a freed inode that still maps data is listed. ext4 clears the
+		// extent tree of a freed file, so most freed inodes have no content
+		// left to read; listing them would add names with nothing behind them.
+		if ext, err := v.blockMap(in); err != nil || len(ext) == 0 {
+			return nil
+		}
+		// The name is the last one a directory listed for the inode, kept flat
+		// under /$OrphanFiles as NTFS does; with no name left, the inode number.
+		name, named := stale[in.num]
+		if named {
+			name = name[strings.LastIndexByte(name, '/')+1:]
+		} else {
+			name = fmt.Sprintf("inode-%d", in.num)
+		}
+		f := fsvol.File{
+			Record:  in.num,
+			Name:    name,
+			Path:    "/$OrphanFiles/" + name,
+			InUse:   false,
+			Orphan:  true,
+			Size:    in.size,
+			Streams: []fsvol.Stream{{Size: in.size}},
+		}
+		if t := ts(in.mtime); !t.IsZero() {
+			f.Modified = t
+		}
+		if t := ts(in.atime); !t.IsZero() {
+			f.Accessed = t
+		}
+		if t := ts(in.ctime); !t.IsZero() {
+			f.MFTChanged = t
+		}
+		st.Deleted++
+		return fn(f)
+	})
+	return st, err
+}
+
+// forEachInode calls fn for every inode of every group, reading each group's
+// inode table in one piece. An inode whose table block is unreadable is
+// skipped; a table that cannot be read at all is reported by the caller
+// through the walk's corrupt count, not here.
+func (v *Volume) forEachInode(fn func(*inode) error) error {
+	perGroup := int64(v.ipg) * v.isize
+	table := make([]byte, perGroup)
+	for g := range v.itable {
+		off := int64(v.itable[g]) * v.bs
+		if off+perGroup > v.size {
+			continue
+		}
+		if n, _ := v.r.ReadAt(table, off); int64(n) < perGroup {
+			continue
+		}
+		for idx := uint64(0); idx < v.ipg; idx++ {
+			num := uint64(g)*v.ipg + idx + 1
+			if num > v.inodes {
+				break
+			}
+			in := parseInode(num, table[int64(idx)*v.isize:int64(idx+1)*v.isize])
+			if err := fn(in); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 type dirEntry struct {

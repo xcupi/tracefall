@@ -4,11 +4,13 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -67,7 +69,12 @@ func comparePartition(t *testing.T, img image.Image, p partition.Partition) {
 	}
 	ours := map[string]string{} // path -> sha256 for regular files
 	links := map[string]bool{}
+	deleted := map[uint64]fsvol.File{}
 	st, err := v.Walk(func(f fsvol.File) error {
+		if !f.InUse {
+			deleted[f.Record] = f
+			return nil
+		}
 		if f.IsDir {
 			return nil
 		}
@@ -182,6 +189,7 @@ func comparePartition(t *testing.T, img image.Image, p partition.Partition) {
 	sort.Strings(missing)
 	sort.Strings(extra)
 	sort.Strings(differ)
+	compareDeleted(t, v, raw, p.Index, deleted)
 	t.Logf("partition %d: %d regular files compared, %d symlinks listed, %d in-use names walked, %d stale entries (free inode) dumped by debugfs only", p.Index, len(ours), len(links), st.InUse, stale)
 	if len(missing)+len(extra)+len(differ) > 0 {
 		t.Errorf("partition %d differs from debugfs:\n  only in debugfs: %s\n  only in reader: %s\n  content differs: %s",
@@ -264,4 +272,95 @@ func (v *Volume) staleEntry(path string) bool {
 	}
 	in, err := v.readInode(cur)
 	return err == nil && !in.inUse()
+}
+
+// compareDeleted checks the deleted regular files the reader lists against
+// debugfs lsdel, which lists freed inodes on its own. Every regular file lsdel
+// reports must be listed, and nothing else. Where the reader can read a
+// deleted file's content, it must equal debugfs dump of the same inode.
+func compareDeleted(t *testing.T, v *Volume, raw string, index int, deleted map[uint64]fsvol.File) {
+	t.Helper()
+	out, err := exec.Command("debugfs", "-R", "lsdel", raw).CombinedOutput()
+	if err != nil {
+		t.Fatalf("partition %d: debugfs lsdel: %v\n%s", index, err, out)
+	}
+	want := map[uint64]bool{}
+	lines := strings.Split(string(out), "\n")
+	if len(lines) > 4 {
+		t.Logf("partition %d: lsdel output starts: %q", index, strings.Join(lines[:4], " | "))
+	}
+	for _, line := range lines {
+		f := strings.Fields(line)
+		if len(f) < 3 {
+			continue
+		}
+		ino, err1 := strconv.ParseUint(f[0], 10, 64)
+		mode, err2 := strconv.ParseUint(f[2], 8, 32)
+		if err1 != nil || err2 != nil || mode&0xF000 == 0x4000 {
+			continue // directories are not listed by the reader
+		}
+		want[ino] = true
+	}
+	var missing, extra []uint64
+	for ino := range want {
+		if _, ok := deleted[ino]; !ok {
+			missing = append(missing, ino)
+		}
+	}
+	readable, unreadable, mismatch := 0, 0, 0
+	for ino, f := range deleted {
+		if !want[ino] {
+			extra = append(extra, ino)
+			continue
+		}
+		if f.IsDir {
+			continue
+		}
+		r, err := v.OpenStream(ino, "")
+		if err != nil {
+			unreadable++
+			continue
+		}
+		var got []byte
+		buf := make([]byte, 1<<20)
+		for off := int64(0); ; {
+			n, err := r.ReadAt(buf, off)
+			got = append(got, buf[:n]...)
+			off += int64(n)
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			if err != nil {
+				mismatch++
+				break
+			}
+		}
+		dump := filepath.Join(t.TempDir(), "d")
+		if o, err := exec.Command("debugfs", "-R", fmt.Sprintf("dump <%d> %s", ino, dump), raw).CombinedOutput(); err != nil {
+			t.Fatalf("partition %d: debugfs dump <%d>: %v\n%s", index, ino, err, o)
+		}
+		theirs, _ := os.ReadFile(dump)
+		if sum(got) == sum(theirs) && len(got) == len(theirs) {
+			readable++
+		} else {
+			mismatch++
+			if mismatch <= 5 {
+				t.Logf("partition %d: deleted inode %d content differs from debugfs dump (%d vs %d bytes)", index, ino, len(got), len(theirs))
+			}
+		}
+	}
+	sort.Slice(missing, func(i, j int) bool { return missing[i] < missing[j] })
+	t.Logf("partition %d: debugfs lsdel lists %d freed non-directory inodes; reader lists %d deleted files; content readable and equal %d, unreadable %d, mismatched %d",
+		index, len(want), len(deleted), readable, unreadable, mismatch)
+	if len(missing) > 0 || len(extra) > 0 || mismatch > 0 {
+		t.Errorf("partition %d: deleted files differ from lsdel: missing %v, extra %v, content mismatches %d",
+			index, head64(missing), head64(extra), mismatch)
+	}
+}
+
+func head64(s []uint64) []uint64 {
+	if len(s) > 10 {
+		return s[:10]
+	}
+	return s
 }

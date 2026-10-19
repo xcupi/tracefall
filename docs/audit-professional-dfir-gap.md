@@ -34,11 +34,13 @@ reporting.
 - Not done: EWF2 (Ex01) is refused explicitly; VMDK, VHD/VHDX, qcow2 and
   AFF4 are absent; FAT/exFAT, APFS and HFS+ filesystems are only recognised
   from the partition table, not read; ext inline data and encrypted files are
-  reported, not read; BitLocker is detected with no way to supply a key.
+  reported, not read; deleted ext files are listed only while their data map
+  survives; BitLocker is detected with no way to supply a key.
 - `internal/ntfs` parses extracted `$MFT`, `$UsnJrnl`, `$LogFile` files;
   it is not a volume or filesystem reader.
-- No BitLocker/encryption detection, no deleted-file carving (deleted ext
-  inodes are not listed either), no FAT/exFAT or APFS.
+- No BitLocker/encryption detection, no carving of deleted content beyond
+  freed ext inodes that still map data (not carved from slack space or
+  journals), no FAT/exFAT or APFS.
 - Acceptance: upload an E01 and a raw image of a Windows system disk;
   partitions are enumerated, NTFS volumes are opened read-only, relevant
   artifacts are located and extracted automatically into the existing

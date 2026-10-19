@@ -98,10 +98,11 @@ random byte damage (no panics, no hangs).
 
 The ext reader (internal/ext4) is read-only. It lists every name reachable
 from the root through in-use inodes, and reads file content through the extent
-tree (ext4) or the block map (ext2 and ext3). Deleted inodes are not listed,
-and metadata checksums are not verified. A directory entry that points to a
-free inode is not listed, although debugfs dumps it; that is the correct
-behaviour for an in-use catalog.
+tree (ext4) or the block map (ext2 and ext3). Freed inodes that still map
+data are listed as deleted files (see below), and metadata checksums are not
+verified. A directory entry that points to a
+free inode is not listed as in use, although debugfs dumps it. Its name is
+used for the deleted file below, if the inode is still freed.
 
 Checked two ways:
 
@@ -117,3 +118,15 @@ Checked two ways:
   258,124 regular files, all content identical. debugfs also dumps one stale
   directory entry whose inode is free; the test accepts only that case, after
   checking that the inode is not in use.
+
+Deleted files. A freed inode that is no longer reachable from the root, and
+that still maps data, is listed with InUse false under /$OrphanFiles/. Its
+name is the last name a directory still listed for that inode, or inode-N when
+no name is left. Freed directories and freed inodes whose data map was cleared
+on deletion are not listed. ext4 clears the extent tree of a deleted file, so
+most freed inodes have no content left, and listing them would add names with
+nothing behind them. The catalog never includes deleted files, the same as
+NTFS: they are reported by the reader, not added to the evidence.
+
+Checked against debugfs lsdel on the validation image: the two freed inodes it
+lists are the two the reader lists, and their content equals debugfs dump.

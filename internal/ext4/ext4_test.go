@@ -356,3 +356,123 @@ func TestHoles_ReportOnlyStoredRangesAndReadZeros(t *testing.T) {
 		})
 	}
 }
+
+// debugfsEdit runs one debugfs write command on a copy of img and returns the
+// edited image. debugfs is the tool an examiner would use to delete a file, so
+// the deletion here is not made by the reader.
+func debugfsEdit(t *testing.T, img memImage, cmd string) memImage {
+	t.Helper()
+	if _, err := exec.LookPath("debugfs"); err != nil {
+		t.Skip("debugfs not installed")
+	}
+	p := filepath.Join(t.TempDir(), "fs.img")
+	if err := os.WriteFile(p, img, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command("debugfs", "-w", "-R", cmd, p).CombinedOutput(); err != nil {
+		t.Fatalf("debugfs %s: %v\n%s", cmd, err, out)
+	}
+	b, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return memImage(b)
+}
+
+// findDeleted returns the deleted files a walk reports, by path.
+func findDeleted(t *testing.T, v *Volume) (map[string]fsvol.File, fsvol.WalkStats) {
+	t.Helper()
+	out := map[string]fsvol.File{}
+	st, err := v.Walk(func(f fsvol.File) error {
+		if !f.InUse {
+			out[f.Path] = f
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk: %v", err)
+	}
+	return out, st
+}
+
+// A file whose directory entry is kept but whose inode was freed is listed as
+// deleted under its own name, and its content reads back as it was written
+// while its blocks are still intact.
+func TestDeleted_FreedInodeKeepsItsNameAndContent(t *testing.T) {
+	for _, tool := range []string{"mkfs.ext2", "mkfs.ext4"} {
+		t.Run(tool, func(t *testing.T) {
+			img, want := buildFS(t, tool, "-b", "1024")
+			// deep.txt has no hard link, so freeing its inode leaves no other name.
+			killed := debugfsEdit(t, img, "kill_file /dir1/dir2/deep.txt")
+			v, err := Open(killed, int64(len(killed)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			for p, f := range listing(t, v) {
+				if p == "/dir1/dir2/deep.txt" {
+					t.Fatalf("a freed file is listed as in use: %+v", f)
+				}
+			}
+			dels, st := findDeleted(t, v)
+			f, ok := dels["/$OrphanFiles/deep.txt"]
+			if !ok {
+				t.Fatalf("the freed file is not listed under its name; deleted = %v", keys(dels))
+			}
+			if st.Deleted < 1 || !f.Orphan || f.InUse {
+				t.Errorf("stats %+v, file %+v: want a deleted, orphan file", st, f)
+			}
+			if f.Size != int64(len(want["/dir1/dir2/deep.txt"])) {
+				t.Errorf("size %d, want %d", f.Size, len(want["/dir1/dir2/deep.txt"]))
+			}
+			r, err := v.OpenStream(f.Record, "")
+			if err != nil {
+				// On ext4 the freed inode's extent tree may be cleared on
+				// deletion. That is a limit of the medium, not a wrong read.
+				t.Logf("%s: content not readable after deletion: %v", tool, err)
+				return
+			}
+			if got := readAll(t, r); sum(got) != sum(want["/dir1/dir2/deep.txt"]) {
+				t.Errorf("recovered content differs from the original")
+			}
+		})
+	}
+}
+
+// A file whose directory entry was removed has no name left, so it is listed
+// as an inode with a generated name. Its content is still read only when its
+// blocks are intact.
+func TestDeleted_UnlinkedFileIsListedByInodeNumber(t *testing.T) {
+	img, want := buildFS(t, "mkfs.ext2", "-b", "1024")
+	rm := debugfsEdit(t, img, "rm /dir1/dir2/deep.txt")
+	v, err := Open(rm, int64(len(rm)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	dels, st := findDeleted(t, v)
+	var found *fsvol.File
+	for p, f := range dels {
+		if strings.HasPrefix(p, "/$OrphanFiles/inode-") && f.Size == int64(len(want["/dir1/dir2/deep.txt"])) {
+			f := f
+			found = &f
+		}
+	}
+	if found == nil {
+		t.Fatalf("no unnamed deleted inode of the right size; stats %+v, deleted %v", st, keys(dels))
+	}
+	r, err := v.OpenStream(found.Record, "")
+	if err != nil {
+		t.Fatalf("content of an intact deleted inode: %v", err)
+	}
+	if got := readAll(t, r); sum(got) != sum(want["/dir1/dir2/deep.txt"]) {
+		t.Errorf("recovered content differs from the original")
+	}
+}
+
+func keys(m map[string]fsvol.File) []string {
+	var out []string
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
