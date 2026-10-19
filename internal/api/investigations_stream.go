@@ -12,7 +12,7 @@ import (
 // (see internal/investigate.RunStreamed).
 func (s *Service) caseInvestigations(caseID string, findings []model.Finding, correlations []model.Correlation) ([]model.Investigation, error) {
 	each := func(fn func(model.Event) error) error {
-		return s.store.ForEachEvent(caseID, fn)
+		return s.store.ForEachEventLazy(caseID, investigate.NeedsExtra, fn)
 	}
 	return investigate.RunStreamed(caseID, each, findings, correlations)
 }

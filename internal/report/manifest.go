@@ -8,6 +8,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"os"
 	"sort"
 	"strings"
 	"time"
@@ -51,10 +53,54 @@ type Manifest struct {
 	Notes         []string       `json:"notes"`
 }
 
-// File is one named file in a bundle.
+// File is one named file in a bundle. Its content is either in Data, or, for a
+// large file already written to disk, in the file at Path. A spooled file
+// carries its own digest and size (see SpooledFile), so the manifest does not
+// read it twice.
 type File struct {
 	Name string
 	Data []byte
+
+	Path   string
+	SHA256 string
+	Size   int64
+}
+
+// NewFile holds a file's content in memory.
+func NewFile(name string, data []byte) File {
+	return File{Name: name, Data: data}
+}
+
+// SpooledFile names a file that is already on disk at path, with the digest
+// and size its writer computed while writing it.
+func SpooledFile(name, path, sha256hex string, size int64) File {
+	return File{Name: name, Path: path, SHA256: sha256hex, Size: size}
+}
+
+// open returns the file's content. The caller closes it.
+func (f File) open() (io.ReadCloser, error) {
+	if f.Path == "" {
+		return io.NopCloser(bytes.NewReader(f.Data)), nil
+	}
+	return os.Open(f.Path)
+}
+
+// contentDigest is the SHA-256 of a file's content, reading a spooled file
+// from disk when it has no in-memory content.
+func contentDigest(f File) (string, error) {
+	if f.Path == "" {
+		return sha256Hex(f.Data), nil
+	}
+	r, err := f.open()
+	if err != nil {
+		return "", err
+	}
+	defer r.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, r); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 func sha256Hex(b []byte) string {
@@ -67,6 +113,9 @@ func sha256Hex(b []byte) string {
 func SHA256Hex(b []byte) string { return sha256Hex(b) }
 
 func artifactOf(f File) Artifact {
+	if f.Path != "" {
+		return Artifact{Name: f.Name, SHA256: f.SHA256, Bytes: f.Size}
+	}
 	return Artifact{Name: f.Name, SHA256: sha256Hex(f.Data), Bytes: int64(len(f.Data))}
 }
 
@@ -144,7 +193,11 @@ func Verify(manifestJSON []byte, files []File) ([]Mismatch, error) {
 		if f.Name == ManifestName {
 			continue
 		}
-		have[f.Name] = sha256Hex(f.Data)
+		sum, err := contentDigest(f)
+		if err != nil {
+			return nil, fmt.Errorf("report: reading %s: %w", f.Name, err)
+		}
+		have[f.Name] = sum
 	}
 
 	var out []Mismatch
@@ -166,29 +219,41 @@ func Verify(manifestJSON []byte, files []File) ([]Mismatch, error) {
 	return out, nil
 }
 
-// Bundle packs files into a ZIP whose bytes depend only on its inputs:
-// entries are ordered by name, every entry carries the report's
-// generation time instead of the wall clock, and names are flat.
+// Bundle packs files into a ZIP in memory. See BundleTo.
 func Bundle(generated time.Time, files []File) ([]byte, error) {
-	sorted := append([]File(nil), files...)
-	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Name < sorted[j].Name })
-
 	var buf bytes.Buffer
-	zw := zip.NewWriter(&buf)
-	for _, f := range sorted {
-		if f.Name == "" || strings.ContainsAny(f.Name, `/\`) || strings.Contains(f.Name, "..") {
-			return nil, fmt.Errorf("report: unsafe bundle file name %q", f.Name)
-		}
-		w, err := zw.CreateHeader(&zip.FileHeader{Name: f.Name, Method: zip.Deflate, Modified: generated.UTC()})
-		if err != nil {
-			return nil, err
-		}
-		if _, err := w.Write(f.Data); err != nil {
-			return nil, err
-		}
-	}
-	if err := zw.Close(); err != nil {
+	if err := BundleTo(&buf, generated, files); err != nil {
 		return nil, err
 	}
 	return buf.Bytes(), nil
+}
+
+// BundleTo writes a ZIP whose bytes depend only on its inputs: entries are
+// ordered by name, every entry carries the report's generation time instead of
+// the wall clock, and names are flat. Each file is copied from its content or
+// from its spool file, so the bundle is not held in memory.
+func BundleTo(w io.Writer, generated time.Time, files []File) error {
+	sorted := append([]File(nil), files...)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Name < sorted[j].Name })
+
+	zw := zip.NewWriter(w)
+	for _, f := range sorted {
+		if f.Name == "" || strings.ContainsAny(f.Name, `/\`) || strings.Contains(f.Name, "..") {
+			return fmt.Errorf("report: unsafe bundle file name %q", f.Name)
+		}
+		entry, err := zw.CreateHeader(&zip.FileHeader{Name: f.Name, Method: zip.Deflate, Modified: generated.UTC()})
+		if err != nil {
+			return err
+		}
+		r, err := f.open()
+		if err != nil {
+			return err
+		}
+		_, err = io.Copy(entry, r)
+		r.Close()
+		if err != nil {
+			return err
+		}
+	}
+	return zw.Close()
 }

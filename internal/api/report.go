@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"os"
 	"regexp"
 	"sort"
 	"strings"
@@ -52,10 +53,36 @@ type reportBuild struct {
 	Files        []report.File // attachments, not including the report or manifest
 	Manifest     report.Manifest
 	ManifestJSON []byte
+
+	// spool is the timeline file written to disk for this build, empty when
+	// there is none. The caller removes it once the bundle is written.
+	spool string
 }
 
-// buildReport assembles, renders and hashes the report. It writes nothing.
+// release removes the spooled timeline, if any. Call it after the bundle is
+// written.
+func (b reportBuild) release() {
+	if b.spool != "" {
+		os.Remove(b.spool)
+	}
+}
+
+// buildReport assembles, renders and hashes the report. Its only write is the
+// timeline spool in the case's reports folder, which the caller releases.
 func (s *Service) buildReport(caseID string, now time.Time) (reportBuild, error) {
+	var spool string
+	b, err := s.assembleAndRender(caseID, now, &spool)
+	if err != nil {
+		if spool != "" {
+			os.Remove(spool)
+		}
+		return reportBuild{}, err
+	}
+	b.spool = spool
+	return b, nil
+}
+
+func (s *Service) assembleAndRender(caseID string, now time.Time, spool *string) (reportBuild, error) {
 	c, err := s.GetCase(caseID)
 	if err != nil {
 		return reportBuild{}, err
@@ -112,18 +139,21 @@ func (s *Service) buildReport(caseID string, now time.Time) (reportBuild, error)
 		return reportBuild{}, fmt.Errorf("computing investigations: %w", err)
 	}
 
-	// Attachments first: the report prints their hashes.
-	var tl, fl bytes.Buffer
-	timeline, err := s.streamTimeline(caseID, &tl)
+	// Attachments first: the report prints their hashes. The timeline is the
+	// case's whole event list as CSV, so it is spooled to disk rather than held
+	// in memory; its digest is computed while it is written.
+	tlPath, timeline, tlSHA, tlSize, err := s.spoolTimeline(caseID, s.reportsDir(caseID))
 	if err != nil {
 		return reportBuild{}, fmt.Errorf("building timeline.csv: %w", err)
 	}
+	*spool = tlPath
+	var fl bytes.Buffer
 	if err := writeFindingsCSV(findings, statuses, &fl); err != nil {
 		return reportBuild{}, fmt.Errorf("building findings.csv: %w", err)
 	}
 	files := []report.File{
-		{Name: "timeline.csv", Data: tl.Bytes()},
-		{Name: "findings.csv", Data: fl.Bytes()},
+		report.SpooledFile("timeline.csv", tlPath, tlSHA, tlSize),
+		report.NewFile("findings.csv", fl.Bytes()),
 	}
 
 	d := s.assembleReportData(reportInputs{
@@ -239,7 +269,7 @@ func (s *Service) assembleReportData(in reportInputs) report.Data {
 
 	d.Attachments = []report.Attachment{
 		{Name: in.timelineCSV.Name, Description: "Complete normalized timeline, one row per event, UTC.",
-			SHA256: reportSHA256(in.timelineCSV.Data), Bytes: int64(len(in.timelineCSV.Data)), Rows: in.eventTotal},
+			SHA256: in.timelineCSV.SHA256, Bytes: in.timelineCSV.Size, Rows: in.eventTotal},
 		{Name: in.findingsCSV.Name, Description: "All findings with analyst review status.",
 			SHA256: reportSHA256(in.findingsCSV.Data), Bytes: int64(len(in.findingsCSV.Data)), Rows: len(in.findings)},
 	}

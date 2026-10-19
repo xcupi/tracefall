@@ -54,6 +54,14 @@ type Investigation struct {
 	Hosts []string `json:"hosts"`
 	Users []string `json:"users"`
 
+	// EventCount is the number of events in the investigation's groups. It
+	// is always the full count, whatever the sample below holds.
+	EventCount int `json:"event_count"`
+	// EventIDs is a sample: the first events of the investigation in time
+	// order, at most investigate.MaxEventIDSample of them. The full set of
+	// events is not listed here; a case's events are read through the timeline
+	// or by time range. A listing of every id grew with the case and made the
+	// report's memory linear in its event count.
 	EventIDs       []string `json:"event_ids"`
 	FindingIDs     []string `json:"finding_ids"`
 	CorrelationIDs []string `json:"correlation_ids"`

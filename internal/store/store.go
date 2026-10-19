@@ -698,6 +698,18 @@ const eventCols = `id, case_id, collection_id, timestamp, host, user, event_type
 	artifact_type, source_file_id, source_reference, parser, confidence, raw_evidence_id, dedup_hash, extra_json`
 
 func scanEvent(row interface{ Scan(...any) error }) (model.Event, error) {
+	e, extraJSON, err := scanEventRaw(row)
+	if err != nil {
+		return model.Event{}, err
+	}
+	e.Extra = map[string]string{}
+	_ = json.Unmarshal([]byte(extraJSON), &e.Extra)
+	return e, nil
+}
+
+// scanEventRaw reads one event row but leaves its extra_json undecoded. The
+// caller decodes it only when it needs the event's Extra map.
+func scanEventRaw(row interface{ Scan(...any) error }) (model.Event, string, error) {
 	var e model.Event
 	var ts, extraJSON string
 	err := row.Scan(
@@ -707,12 +719,10 @@ func scanEvent(row interface{ Scan(...any) error }) (model.Event, error) {
 		&e.ArtifactType, &e.SourceFileID, &e.SourceReference, &e.Parser, &e.Confidence, &e.RawEvidenceID, &e.DedupHash, &extraJSON,
 	)
 	if err != nil {
-		return model.Event{}, err
+		return model.Event{}, "", err
 	}
 	e.Timestamp = parseTime(ts)
-	e.Extra = map[string]string{}
-	_ = json.Unmarshal([]byte(extraJSON), &e.Extra)
-	return e, nil
+	return e, extraJSON, nil
 }
 
 // FindEventByDedupHash looks up an existing event in caseID with the

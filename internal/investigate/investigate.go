@@ -34,6 +34,10 @@ import (
 	"tracefall/internal/model"
 )
 
+// MaxEventIDSample bounds Investigation.EventIDs: the sample is the first
+// events in time order, and EventCount always gives the full count.
+const MaxEventIDSample = 100
+
 // Run groups caseID's findings and correlations into Investigations,
 // scored and narrated from events. events/findings/correlations should
 // be the case's complete current sets (as store.ListEvents/ListFindings/
@@ -158,8 +162,11 @@ func buildInvestigation(caseID string, g group, acc *groupAcc, findingsByID map[
 	for _, c := range groupCorrelations {
 		correlationIDs = append(correlationIDs, c.ID)
 	}
-	eventIDs := make([]string, 0, len(acc.members))
+	eventIDs := make([]string, 0, MaxEventIDSample)
 	for _, m := range acc.members {
+		if len(eventIDs) == MaxEventIDSample {
+			break
+		}
 		eventIDs = append(eventIDs, m.id)
 	}
 
@@ -175,6 +182,7 @@ func buildInvestigation(caseID string, g group, acc *groupAcc, findingsByID map[
 		EndTime:             end,
 		Hosts:               sortedUniqueStrings(setKeys(acc.hosts)),
 		Users:               sortedUniqueStrings(setKeys(acc.users)),
+		EventCount:          len(acc.members),
 		EventIDs:            eventIDs,
 		FindingIDs:          findingIDs,
 		CorrelationIDs:      correlationIDs,

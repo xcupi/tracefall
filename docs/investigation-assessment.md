@@ -36,9 +36,12 @@ pass over at most a few hundred events, per request.
 Defined in `internal/model/investigation.go`. Every field beyond the
 narrative/score/rationale is either a scalar summary (severity,
 confidence, category, time range, hosts, users) or a list of **references**
-into already-existing case data — `EventIDs`, `FindingIDs`,
-`CorrelationIDs`, `Techniques`, `CollectionIDs`, `SourceFileIDs` — never a
-copy of the underlying record. Resolve them through the exact same
+into already-existing case data — `FindingIDs`, `CorrelationIDs`,
+`Techniques`, `CollectionIDs`, `SourceFileIDs` — never a copy of the
+underlying record. `EventIDs` is a sample, not the full list: it holds the
+first 100 events of the investigation in time order (`MaxEventIDSample`), and
+`EventCount` gives the full count. An investigation of a large burst lists
+100 ids, not hundreds of thousands. Use `EventCount` to tell the two apart. Resolve them through the exact same
 endpoints the Timeline/Findings/Activity Chains tabs already use
 (`GET .../events/{id}`, `GET .../findings/{id}`); the investigation detail
 endpoint (below) does this resolution automatically for convenience.

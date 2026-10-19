@@ -1,6 +1,7 @@
 package store
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -95,6 +96,32 @@ func (s *Store) ForEachEvent(caseID string, fn func(model.Event) error) error {
 		e, err := scanEvent(rows)
 		if err != nil {
 			return err
+		}
+		if err := fn(e); err != nil {
+			return err
+		}
+	}
+	return rows.Err()
+}
+
+// ForEachEventLazy is ForEachEvent for consumers that need the parsed Extra
+// map of only some event types. The map is decoded when needExtra reports true
+// for an event's type; for the other events Extra is nil. Reading and decoding
+// every row's JSON was most of the allocation of an investigation pass.
+func (s *Store) ForEachEventLazy(caseID string, needExtra func(eventType string) bool, fn func(model.Event) error) error {
+	rows, err := s.db.Query(`SELECT `+eventCols+` FROM events WHERE case_id = ? ORDER BY timestamp ASC, id ASC`, caseID)
+	if err != nil {
+		return fmt.Errorf("streaming events: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		e, extraJSON, err := scanEventRaw(rows)
+		if err != nil {
+			return err
+		}
+		if needExtra(e.EventType) {
+			e.Extra = map[string]string{}
+			_ = json.Unmarshal([]byte(extraJSON), &e.Extra)
 		}
 		if err := fn(e); err != nil {
 			return err

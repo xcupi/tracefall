@@ -29,6 +29,10 @@ var narrativeTypes = map[string]bool{
 	model.EventPrivilegedLogon:     true,
 }
 
+// NeedsExtra reports whether an event of this type needs its Extra map to
+// be narrated. Every other type is read without it.
+func NeedsExtra(eventType string) bool { return narrativeTypes[eventType] }
+
 // member is one event of a group, kept for ordering, bounds and the narrative.
 type member struct {
 	ts   time.Time

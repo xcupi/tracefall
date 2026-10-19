@@ -1,10 +1,12 @@
 package api
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -43,10 +45,11 @@ func (s *Service) reportsDir(caseID string) string {
 // lists its own issuance (the same rule as the on-demand endpoints).
 func (s *Service) GenerateCaseReport(caseID, jobID string) (StoredReport, error) {
 	now := time.Now().UTC()
-	zipBytes, manifest, err := s.reportBundleBytes(caseID, now)
+	b, err := s.buildReport(caseID, now)
 	if err != nil {
 		return StoredReport{}, fmt.Errorf("building the report: %w", err)
 	}
+	defer b.release()
 
 	dir := s.reportsDir(caseID)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -55,22 +58,24 @@ func (s *Service) GenerateCaseReport(caseID, jobID string) (StoredReport, error)
 	name := "report-" + now.Format("20060102T150405.000000000Z") + ".zip"
 	final := filepath.Join(dir, name)
 	// Write beside the final name and rename, so a reader never sees a
-	// half-written bundle and a crash leaves no file under the real name.
+	// half-written bundle and a crash leaves no file under the real name. The
+	// bundle is streamed to that file, so it is never held in memory.
 	tmp := final + ".partial"
-	if err := os.WriteFile(tmp, zipBytes, 0o644); err != nil {
+	sum, size, err := writeBundleFile(tmp, now, b)
+	if err != nil {
+		os.Remove(tmp)
 		return StoredReport{}, fmt.Errorf("writing the report: %w", err)
 	}
 	if err := os.Rename(tmp, final); err != nil {
 		os.Remove(tmp)
 		return StoredReport{}, fmt.Errorf("saving the report: %w", err)
 	}
-
-	sum := sha256.Sum256(zipBytes)
+	manifest := b.Manifest
 	st := StoredReport{
 		File:             name,
-		SHA256:           hex.EncodeToString(sum[:]),
+		SHA256:           sum,
 		ReportHTMLSHA256: manifest.Report.SHA256,
-		Bytes:            int64(len(zipBytes)),
+		Bytes:            size,
 		GeneratedAt:      now,
 	}
 	s.audit(caseID, model.AuditExport, model.TargetCase, caseID,
@@ -107,6 +112,30 @@ func (s *Service) LatestStoredReport(caseID string) (string, []byte, error) {
 	return latest, b, nil
 }
 
+// writeBundleFile writes the report bundle to path and returns its SHA-256
+// and size. The bundle is streamed: the spooled timeline is copied from its
+// own file, never loaded whole.
+func writeBundleFile(path string, generated time.Time, b reportBuild) (string, int64, error) {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
+	if err != nil {
+		return "", 0, err
+	}
+	h := sha256.New()
+	cw := &countWriter{w: io.MultiWriter(f, h)}
+	all := append([]report.File{
+		{Name: "report.html", Data: b.HTML},
+		{Name: report.ManifestName, Data: b.ManifestJSON},
+	}, b.Files...)
+	if err := report.BundleTo(cw, generated, all); err != nil {
+		f.Close()
+		return "", 0, err
+	}
+	if err := f.Close(); err != nil {
+		return "", 0, err
+	}
+	return hex.EncodeToString(h.Sum(nil)), cw.n, nil
+}
+
 // reportBundleBytes builds the ZIP and its manifest. It writes nothing and
 // records nothing: issuance is the caller's job.
 func (s *Service) reportBundleBytes(caseID string, now time.Time) ([]byte, report.Manifest, error) {
@@ -118,9 +147,9 @@ func (s *Service) reportBundleBytes(caseID string, now time.Time) ([]byte, repor
 		{Name: "report.html", Data: b.HTML},
 		{Name: report.ManifestName, Data: b.ManifestJSON},
 	}, b.Files...)
-	z, err := report.Bundle(now, all)
-	if err != nil {
+	var buf bytes.Buffer
+	if err := report.BundleTo(&buf, now, all); err != nil {
 		return nil, report.Manifest{}, err
 	}
-	return z, b.Manifest, nil
+	return buf.Bytes(), b.Manifest, nil
 }

@@ -55,12 +55,21 @@ once and computes its aggregates in the same pass.
 
 Measured on one validation case of 363,370 events, peak RSS:
 - analysis: 2.56 GB before, 255 MB after
-- report (includes investigations): 2.28 GB before, 491 MB after
-The report's remaining memory is linear in the number of events, with a small
-constant. The investigation output lists every event id of its group (for a
-temporal burst, hundreds of thousands), and the timeline CSV is held in memory
-before it is attached. Neither is bounded yet. Changing the output contract
-(counts plus sampled ids) would be needed to bound them.
+- report (with investigations and bundle): 2.28 GB before, 240 MB after
+  (peak live heap after GC: about 450 MB before the bundle was spooled to
+  disk, 179 MB after)
+
+What the report holds now. An investigation keeps, per group, its aggregates
+and its event count. Its event_ids field is a sample: the first 100 events in
+time order. The full count is event_count. The timeline CSV is spooled to a
+file in the case's reports folder, with its digest computed as it is written,
+and the bundle is streamed to a .partial file that is renamed into place. The
+HTTP download (ReportBundle) still builds the bundle in memory, because it
+returns bytes; the stored report does not.
+
+Not bounded yet: the findings' evidence lookup (events cited by a finding are
+loaded by id, which grows with the number of cited events, not with the case).
+The in-memory bundle path for downloads is linear in the bundle size.
 
 The outputs did not change: investigations (exact JSON), findings and
 correlations (ignoring created_at), timeline.csv and findings.csv match the
