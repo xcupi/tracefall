@@ -331,8 +331,8 @@ func TestBuildNarrative_DeterministicAndEvidenceOnly(t *testing.T) {
 		{ID: "ps", Host: "WKSTN-SIM-001", User: "jdoe", EventType: model.EventProcessCreate, ProcessName: "powershell.exe", ParentProcessName: "winword.exe", Timestamp: mustTime("2026-01-15T09:13:30Z")},
 		{ID: "persist", Host: "WKSTN-SIM-001", User: "jdoe", EventType: model.EventRegistryRunKey, ProcessName: "update.exe", FilePath: `C:\Temp\update.exe`, Timestamp: mustTime("2026-01-15T09:15:00Z")},
 	}
-	n1 := buildNarrative(events)
-	n2 := buildNarrative(events)
+	n1 := buildNarrative(seqOf(events))
+	n2 := buildNarrative(seqOf(events))
 	if n1 != n2 {
 		t.Fatalf("narrative is not deterministic:\nfirst:  %q\nsecond: %q", n1, n2)
 	}
@@ -363,7 +363,7 @@ func TestBuildNarrative_ChronologicalEvenWithUnrelatedLaterMergedEvent(t *testin
 		{ID: "office", Host: "H1", User: "jdoe", EventType: model.EventProcessCreate, ProcessName: "winword.exe", ParentProcessName: "explorer.exe", Timestamp: mustTime("2026-01-15T09:00:00Z")},
 		{ID: "ps", Host: "H1", User: "jdoe", EventType: model.EventProcessCreate, ProcessName: "powershell.exe", ParentProcessName: "winword.exe", Timestamp: mustTime("2026-01-15T09:01:00Z")},
 	}
-	n := buildNarrative(events)
+	n := buildNarrative(seqOf(events))
 	earlyIdx := strings.Index(n, "explorer.exe")
 	wordIdx := strings.Index(n, "winword.exe")
 	if earlyIdx == -1 || wordIdx == -1 {
@@ -388,7 +388,7 @@ func TestBuildNarrative_ContinuationNotAcrossInterveningClause(t *testing.T) {
 		{ID: "logon", Host: "H1", User: "jdoe", EventType: model.EventLogonSuccess, Timestamp: mustTime("2026-01-15T09:00:00Z")},
 		{ID: "office", Host: "H1", User: "jdoe", EventType: model.EventProcessCreate, ProcessName: "winword.exe", ParentProcessName: "explorer.exe", Timestamp: mustTime("2026-01-15T09:14:22Z")},
 	}
-	n := buildNarrative(events)
+	n := buildNarrative(seqOf(events))
 	if !strings.Contains(n, "explorer.exe") || !strings.Contains(n, "winword.exe") {
 		t.Fatalf("narrative missing expected process names: %q", n)
 	}
@@ -446,4 +446,19 @@ func TestRun_DeterministicOutputOrder(t *testing.T) {
 	if r1[0].ID != r2[0].ID || r1[1].ID != r2[1].ID {
 		t.Errorf("investigation IDs differ across runs on unchanged input: run1=[%q,%q] run2=[%q,%q]", r1[0].ID, r1[1].ID, r2[0].ID, r2[1].ID)
 	}
+}
+
+// seqOf builds the narrative's input the way the accumulator does: each event
+// as its type and time, and the whole event for narrative types.
+func seqOf(events []model.Event) []seqItem {
+	out := make([]seqItem, 0, len(events))
+	for _, e := range events {
+		it := seqItem{typ: e.EventType, ts: e.Timestamp}
+		if narrativeTypes[e.EventType] {
+			ev := e
+			it.ev = &ev
+		}
+		out = append(out, it)
+	}
+	return out
 }

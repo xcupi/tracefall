@@ -400,11 +400,10 @@ func (s *Service) CaseSummary(id string) (Summary, error) {
 		return Summary{}, err
 	}
 
-	cited, err := s.store.EventsByIDs(wantedEventIDs(findings, correlations))
+	investigations, err := s.caseInvestigations(id, findings, correlations)
 	if err != nil {
 		return Summary{}, err
 	}
-	investigations := investigate.Run(id, cited, findings, correlations)
 	invSevCounts := map[string]int{model.SeverityCritical: 0, model.SeverityHigh: 0, model.SeverityMedium: 0, model.SeverityLow: 0}
 	for _, inv := range investigations {
 		invSevCounts[inv.Severity]++
@@ -2742,26 +2741,8 @@ func (s *Service) Investigations(caseID string) ([]model.Investigation, error) {
 	if err != nil {
 		return nil, fmt.Errorf("loading correlations: %w", err)
 	}
-	// Load only the events investigations actually read.
-	//
-	// investigate.Run indexes the events it is given by id and then looks
-	// up exactly the ids that its groups reference -- and a group is
-	// built from findings and correlations alone (see
-	// internal/investigate.buildGroups). So an event no finding and no
-	// correlation cites cannot appear in any investigation, and reading
-	// it was always wasted work.
-	//
-	// It stopped being merely wasteful in Phase 14, which made this
-	// reachable from a timeline row: the previous ListEvents call read
-	// the WHOLE case, so on a 200,000-event case opening one event's
-	// detail spent about four seconds loading 199,000 events that could
-	// not affect the answer. The output is unchanged, and
-	// TestInvestigations_ScopedEventLoadMatchesFullLoad pins that.
-	events, err := s.store.EventsByIDs(investigationEventIDs(findings, correlations))
-	if err != nil {
-		return nil, fmt.Errorf("loading events: %w", err)
-	}
-	return investigate.Run(caseID, events, findings, correlations), nil
+	// The case's events are streamed once; nothing holds the whole set.
+	return s.caseInvestigations(caseID, findings, correlations)
 }
 
 // investigationsFromAllEvents is the pre-Phase-14 implementation, kept
@@ -2787,31 +2768,6 @@ func (s *Service) investigationsFromAllEvents(caseID string) ([]model.Investigat
 		return nil, err
 	}
 	return investigate.Run(caseID, events, findings, correlations), nil
-}
-
-// investigationEventIDs is every event id referenced by a finding or a
-// correlation -- the complete set investigate.Run can resolve.
-func investigationEventIDs(findings []model.Finding, correlations []model.Correlation) []string {
-	seen := map[string]bool{}
-	var ids []string
-	add := func(id string) {
-		if id == "" || seen[id] {
-			return
-		}
-		seen[id] = true
-		ids = append(ids, id)
-	}
-	for _, f := range findings {
-		for _, id := range f.SupportingEvents {
-			add(id)
-		}
-	}
-	for _, c := range correlations {
-		for _, id := range c.EventIDs {
-			add(id)
-		}
-	}
-	return ids
 }
 
 // InvestigationAttackTechnique pairs one ATT&CK technique with exactly

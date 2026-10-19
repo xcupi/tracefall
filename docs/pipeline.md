@@ -44,24 +44,30 @@ is read from its SYSTEM hive first) -> analyze -> report (a ZIP bundle is writte
 to the case's reports folder and its hash is audited; `GET /api/cases/{id}/report/latest`
 serves it). `analyze: false` skips the analyze and report stages.
 
-Memory during analysis and report. Analysis no longer holds a case's whole
+Memory during analysis and report. Analysis does not hold a case's whole
 event set. Each detection rule declares the event types it reads and loads
 only those. Each typed correlator reads only its own types. The two correlators
 that look at every event (temporal bursts and entity footprints) read a small
-reference per event (id, host, process, artifact, time) instead of the full
-event. The report streams the timeline CSV once and computes its aggregates in
-the same pass. Measured on one validation case of 363,370 events, peak RSS:
-analysis 2.56 GB before, 255 MB after; report 3.99 GB before, 2.29 GB after.
+reference per event (id, host, process, artifact, time). Investigations stream
+the case's events once: each group keeps aggregates, its ordered event ids and
+the full event only for narrative types. The report streams the timeline CSV
+once and computes its aggregates in the same pass.
 
-The report is NOT yet bounded. Temporal bursts cite 358,260 events, so the
-events a report resolves by id are 358,751 of 363,370 (99%), and they are
-loaded as full events. Bounding the report needs the investigation layer to
-work on aggregates of its events instead of per-event data. That is the open
-step for this item.
+Measured on one validation case of 363,370 events, peak RSS:
+- analysis: 2.56 GB before, 255 MB after
+- report (includes investigations): 2.28 GB before, 491 MB after
+The report's remaining memory is linear in the number of events, with a small
+constant. The investigation output lists every event id of its group (for a
+temporal burst, hundreds of thousands), and the timeline CSV is held in memory
+before it is attached. Neither is bounded yet. Changing the output contract
+(counts plus sampled ids) would be needed to bound them.
 
-The outputs did not change: findings (ignoring created_at), correlations and
-timeline.csv match the previous build on seven cases. A rule test fails if a
-declared input misses an event type the rule reads.
+The outputs did not change: investigations (exact JSON), findings and
+correlations (ignoring created_at), timeline.csv and findings.csv match the
+previous build on all seven cases. Report HTML matches exactly, ignoring
+generation timestamps. A rule test fails if a declared input misses an event
+type the rule reads, and an investigation test checks that arrival order does
+not change the result.
 
 Determinism. Investigation ordering and the brute-force burst rule used to
 depend on map iteration order, so an event pair with the same timestamp could

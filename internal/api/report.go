@@ -12,7 +12,6 @@ import (
 
 	"tracefall/internal/attck"
 	"tracefall/internal/detect"
-	"tracefall/internal/investigate"
 	"tracefall/internal/model"
 	"tracefall/internal/report"
 	"tracefall/internal/version"
@@ -104,9 +103,13 @@ func (s *Service) buildReport(caseID string, now time.Time) (reportBuild, error)
 	if err != nil {
 		return reportBuild{}, fmt.Errorf("counting events: %w", err)
 	}
-	cited, err := s.store.EventsByIDs(wantedEventIDs(findings, correlations))
+	cited, err := s.store.EventsByIDs(findingEventIDs(findings))
 	if err != nil {
 		return reportBuild{}, fmt.Errorf("loading cited events: %w", err)
+	}
+	invs, err := s.caseInvestigations(caseID, findings, correlations)
+	if err != nil {
+		return reportBuild{}, fmt.Errorf("computing investigations: %w", err)
 	}
 
 	// Attachments first: the report prints their hashes.
@@ -125,7 +128,7 @@ func (s *Service) buildReport(caseID string, now time.Time) (reportBuild, error)
 
 	d := s.assembleReportData(reportInputs{
 		c: c, now: now, collections: collections, sourceFiles: sourceFiles, events: cited,
-		eventTotal: eventTotal, timeline: timeline,
+		eventTotal: eventTotal, timeline: timeline, invs: invs,
 		findings: findings, correlations: correlations, runs: runs, audit: auditLog,
 		statuses: statuses, notes: notes, summary: summary,
 		timelineCSV: files[0], findingsCSV: files[1],
@@ -154,6 +157,7 @@ type reportInputs struct {
 	events       []model.Event
 	eventTotal   int
 	timeline     *timelineAgg
+	invs         []model.Investigation
 	findings     []model.Finding
 	correlations []model.Correlation
 	runs         []model.AnalysisRun
@@ -218,7 +222,7 @@ func (s *Service) assembleReportData(in reportInputs) report.Data {
 		}
 	}
 
-	d.Investigations = reportInvestigations(in, fs, &d)
+	d.Investigations = reportInvestigations(in, &d)
 	d.Timeline = reportTimeline(in.timeline, in.events, cited, srcByID)
 	d.Coverage = reportCoverage(in.sourceFiles)
 	d.Rules = reportRules(fs, ruleFired)
@@ -427,8 +431,8 @@ func reportFinding(n int, f model.Finding, evByID map[string]model.Event, srcByI
 	return out
 }
 
-func reportInvestigations(in reportInputs, fs []model.Finding, d *report.Data) []report.Investigation {
-	invs := investigate.Run(in.c.ID, in.events, fs, in.correlations)
+func reportInvestigations(in reportInputs, d *report.Data) []report.Investigation {
+	invs := append([]model.Investigation{}, in.invs...)
 	sort.SliceStable(invs, func(i, j int) bool {
 		if invs[i].Score != invs[j].Score {
 			return invs[i].Score > invs[j].Score

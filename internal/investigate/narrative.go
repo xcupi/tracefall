@@ -24,10 +24,19 @@ type clause struct {
 // order. It never speculates about intent -- no "the attacker", only
 // "the activity"/"the process"/"the observed execution" -- and every
 // clause is derived directly from a real event's fields, never invented.
-// See orderEvents for why plain timestamp order is used rather than
-// preferring a chain correlation's own step order.
-func buildNarrative(events []model.Event) string {
-	ordered := orderEvents(events)
+//
+// seq is the group's events in timestamp order. Only narrative types carry
+// their full event (ev); the others carry their type and time, which is all
+// the logon-failure burst rule needs of the events between two failures.
+//
+// Plain timestamp order is used rather than a chain correlation's own step
+// order: an earlier version preferred the chain's order and narrated a chain
+// event as "subsequently" after a non-chain event that actually occurred
+// earlier. Chain steps are already chronological, so timestamp order gives the
+// same narrative for them.
+func buildNarrative(seq []seqItem) string {
+	ordered := append([]seqItem{}, seq...)
+	sort.Slice(ordered, func(i, j int) bool { return ordered[i].ts.Before(ordered[j].ts) })
 	if len(ordered) == 0 {
 		return ""
 	}
@@ -38,18 +47,19 @@ func buildNarrative(events []model.Event) string {
 
 	i := 0
 	for i < len(ordered) {
-		e := ordered[i]
+		it := ordered[i]
+		e := it.ev
 
-		switch e.EventType {
+		switch it.typ {
 		case model.EventLogonFailure:
 			j := i
-			for j < len(ordered) && ordered[j].EventType == model.EventLogonFailure {
+			for j < len(ordered) && ordered[j].typ == model.EventLogonFailure {
 				j++
 			}
 			burst := ordered[i:j]
 			clauses = append(clauses, clause{
 				text: fmt.Sprintf("On %s, %d failed logon attempt(s) for user %s were observed between %s and %s",
-					orDash(e.Host), len(burst), orDash(burst[0].User), fmtT(burst[0].Timestamp), fmtT(burst[len(burst)-1].Timestamp)),
+					orDash(e.Host), len(burst), orDash(burst[0].ev.User), fmtT(burst[0].ts), fmtT(burst[len(burst)-1].ts)),
 			})
 			i = j
 			narratedAny = true
@@ -65,8 +75,7 @@ func buildNarrative(events []model.Event) string {
 			}
 			clauses = append(clauses, clause{text: text})
 			// A logon didn't "spawn" anything -- the next process-create
-			// must not be phrased as a continuation of it (see lastProcess
-			// reset below, applied to every non-process-create case).
+			// must not be phrased as a continuation of it.
 			lastProcess = ""
 
 		case model.EventProcessCreate:
@@ -137,26 +146,6 @@ func buildNarrative(events []model.Event) string {
 	return joinClauses(clauses)
 }
 
-// orderEvents returns events sorted by timestamp. An earlier version of
-// this function preferred a chain correlation's own step ordering when
-// one was available, falling back to timestamp order only for events
-// outside the chain -- but that produced narratives claiming a chain
-// event happened "subsequently" relative to a non-chain event that
-// actually occurred earlier (e.g. a second, unrelated scheduled task
-// pulled into the same group by an entity correlation, timestamped
-// before the chain's first step but narrated after it). A chain
-// correlation's steps are always themselves already chronological by
-// construction (see internal/correlate/activity_chain.go and its
-// credential_chain/service_chain counterparts, which all walk strictly
-// forward in time), so plain timestamp order reconstructs the same
-// narrative for chain events while staying correct for every other
-// event in the group too.
-func orderEvents(events []model.Event) []model.Event {
-	out := append([]model.Event{}, events...)
-	sort.Slice(out, func(i, j int) bool { return out[i].Timestamp.Before(out[j].Timestamp) })
-	return out
-}
-
 func joinClauses(clauses []clause) string {
 	var sentences []string
 	var current string
@@ -179,7 +168,7 @@ func joinClauses(clauses []clause) string {
 	return strings.Join(sentences, " ")
 }
 
-func logonTypeSuffix(e model.Event) string {
+func logonTypeSuffix(e *model.Event) string {
 	switch e.Extra["logon_type"] {
 	case "10":
 		return " (remote interactive/RDP)"

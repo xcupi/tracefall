@@ -68,30 +68,6 @@ func (s *Service) streamTimeline(caseID string, w io.Writer) (*timelineAgg, erro
 	return agg, nil
 }
 
-// wantedEventIDs lists the events the report must resolve by id: those a
-// finding cites (its evidence and the timeline's key events) and those a
-// correlation links (the investigation narratives). Nothing else is loaded.
-func wantedEventIDs(findings []model.Finding, correlations []model.Correlation) []string {
-	seen := map[string]bool{}
-	var ids []string
-	add := func(list []string) {
-		for _, id := range list {
-			if !seen[id] {
-				seen[id] = true
-				ids = append(ids, id)
-			}
-		}
-	}
-	for _, f := range findings {
-		add(f.SupportingEvents)
-	}
-	for _, c := range correlations {
-		add(c.EventIDs)
-	}
-	sort.Strings(ids)
-	return ids
-}
-
 // timelineFromAgg turns the streamed aggregate into the report's timeline
 // section. key holds the events a finding cites; they are the only events the
 // section names.

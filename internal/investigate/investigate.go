@@ -41,33 +41,15 @@ import (
 // collection or time range; that's a job for the API layer if ever
 // needed, not this package.
 func Run(caseID string, events []model.Event, findings []model.Finding, correlations []model.Correlation) []model.Investigation {
-	eventsByID := make(map[string]model.Event, len(events))
-	for _, e := range events {
-		eventsByID[e.ID] = e
-	}
-	findingsByID := make(map[string]model.Finding, len(findings))
-	for _, f := range findings {
-		findingsByID[f.ID] = f
-	}
-	correlationsByID := make(map[string]model.Correlation, len(correlations))
-	for _, c := range correlations {
-		correlationsByID[c.ID] = c
-	}
-
-	groups := buildGroups(findings, correlations)
-
-	out := make([]model.Investigation, 0, len(groups))
-	for _, g := range groups {
-		inv := buildInvestigation(caseID, g, eventsByID, findingsByID, correlationsByID)
-		out = append(out, inv)
-	}
-
-	sort.SliceStable(out, func(i, j int) bool {
-		if !out[i].StartTime.Equal(out[j].StartTime) {
-			return out[i].StartTime.Before(out[j].StartTime)
+	each := func(fn func(model.Event) error) error {
+		for _, e := range events {
+			if err := fn(e); err != nil {
+				return err
+			}
 		}
-		return out[i].Title < out[j].Title
-	})
+		return nil
+	}
+	out, _ := RunStreamed(caseID, each, findings, correlations)
 	return out
 }
 
@@ -78,22 +60,9 @@ func isChainCorrelation(t string) bool {
 	return t == model.CorrelationActivityChain || t == model.CorrelationCredentialChain || t == model.CorrelationServiceChain
 }
 
-func buildInvestigation(caseID string, g group, eventsByID map[string]model.Event, findingsByID map[string]model.Finding, correlationsByID map[string]model.Correlation) model.Investigation {
-	var groupEvents []model.Event
+func buildInvestigation(caseID string, g group, acc *groupAcc, findingsByID map[string]model.Finding, correlationsByID map[string]model.Correlation) model.Investigation {
 	// Map iteration order is random: the ids are walked in sorted order, and
 	// every sort breaks ties by id, so the same case always reads the same.
-	for _, id := range sortedKeys(g.eventIDs) {
-		if e, ok := eventsByID[id]; ok {
-			groupEvents = append(groupEvents, e)
-		}
-	}
-	sort.SliceStable(groupEvents, func(i, j int) bool {
-		if !groupEvents[i].Timestamp.Equal(groupEvents[j].Timestamp) {
-			return groupEvents[i].Timestamp.Before(groupEvents[j].Timestamp)
-		}
-		return groupEvents[i].ID < groupEvents[j].ID
-	})
-
 	var groupFindings []model.Finding
 	var ruleIDs []string
 	for _, id := range sortedKeys(g.findingIDs) {
@@ -127,25 +96,6 @@ func buildInvestigation(caseID string, g group, eventsByID map[string]model.Even
 		return groupCorrelations[i].ID < groupCorrelations[j].ID
 	})
 
-	// -------- descriptive fields (never used for grouping, only display) --------
-	var hosts, users, collectionIDs, sourceFileIDs, artifactTypes []string
-	var processNames []string
-	lastProcess := ""
-	for _, e := range groupEvents {
-		hosts = append(hosts, e.Host)
-		users = append(users, e.User)
-		collectionIDs = append(collectionIDs, e.CollectionID)
-		sourceFileIDs = append(sourceFileIDs, e.SourceFileID)
-		artifactTypes = append(artifactTypes, e.ArtifactType)
-		if e.EventType == model.EventProcessCreate && e.ProcessName != "" && e.ProcessName != lastProcess {
-			processNames = append(processNames, e.ProcessName)
-			lastProcess = e.ProcessName
-		}
-	}
-	if len(processNames) > 3 {
-		processNames = processNames[:3]
-	}
-
 	// -------- ATT&CK: techniques (from findings) and their resolved tactics --------
 	var techniqueIDs []string
 	for _, f := range groupFindings {
@@ -161,15 +111,12 @@ func buildInvestigation(caseID string, g group, eventsByID map[string]model.Even
 	if chainCorr != nil {
 		chainTitle = chainCorr.Title
 	}
-	primaryHost := ""
-	if len(groupEvents) > 0 {
-		primaryHost = groupEvents[0].Host
-	}
-	title := buildTitle(category, chainTitle, processNames, primaryHost)
+	primaryHost := acc.primaryHost()
+	title := buildTitle(category, chainTitle, acc.processNames, primaryHost)
 
 	// -------- score --------
-	distinctCollections := sortedUniqueStrings(collectionIDs)
-	distinctArtifacts := sortedUniqueStrings(artifactTypes)
+	distinctCollections := sortedUniqueStrings(setKeys(acc.colls))
+	distinctArtifacts := sortedUniqueStrings(setKeys(acc.artifacts))
 	hasChain := chainCorr != nil
 	hasAnyCorr := len(groupCorrelations) > 0
 	score, scoreRationale := computeScore(scoreInput{
@@ -200,12 +147,8 @@ func buildInvestigation(caseID string, g group, eventsByID map[string]model.Even
 	})
 
 	// -------- narrative --------
-	summary := buildNarrative(groupEvents)
-
-	var start, end model.Event
-	if len(groupEvents) > 0 {
-		start, end = groupEvents[0], groupEvents[len(groupEvents)-1]
-	}
+	summary := buildNarrative(acc.seq)
+	start, end := acc.bounds()
 
 	findingIDs := make([]string, 0, len(groupFindings))
 	for _, f := range groupFindings {
@@ -215,9 +158,9 @@ func buildInvestigation(caseID string, g group, eventsByID map[string]model.Even
 	for _, c := range groupCorrelations {
 		correlationIDs = append(correlationIDs, c.ID)
 	}
-	eventIDs := make([]string, 0, len(groupEvents))
-	for _, e := range groupEvents {
-		eventIDs = append(eventIDs, e.ID)
+	eventIDs := make([]string, 0, len(acc.members))
+	for _, m := range acc.members {
+		eventIDs = append(eventIDs, m.id)
 	}
 
 	return model.Investigation{
@@ -228,17 +171,17 @@ func buildInvestigation(caseID string, g group, eventsByID map[string]model.Even
 		Summary:             summary,
 		Severity:            severity,
 		Confidence:          confidence,
-		StartTime:           start.Timestamp,
-		EndTime:             end.Timestamp,
-		Hosts:               sortedUniqueStrings(hosts),
-		Users:               sortedUniqueStrings(users),
+		StartTime:           start,
+		EndTime:             end,
+		Hosts:               sortedUniqueStrings(setKeys(acc.hosts)),
+		Users:               sortedUniqueStrings(setKeys(acc.users)),
 		EventIDs:            eventIDs,
 		FindingIDs:          findingIDs,
 		CorrelationIDs:      correlationIDs,
 		Techniques:          techniqueIDs,
 		Tactics:             tactics,
 		CollectionIDs:       distinctCollections,
-		SourceFileIDs:       sortedUniqueStrings(sourceFileIDs),
+		SourceFileIDs:       sortedUniqueStrings(setKeys(acc.sfs)),
 		Score:               score,
 		ScoreRationale:      scoreRationale,
 		ConfidenceRationale: confRationale,
