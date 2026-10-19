@@ -218,3 +218,25 @@ func TestPartitionReaderIsBoundedToItsPartition(t *testing.T) {
 		t.Errorf("a read past the partition leaked bytes of the next area: n=%d err=%v", n, err)
 	}
 }
+
+// A bare ext volume, with no partition table, is one partition of its whole
+// size, and its file system is ext. A disk with a partition table is never
+// taken for one, even if its sector 2 happens to carry the ext magic.
+func TestBareExtVolume_IsOneExtPartitionAndATableWins(t *testing.T) {
+	vol := make([]byte, 64*1024)
+	vol[1080] = 0x53
+	vol[1081] = 0xEF
+	tb := read(t, vol)
+	if tb.Scheme != SchemeNone || len(tb.Partitions) != 1 || tb.Partitions[0].FS != "ext" ||
+		tb.Partitions[0].SizeBytes != int64(len(vol)) {
+		t.Fatalf("a bare ext volume = %+v", tb)
+	}
+
+	disk := rawDisk(t, "gpt")
+	mbrLike := append([]byte(nil), disk...)
+	mbrLike[1080] = 0x53
+	mbrLike[1081] = 0xEF
+	if tb := read(t, mbrLike); tb.Scheme == SchemeNone {
+		t.Fatalf("a partitioned disk was read as a bare volume: %+v", tb)
+	}
+}

@@ -22,8 +22,8 @@ E01 / raw  ->  internal/image      container, per-chunk checksums, hash verifica
 | Layer | Supported | Reported, not read |
 |---|---|---|
 | Container | raw/dd (single or split `.001 .002 ...`), E01 / EWF1 (EnCase, libewf), multi-segment E01 | Ex01 (EWF2), L01 logical evidence, VMDK/VHD/VHDX/AFF4 |
-| Partitions | MBR, extended + logical, GPT (primary or backup), bare volume with no table | dynamic disks (LDM) are named, not read |
-| File system | NTFS (MFT, attribute lists, data runs, sparse, alternate data streams, deleted entries) | NTFS-compressed and EFS-encrypted streams (reported), BitLocker (reported), FAT/exFAT/ext/APFS (reported) |
+| Partitions | MBR, extended + logical, GPT (primary or backup), bare NTFS or ext volume with no table | dynamic disks (LDM) are named, not read |
+| File system | NTFS (MFT, attribute lists, data runs, sparse, alternate data streams, deleted entries); ext2, ext3 and ext4, read-only (in-use directory tree, extents and block maps, holes, hard links; symlinks and device nodes listed but not read as content) | NTFS-compressed and EFS-encrypted streams (reported), BitLocker (reported), ext inline data, encrypted ext files and meta_bg layouts (reported); FAT/exFAT/APFS (reported) |
 
 "Reported" means the image report and the audit trail say so, and the
 partition's contents are listed as **not part of the analysis**. Nothing is
@@ -93,3 +93,27 @@ random byte damage (no panics, no hangs).
   searched for anything else (no carving, no keyword search).
 - Container formats: EWF1 only. Segments over 2 GiB (EnCase overflow
   offsets) are detected and refused, not guessed.
+
+## ext2/3/4
+
+The ext reader (internal/ext4) is read-only. It lists every name reachable
+from the root through in-use inodes, and reads file content through the extent
+tree (ext4) or the block map (ext2 and ext3). Deleted inodes are not listed,
+and metadata checksums are not verified. A directory entry that points to a
+free inode is not listed, although debugfs dumps it; that is the correct
+behaviour for an in-use catalog.
+
+Checked two ways:
+
+- Unit tests build images with the ext2/3/4 formatters from a source tree the
+  test writes, so the expected content is the source, not the reader's output.
+  Covered: 1 KiB and 4 KiB blocks, a 2 MiB file through the double-indirect
+  block map, a 400-entry hashed directory, a hole, a hard link, a symlink, and
+  deterministic corrupt and truncated images (no panic, and no wrong bytes
+  returned as if they were right).
+- On a real E01 with an ext4 partition, TestReal_ExtVolumeMatchesDebugfsRdump
+  (set TRACEFALL_REAL_EXT4) compares the listing and every regular file's
+  SHA-256 with debugfs rdump of the same partition. On the validation image:
+  258,124 regular files, all content identical. debugfs also dumps one stale
+  directory entry whose inode is free; the test accepts only that case, after
+  checking that the inode is not in use.

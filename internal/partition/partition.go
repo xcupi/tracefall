@@ -103,7 +103,28 @@ func Read(r io.ReaderAt, size int64, sectorSize int) (Table, error) {
 	if len(sector0) >= 512 && sector0[510] == 0x55 && sector0[widthSig] == 0xAA {
 		return readMBR(r, size, sectorSize, sector0, tb)
 	}
+	// A bare ext2/3/4 volume has no boot-sector signature. Its superblock
+	// magic is at byte 1080, and it is checked only after the partition-table
+	// checks, so a partitioned disk is never taken for a bare volume.
+	if ext := extMagicAt(r, size); ext {
+		tb.Scheme = SchemeNone
+		tb.Partitions = []Partition{{Index: 1, Scheme: SchemeNone, TypeName: "bare volume", StartLBA: 0,
+			StartByte: 0, SizeBytes: size, SectorCount: uint64(size / ss), SectorSize: sectorSize, FS: "ext"}}
+		return tb, nil
+	}
 	return Table{}, ErrNoTable
+}
+
+// extMagicAt reports whether the bytes at 1024+56 hold the ext superblock magic.
+func extMagicAt(r io.ReaderAt, size int64) bool {
+	if size < 1082 {
+		return false
+	}
+	var m [2]byte
+	if n, _ := r.ReadAt(m[:], 1080); n < 2 {
+		return false
+	}
+	return m[0] == 0x53 && m[1] == 0xEF
 }
 
 const widthSig = 511

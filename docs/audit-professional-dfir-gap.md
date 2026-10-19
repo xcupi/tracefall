@@ -25,17 +25,20 @@ reporting.
 ## P0: blockers for the stated goal
 
 ### 1. Disk image reader (partly done)
-- Done: E01 (EWF1) and raw disk images, MBR/GPT partition tables, NTFS
-  reading (`internal/image`, `internal/ntfsvol`). Validated end to end on a
-  real E01 (156/156 file hashes match, see `docs/disk-images.md`).
+- Done: E01 (EWF1) and raw disk images, MBR/GPT partition tables, bare
+  NTFS and ext volumes, NTFS reading (internal/image, internal/ntfsvol), and
+  read-only ext2/3/4 reading (internal/ext4, see docs/disk-images.md). NTFS
+  validated end to end on a real E01 (156/156 file hashes match). ext4
+  validated on a real E01 against debugfs (258,124 regular files, content
+  identical).
 - Not done: EWF2 (Ex01) is refused explicitly; VMDK, VHD/VHDX, qcow2 and
-  AFF4 are absent; ext4, FAT/exFAT, APFS and HFS+ filesystems are only
-  recognised from the partition table, not read; BitLocker is detected
-  with no way to supply a key.
+  AFF4 are absent; FAT/exFAT, APFS and HFS+ filesystems are only recognised
+  from the partition table, not read; ext inline data and encrypted files are
+  reported, not read; BitLocker is detected with no way to supply a key.
 - `internal/ntfs` parses extracted `$MFT`, `$UsnJrnl`, `$LogFile` files;
   it is not a volume or filesystem reader.
-- No BitLocker/encryption detection, no deleted-file carving, no ext4,
-  FAT/exFAT or APFS.
+- No BitLocker/encryption detection, no deleted-file carving (deleted ext
+  inodes are not listed either), no FAT/exFAT or APFS.
 - Acceptance: upload an E01 and a raw image of a Windows system disk;
   partitions are enumerated, NTFS volumes are opened read-only, relevant
   artifacts are located and extracted automatically into the existing

@@ -40,6 +40,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"tracefall/internal/fsvol"
 	"unicode/utf16"
 )
 
@@ -47,13 +48,13 @@ var (
 	// ErrNotNTFS means the bytes are not an NTFS volume.
 	ErrNotNTFS = errors.New("not an NTFS volume")
 	// ErrCorrupt means a structure on the volume is damaged or inconsistent.
-	ErrCorrupt = errors.New("NTFS structure is corrupt")
+	ErrCorrupt = fsvol.ErrCorrupt
 	// ErrCompressed means the stream is NTFS-compressed, which is not read.
 	ErrCompressed = errors.New("NTFS-compressed data is not supported")
 	// ErrEncrypted means the stream is EFS-encrypted.
 	ErrEncrypted = errors.New("EFS-encrypted data cannot be read")
 	// ErrNotFound means the record or stream does not exist.
-	ErrNotFound = errors.New("not found")
+	ErrNotFound = fsvol.ErrNotFound
 )
 
 func corrupt(format string, a ...any) error {
@@ -757,45 +758,13 @@ func (v *Volume) OpenStream(record uint64, stream string) (*DataReader, error) {
 
 // ---- walking
 
-// Stream describes one data stream of a file.
-type Stream struct {
-	Name       string // "" for the file's content
-	Size       int64
-	Resident   bool
-	Compressed bool
-	Encrypted  bool
-	Sparse     bool
-}
-
-// File is one MFT entry.
-type File struct {
-	Record  uint64
-	Seq     uint16
-	Parent  uint64
-	Name    string
-	Path    string
-	IsDir   bool
-	InUse   bool
-	Orphan  bool
-	Size    int64 // length of the unnamed data stream
-	Streams []Stream
-
-	Attributes                              uint32
-	Created, Modified, MFTChanged, Accessed time.Time
-
-	// ExtensionRecords is how many extra MFT records hold this file's
-	// attributes (an $ATTRIBUTE_LIST), a sign of heavy fragmentation.
-	ExtensionRecords int
-}
-
-// WalkStats summarises a walk.
-type WalkStats struct {
-	Records      int
-	InUse        int
-	Deleted      int
-	CorruptCount int
-	Corrupt      []uint64 // the first records that could not be read
-}
+// Stream, File and WalkStats are the file-system-neutral types of package
+// fsvol. The NTFS names are kept so the NTFS code reads as before.
+type (
+	Stream    = fsvol.Stream
+	File      = fsvol.File
+	WalkStats = fsvol.WalkStats
+)
 
 type node struct {
 	name      string
@@ -1041,4 +1010,30 @@ func min64(a, b int64) int64 {
 		return a
 	}
 	return b
+}
+
+// AsVolume presents the volume as an fsvol.Volume, the form the disk-image
+// catalog works with.
+func (v *Volume) AsVolume() fsvol.Volume { return volumeAdapter{v} }
+
+type volumeAdapter struct{ v *Volume }
+
+func (a volumeAdapter) Info() fsvol.Info {
+	i := a.v.Info()
+	return fsvol.Info{
+		Label: i.Label, Version: i.Version, Serial: i.Serial, ClusterSize: i.ClusterSize,
+		Records: i.MFTRecords, VolumeBytes: i.VolumeBytes,
+	}
+}
+
+func (a volumeAdapter) Walk(fn func(fsvol.File) error) (fsvol.WalkStats, error) {
+	return a.v.Walk(fn)
+}
+
+func (a volumeAdapter) OpenStream(record uint64, stream string) (fsvol.Reader, error) {
+	dr, err := a.v.OpenStream(record, stream)
+	if err != nil {
+		return nil, err
+	}
+	return dr, nil
 }

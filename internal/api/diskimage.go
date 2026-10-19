@@ -14,6 +14,8 @@ import (
 
 	"github.com/google/uuid"
 
+	"tracefall/internal/ext4"
+	"tracefall/internal/fsvol"
 	"tracefall/internal/image"
 	"tracefall/internal/ingest"
 	"tracefall/internal/model"
@@ -239,7 +241,7 @@ func volumePrefix(partitionIndex int) string { return fmt.Sprintf("vol%d", parti
 // openDiskImageVolumes opens the image and every NTFS volume in it.
 type openedVolume struct {
 	part partition.Partition
-	vol  *ntfsvol.Volume
+	vol  fsvol.Volume
 }
 
 func openDiskImage(paths []string) (image.Image, partition.Table, []openedVolume, []string, error) {
@@ -264,6 +266,16 @@ func openDiskImage(paths []string) (image.Image, partition.Table, []openedVolume
 			if err != nil {
 				notes = append(notes, fmt.Sprintf("partition %d: the NTFS volume could not be opened (%v)", p.Index, err))
 				continue
+			}
+			vols = append(vols, openedVolume{part: p, vol: v.AsVolume()})
+		case "ext":
+			v, err := ext4.Open(p.Reader(img), p.SizeBytes)
+			if err != nil {
+				notes = append(notes, fmt.Sprintf("partition %d: the ext volume could not be opened (%v)", p.Index, err))
+				continue
+			}
+			for _, n := range v.Notes {
+				notes = append(notes, fmt.Sprintf("partition %d (%s): %s", p.Index, v.Version, n))
 			}
 			vols = append(vols, openedVolume{part: p, vol: v})
 		case "bitlocker":
@@ -296,7 +308,7 @@ type diskEntry struct {
 // bytes are offered to the same content rules folder discovery uses
 // (ingest.Discover). The bytes are kept on the entry so the caller does not
 // read them a second time.
-func classifyDiskFile(vol *ntfsvol.Volume, f ntfsvol.File, registry []parsers.ArtifactParser) (diskEntry, bool) {
+func classifyDiskFile(vol fsvol.Volume, f fsvol.File, registry []parsers.ArtifactParser) (diskEntry, bool) {
 	if f.IsDir || !f.InUse || f.Orphan {
 		return diskEntry{}, false
 	}
@@ -404,10 +416,10 @@ func (s *Service) catalogDiskImage(caseID string, collection model.Collection, s
 		prefix := volumePrefix(ov.part.Index)
 		vr := diskVolumeReport{
 			Prefix: prefix, Partition: ov.part.Index, Label: ov.vol.Info().Label, Version: ov.vol.Info().Version,
-			Serial: fmt.Sprintf("%016X", ov.vol.Info().Serial), ClusterSize: ov.vol.Info().ClusterSize, MFTRecords: ov.vol.Info().MFTRecords,
+			Serial: fmt.Sprintf("%016X", ov.vol.Info().Serial), ClusterSize: ov.vol.Info().ClusterSize, MFTRecords: ov.vol.Info().Records,
 		}
 		seen := map[string]bool{}
-		stats, err := ov.vol.Walk(func(f ntfsvol.File) error {
+		stats, err := ov.vol.Walk(func(f fsvol.File) error {
 			if f.InUse && !f.IsDir {
 				vr.FilesInUse++
 			}
@@ -511,7 +523,7 @@ func (s *Service) loadDiskImageReport(caseID, collectionID string) (diskImageRep
 // ---- extraction
 
 type diskLocator struct {
-	vol    *ntfsvol.Volume
+	vol    fsvol.Volume
 	record uint64
 	stream string
 }
@@ -541,7 +553,7 @@ func (s *Service) newDiskExtractor(caseID, collectionID string) (*diskExtractor,
 	for _, ov := range vols {
 		prefix := volumePrefix(ov.part.Index)
 		ov := ov
-		if _, err := ov.vol.Walk(func(f ntfsvol.File) error {
+		if _, err := ov.vol.Walk(func(f fsvol.File) error {
 			if e, ok := classifyDiskFile(ov.vol, f, registry); ok && e.Supported {
 				key := prefix + "/" + e.Rel
 				if _, dup := x.byPath[key]; !dup {
