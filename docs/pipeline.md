@@ -42,7 +42,34 @@ persisted job that runs on the server.
 Stages: discover -> import (every supported file; the collection's host time zone
 is read from its SYSTEM hive first) -> analyze -> report (a ZIP bundle is written
 to the case's reports folder and its hash is audited; `GET /api/cases/{id}/report/latest`
-serves it). `analyze: false` skips the analyze and report stages. The job row
+serves it). `analyze: false` skips the analyze and report stages.
+
+Memory during analysis and report. Analysis no longer holds a case's whole
+event set. Each detection rule declares the event types it reads and loads
+only those. Each typed correlator reads only its own types. The two correlators
+that look at every event (temporal bursts and entity footprints) read a small
+reference per event (id, host, process, artifact, time) instead of the full
+event. The report streams the timeline CSV once and computes its aggregates in
+the same pass. Measured on one validation case of 363,370 events, peak RSS:
+analysis 2.56 GB before, 255 MB after; report 3.99 GB before, 2.29 GB after.
+
+The report is NOT yet bounded. Temporal bursts cite 358,260 events, so the
+events a report resolves by id are 358,751 of 363,370 (99%), and they are
+loaded as full events. Bounding the report needs the investigation layer to
+work on aggregates of its events instead of per-event data. That is the open
+step for this item.
+
+The outputs did not change: findings (ignoring created_at), correlations and
+timeline.csv match the previous build on seven cases. A rule test fails if a
+declared input misses an event type the rule reads.
+
+Determinism. Investigation ordering and the brute-force burst rule used to
+depend on map iteration order, so an event pair with the same timestamp could
+swap in a report between runs; the chains are now walked in key order with
+ties broken by id. Where two events share a timestamp, the evidence does not
+say which came first, so narratives that state an order for such events
+overstate it. That remains open.
+ The job row
 (stage + collection id) is the checkpoint. Results report files imported,
 skipped and failed, event, finding and correlation counts.
 

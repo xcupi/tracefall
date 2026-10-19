@@ -21,11 +21,11 @@ const entityMinArtifactTypes = 2
 // key. This traces one entity's footprint across independent evidence
 // sources, which is exactly the kind of cross-artifact corroboration that
 // turns a single weak indicator into a well-supported one.
-func BuildEntityCorrelations(caseID string, events []model.Event) []model.Correlation {
+func BuildEntityCorrelations(caseID string, refs []model.EventRef) []model.Correlation {
 	type key struct{ host, entity string }
-	groups := map[key][]model.Event{}
+	groups := map[key][]model.EventRef{}
 
-	for _, e := range events {
+	for _, e := range refs {
 		entity := e.ProcessName
 		if entity == "" {
 			continue

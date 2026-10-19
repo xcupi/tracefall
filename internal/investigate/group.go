@@ -90,7 +90,10 @@ func buildGroups(findings []model.Finding, correlations []model.Correlation) []g
 	}
 
 	var out []group
-	for _, g := range byRoot {
+	// Walked in key order: map order would make the investigation order, and
+	// so the report, differ from run to run.
+	for _, root := range sortedKeys(byRoot) {
+		g := byRoot[root]
 		if len(g.findingIDs) == 0 {
 			continue
 		}

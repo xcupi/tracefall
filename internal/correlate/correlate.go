@@ -32,6 +32,7 @@
 package correlate
 
 import (
+	"fmt"
 	"sort"
 
 	"tracefall/internal/model"
@@ -47,14 +48,46 @@ import (
 // (e.g. an investigation's stable ID, which is itself derived from its
 // member finding/correlation IDs) survives a no-op re-analysis.
 func Run(caseID string, events []model.Event) []model.Correlation {
+	out, _ := RunFrom(caseID, model.SliceSource(events))
+	return out
+}
+
+// typedInputTypes are the event types the typed chain builders read. Each
+// builder indexes only these (logons, process creates, persistence, service
+// installs, network connections, explicit-credential logons), so loading this
+// set gives them exactly the events they would see from a full load.
+var typedInputTypes = []string{
+	model.EventProcessCreate,
+	model.EventLogonSuccess,
+	model.EventLogonFailure,
+	model.EventLogonExplicitCreds,
+	model.EventRegistryRunKey,
+	model.EventScheduledTaskCreate,
+	model.EventRegistryPersistence,
+	model.EventServiceInstall,
+	model.EventNetworkConnection,
+}
+
+// RunFrom builds every correlation from src. The typed builders get only the
+// events they read; the two that look at every event (temporal bursts and
+// entity footprints) get a reference per event instead of the full event.
+func RunFrom(caseID string, src model.EventSource) ([]model.Correlation, error) {
+	typed, err := src.Load(model.EventFilter{Types: typedInputTypes, Artifacts: webArtifactNames()})
+	if err != nil {
+		return nil, fmt.Errorf("loading correlation inputs: %w", err)
+	}
+	refs, err := src.Refs()
+	if err != nil {
+		return nil, fmt.Errorf("loading event references: %w", err)
+	}
 	var out []model.Correlation
-	out = append(out, BuildProcessChains(caseID, events)...)
-	out = append(out, BuildEntityCorrelations(caseID, events)...)
-	out = append(out, BuildTemporalClusters(caseID, events)...)
-	out = append(out, BuildActivityChains(caseID, events)...)
-	out = append(out, BuildCredentialChains(caseID, events)...)
-	out = append(out, BuildServiceChains(caseID, events)...)
-	out = append(out, BuildWebResourceCorrelations(caseID, events)...)
+	out = append(out, BuildProcessChains(caseID, typed)...)
+	out = append(out, BuildEntityCorrelations(caseID, refs)...)
+	out = append(out, BuildTemporalClusters(caseID, refs)...)
+	out = append(out, BuildActivityChains(caseID, typed)...)
+	out = append(out, BuildCredentialChains(caseID, typed)...)
+	out = append(out, BuildServiceChains(caseID, typed)...)
+	out = append(out, BuildWebResourceCorrelations(caseID, typed)...)
 
 	for i := range out {
 		out[i].CaseID = caseID
@@ -67,7 +100,7 @@ func Run(caseID string, events []model.Event) []model.Correlation {
 		}
 		return out[i].Type < out[j].Type
 	})
-	return out
+	return out, nil
 }
 
 func byType(events []model.Event, t string) []model.Event {

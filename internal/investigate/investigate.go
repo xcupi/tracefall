@@ -80,26 +80,38 @@ func isChainCorrelation(t string) bool {
 
 func buildInvestigation(caseID string, g group, eventsByID map[string]model.Event, findingsByID map[string]model.Finding, correlationsByID map[string]model.Correlation) model.Investigation {
 	var groupEvents []model.Event
-	for id := range g.eventIDs {
+	// Map iteration order is random: the ids are walked in sorted order, and
+	// every sort breaks ties by id, so the same case always reads the same.
+	for _, id := range sortedKeys(g.eventIDs) {
 		if e, ok := eventsByID[id]; ok {
 			groupEvents = append(groupEvents, e)
 		}
 	}
-	sort.Slice(groupEvents, func(i, j int) bool { return groupEvents[i].Timestamp.Before(groupEvents[j].Timestamp) })
+	sort.SliceStable(groupEvents, func(i, j int) bool {
+		if !groupEvents[i].Timestamp.Equal(groupEvents[j].Timestamp) {
+			return groupEvents[i].Timestamp.Before(groupEvents[j].Timestamp)
+		}
+		return groupEvents[i].ID < groupEvents[j].ID
+	})
 
 	var groupFindings []model.Finding
 	var ruleIDs []string
-	for id := range g.findingIDs {
+	for _, id := range sortedKeys(g.findingIDs) {
 		if f, ok := findingsByID[id]; ok {
 			groupFindings = append(groupFindings, f)
 			ruleIDs = append(ruleIDs, f.RuleID)
 		}
 	}
-	sort.Slice(groupFindings, func(i, j int) bool { return groupFindings[i].FirstSeen.Before(groupFindings[j].FirstSeen) })
+	sort.SliceStable(groupFindings, func(i, j int) bool {
+		if !groupFindings[i].FirstSeen.Equal(groupFindings[j].FirstSeen) {
+			return groupFindings[i].FirstSeen.Before(groupFindings[j].FirstSeen)
+		}
+		return groupFindings[i].ID < groupFindings[j].ID
+	})
 
 	var groupCorrelations []model.Correlation
 	var chainCorr *model.Correlation
-	for id := range g.correlationIDs {
+	for _, id := range sortedKeys(g.correlationIDs) {
 		if c, ok := correlationsByID[id]; ok {
 			groupCorrelations = append(groupCorrelations, c)
 			if isChainCorrelation(c.Type) && (chainCorr == nil || len(c.EventIDs) > len(chainCorr.EventIDs)) {
@@ -108,7 +120,12 @@ func buildInvestigation(caseID string, g group, eventsByID map[string]model.Even
 			}
 		}
 	}
-	sort.Slice(groupCorrelations, func(i, j int) bool { return groupCorrelations[i].FirstSeen.Before(groupCorrelations[j].FirstSeen) })
+	sort.SliceStable(groupCorrelations, func(i, j int) bool {
+		if !groupCorrelations[i].FirstSeen.Equal(groupCorrelations[j].FirstSeen) {
+			return groupCorrelations[i].FirstSeen.Before(groupCorrelations[j].FirstSeen)
+		}
+		return groupCorrelations[i].ID < groupCorrelations[j].ID
+	})
 
 	// -------- descriptive fields (never used for grouping, only display) --------
 	var hosts, users, collectionIDs, sourceFileIDs, artifactTypes []string
@@ -241,4 +258,15 @@ func tacticsForTechniques(techniqueIDs []string) []string {
 		tactics = append(tactics, splitTactics(t.Tactic)...)
 	}
 	return sortedUniqueStrings(tactics)
+}
+
+// sortedKeys returns a map's keys in ascending order, so a walk over the set
+// is the same on every run.
+func sortedKeys[V any](m map[string]V) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }

@@ -41,6 +41,13 @@ type officeSpawnsPowerShell struct{}
 
 func (officeSpawnsPowerShell) ID() string { return "office-spawns-powershell" }
 
+// Inputs names the event types this rule reads. Every event it can
+// match is among them; the engine loads only these, so a rule's memory is
+// bounded by what it reads, not by the case.
+func (r officeSpawnsPowerShell) Inputs() model.EventFilter {
+	return model.EventFilter{Types: []string{model.EventProcessCreate}}
+}
+
 func (r officeSpawnsPowerShell) Evaluate(events []model.Event) []model.Finding {
 	var findings []model.Finding
 	for _, e := range byType(events, model.EventProcessCreate) {
@@ -88,6 +95,13 @@ func indicatorsIn(s string) []string {
 	return found
 }
 
+// Inputs names the event types this rule reads. Every event it can
+// match is among them; the engine loads only these, so a rule's memory is
+// bounded by what it reads, not by the case.
+func (r powershellEncodedCommand) Inputs() model.EventFilter {
+	return model.EventFilter{Types: []string{model.EventProcessCreate, model.EventPowerShellScript}}
+}
+
 func (r powershellEncodedCommand) Evaluate(events []model.Event) []model.Finding {
 	var findings []model.Finding
 
@@ -133,6 +147,13 @@ type newRegistryRunKey struct{}
 
 func (newRegistryRunKey) ID() string { return "new-registry-run-key" }
 
+// Inputs names the event types this rule reads. Every event it can
+// match is among them; the engine loads only these, so a rule's memory is
+// bounded by what it reads, not by the case.
+func (r newRegistryRunKey) Inputs() model.EventFilter {
+	return model.EventFilter{Types: []string{model.EventRegistryRunKey}}
+}
+
 func (r newRegistryRunKey) Evaluate(events []model.Event) []model.Finding {
 	var findings []model.Finding
 	for _, e := range byType(events, model.EventRegistryRunKey) {
@@ -161,6 +182,13 @@ func (r newRegistryRunKey) Evaluate(events []model.Event) []model.Finding {
 type newScheduledTask struct{}
 
 func (newScheduledTask) ID() string { return "new-scheduled-task" }
+
+// Inputs names the event types this rule reads. Every event it can
+// match is among them; the engine loads only these, so a rule's memory is
+// bounded by what it reads, not by the case.
+func (r newScheduledTask) Inputs() model.EventFilter {
+	return model.EventFilter{Types: []string{model.EventScheduledTaskCreate}}
+}
 
 func (r newScheduledTask) Evaluate(events []model.Event) []model.Finding {
 	var findings []model.Finding
@@ -193,6 +221,13 @@ func (r newScheduledTask) Evaluate(events []model.Event) []model.Finding {
 type suspiciousProcessChain struct{}
 
 func (suspiciousProcessChain) ID() string { return "suspicious-process-chain" }
+
+// Inputs names the event types this rule reads. Every event it can
+// match is among them; the engine loads only these, so a rule's memory is
+// bounded by what it reads, not by the case.
+func (r suspiciousProcessChain) Inputs() model.EventFilter {
+	return model.EventFilter{Types: []string{model.EventProcessCreate}}
+}
 
 func (r suspiciousProcessChain) Evaluate(events []model.Event) []model.Finding {
 	var findings []model.Finding
@@ -229,6 +264,13 @@ const (
 	bruteForceSuccessWindow = 30 * time.Minute // max time from last failure to the success that follows
 )
 
+// Inputs names the event types this rule reads. Every event it can
+// match is among them; the engine loads only these, so a rule's memory is
+// bounded by what it reads, not by the case.
+func (r bruteForceThenSuccess) Inputs() model.EventFilter {
+	return model.EventFilter{Types: []string{model.EventLogonFailure, model.EventLogonSuccess}}
+}
+
 func (r bruteForceThenSuccess) Evaluate(events []model.Event) []model.Finding {
 	type key struct{ host, user string }
 	failuresByKey := map[key][]model.Event{}
@@ -244,8 +286,27 @@ func (r bruteForceThenSuccess) Evaluate(events []model.Event) []model.Finding {
 	}
 
 	var findings []model.Finding
-	for k, failures := range failuresByKey {
-		sort.Slice(failures, func(i, j int) bool { return failures[i].Timestamp.Before(failures[j].Timestamp) })
+	// Keys are walked in order, and each burst is built from failures ordered
+	// by timestamp then id, so the findings (and their supporting-event order,
+	// which feeds the finding id) are the same on every run.
+	keys := make([]key, 0, len(failuresByKey))
+	for k := range failuresByKey {
+		keys = append(keys, k)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		if keys[i].host != keys[j].host {
+			return keys[i].host < keys[j].host
+		}
+		return keys[i].user < keys[j].user
+	})
+	for _, k := range keys {
+		failures := failuresByKey[k]
+		sort.SliceStable(failures, func(i, j int) bool {
+			if !failures[i].Timestamp.Equal(failures[j].Timestamp) {
+				return failures[i].Timestamp.Before(failures[j].Timestamp)
+			}
+			return failures[i].ID < failures[j].ID
+		})
 
 		// Build contiguous bursts of failures where consecutive gaps stay within bruteForceGapWindow.
 		var burst []model.Event
@@ -291,6 +352,13 @@ type executionThenPersistence struct{}
 func (executionThenPersistence) ID() string { return "execution-persistence-temporal" }
 
 const persistenceWindow = 15 * time.Minute
+
+// Inputs names the event types this rule reads. Every event it can
+// match is among them; the engine loads only these, so a rule's memory is
+// bounded by what it reads, not by the case.
+func (r executionThenPersistence) Inputs() model.EventFilter {
+	return model.EventFilter{Types: []string{model.EventProcessCreate, model.EventPrefetchExecution, model.EventRegistryRunKey, model.EventScheduledTaskCreate, model.EventRegistryPersistence, model.EventServiceInstall}}
+}
 
 func (r executionThenPersistence) Evaluate(events []model.Event) []model.Finding {
 	execs := append(append([]model.Event{}, byType(events, model.EventProcessCreate)...), byType(events, model.EventPrefetchExecution)...)
@@ -489,6 +557,13 @@ func scriptTechniqueFor(processName, commandLine string) string {
 	}
 }
 
+// Inputs names the event types this rule reads. Every event it can
+// match is among them; the engine loads only these, so a rule's memory is
+// bounded by what it reads, not by the case.
+func (r officeSpawnsScriptInterpreter) Inputs() model.EventFilter {
+	return model.EventFilter{Types: []string{model.EventProcessCreate}}
+}
+
 func (r officeSpawnsScriptInterpreter) Evaluate(events []model.Event) []model.Finding {
 	var findings []model.Finding
 	for _, e := range byType(events, model.EventProcessCreate) {
@@ -528,6 +603,13 @@ func corroborated(e model.Event) bool {
 		return true
 	}
 	return len(indicatorsIn(e.CommandLine)) > 0
+}
+
+// Inputs names the event types this rule reads. Every event it can
+// match is among them; the engine loads only these, so a rule's memory is
+// bounded by what it reads, not by the case.
+func (r suspiciousParentChildLineage) Inputs() model.EventFilter {
+	return model.EventFilter{Types: []string{model.EventProcessCreate}}
 }
 
 func (r suspiciousParentChildLineage) Evaluate(events []model.Event) []model.Finding {
@@ -592,6 +674,13 @@ type servicePersistence struct{}
 
 func (servicePersistence) ID() string { return "service-persistence" }
 
+// Inputs names the event types this rule reads. Every event it can
+// match is among them; the engine loads only these, so a rule's memory is
+// bounded by what it reads, not by the case.
+func (r servicePersistence) Inputs() model.EventFilter {
+	return model.EventFilter{Types: []string{model.EventServiceInstall}}
+}
+
 func (r servicePersistence) Evaluate(events []model.Event) []model.Finding {
 	var findings []model.Finding
 	for _, e := range byType(events, model.EventServiceInstall) {
@@ -620,6 +709,13 @@ func (r servicePersistence) Evaluate(events []model.Event) []model.Finding {
 type registryPersistenceExtended struct{}
 
 func (registryPersistenceExtended) ID() string { return "registry-persistence-extended" }
+
+// Inputs names the event types this rule reads. Every event it can
+// match is among them; the engine loads only these, so a rule's memory is
+// bounded by what it reads, not by the case.
+func (r registryPersistenceExtended) Inputs() model.EventFilter {
+	return model.EventFilter{Types: []string{model.EventRegistryPersistence}}
+}
 
 func (r registryPersistenceExtended) Evaluate(events []model.Event) []model.Finding {
 	var findings []model.Finding
@@ -655,6 +751,13 @@ type explicitCredentialUse struct{}
 
 func (explicitCredentialUse) ID() string { return "explicit-credential-use" }
 
+// Inputs names the event types this rule reads. Every event it can
+// match is among them; the engine loads only these, so a rule's memory is
+// bounded by what it reads, not by the case.
+func (r explicitCredentialUse) Inputs() model.EventFilter {
+	return model.EventFilter{Types: []string{model.EventLogonExplicitCreds}}
+}
+
 func (r explicitCredentialUse) Evaluate(events []model.Event) []model.Finding {
 	var findings []model.Finding
 	for _, e := range byType(events, model.EventLogonExplicitCreds) {
@@ -683,6 +786,13 @@ type privilegedLogonObserved struct{}
 
 func (privilegedLogonObserved) ID() string { return "privileged-logon-observed" }
 
+// Inputs names the event types this rule reads. Every event it can
+// match is among them; the engine loads only these, so a rule's memory is
+// bounded by what it reads, not by the case.
+func (r privilegedLogonObserved) Inputs() model.EventFilter {
+	return model.EventFilter{Types: []string{model.EventPrivilegedLogon}}
+}
+
 func (r privilegedLogonObserved) Evaluate(events []model.Event) []model.Finding {
 	var findings []model.Finding
 	for _, e := range byType(events, model.EventPrivilegedLogon) {
@@ -706,6 +816,13 @@ type networkAfterExecution struct{}
 func (networkAfterExecution) ID() string { return "network-after-execution" }
 
 const networkAfterExecWindow = 5 * time.Minute
+
+// Inputs names the event types this rule reads. Every event it can
+// match is among them; the engine loads only these, so a rule's memory is
+// bounded by what it reads, not by the case.
+func (r networkAfterExecution) Inputs() model.EventFilter {
+	return model.EventFilter{Types: []string{model.EventProcessCreate, model.EventNetworkConnection}}
+}
 
 func (r networkAfterExecution) Evaluate(events []model.Event) []model.Finding {
 	execs := byType(events, model.EventProcessCreate)
@@ -787,6 +904,13 @@ func (remoteLogonObserved) ID() string { return "remote-logon-observed" }
 // field alone, so it is deliberately not mapped to any T1021 sub-technique
 // here.
 const windowsLogonTypeRemoteInteractive = "10"
+
+// Inputs names the event types this rule reads. Every event it can
+// match is among them; the engine loads only these, so a rule's memory is
+// bounded by what it reads, not by the case.
+func (r remoteLogonObserved) Inputs() model.EventFilter {
+	return model.EventFilter{Types: []string{model.EventLogonSuccess}}
+}
 
 func (r remoteLogonObserved) Evaluate(events []model.Event) []model.Finding {
 	var findings []model.Finding

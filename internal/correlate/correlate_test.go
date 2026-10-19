@@ -42,7 +42,7 @@ func TestBuildEntityCorrelations(t *testing.T) {
 		{ID: "1", Host: "H1", EventType: model.EventProcessCreate, ArtifactType: model.ArtifactWindowsEventLog, ProcessName: "update.exe", Timestamp: mustTime("2026-01-15T09:15:10Z")},
 		{ID: "2", Host: "H1", EventType: model.EventPrefetchExecution, ArtifactType: model.ArtifactPrefetch, ProcessName: "update.exe", Timestamp: mustTime("2026-01-15T09:15:11Z")},
 	}
-	corrs := BuildEntityCorrelations("case-1", events)
+	corrs := BuildEntityCorrelations("case-1", refsOf(events))
 	if len(corrs) != 1 {
 		t.Fatalf("got %d entity correlations, want 1", len(corrs))
 	}
@@ -52,7 +52,7 @@ func TestBuildEntityCorrelations(t *testing.T) {
 
 	// A single artifact type shouldn't produce a correlation.
 	single := events[:1]
-	if got := BuildEntityCorrelations("case-1", single); len(got) != 0 {
+	if got := BuildEntityCorrelations("case-1", refsOf(single)); len(got) != 0 {
 		t.Errorf("got %d correlations for a single artifact type, want 0", len(got))
 	}
 }
@@ -66,7 +66,7 @@ func TestBuildTemporalClusters(t *testing.T) {
 		// Big gap -- starts a new cluster that's too small to report.
 		{ID: "4", Host: "H1", ArtifactType: "a", Timestamp: base.Add(1 * time.Hour)},
 	}
-	clusters := BuildTemporalClusters("case-1", events)
+	clusters := BuildTemporalClusters("case-1", refsOf(events))
 	if len(clusters) != 1 {
 		t.Fatalf("got %d clusters, want 1", len(clusters))
 	}
@@ -274,4 +274,14 @@ func TestRun_CorrelationIDsAreStableAcrossReanalysis(t *testing.T) {
 			t.Errorf("correlation %d: ID differs across runs on unchanged evidence: %q vs %q (type %s)", i, out1[i].ID, out2[i].ID, out1[i].Type)
 		}
 	}
+}
+
+// refsOf projects test events to the references the temporal and entity
+// correlators read.
+func refsOf(events []model.Event) []model.EventRef {
+	out := make([]model.EventRef, len(events))
+	for i, e := range events {
+		out[i] = model.RefOf(e)
+	}
+	return out
 }

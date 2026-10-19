@@ -53,6 +53,13 @@ func memoryRemoteSocket(e model.Event) bool {
 
 var memoryRiskyCommand = regexp.MustCompile(`(?i)-enc\b|-encodedcommand\b|frombase64string|downloadstring|downloadfile|net\.webclient|\biex\b|invoke-expression|\b(?:rundll32|regsvr32|mshta)(?:\.exe)?\s+["']?\\{2,}[^\\\s]+\\`)
 
+// Inputs names the event types this rule reads. Every event it can
+// match is among them; the engine loads only these, so a rule's memory is
+// bounded by what it reads, not by the case.
+func (r memoryProcessSignals) Inputs() model.EventFilter {
+	return model.EventFilter{Types: []string{model.EventMemorySnapshot, model.EventProcessCreate, model.EventNetworkConnection, model.EventMemoryInjection}, Artifacts: []string{model.ArtifactMemoryAnalysis}}
+}
+
 func (r memoryProcessSignals) Evaluate(events []model.Event) []model.Finding {
 	processes := map[memoryProcessKey][]model.Event{}
 	observations := map[memoryProcessKey][]model.Event{}

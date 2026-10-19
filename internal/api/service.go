@@ -364,7 +364,10 @@ func (s *Service) CaseSummary(id string) (Summary, error) {
 	if err != nil {
 		return Summary{}, err
 	}
-	events, err := s.store.ListEvents(id)
+	// The case's event total is counted; the events themselves are not loaded.
+	// Investigations only resolve the events their findings and correlations
+	// cite, so only those are fetched.
+	eventTotal, err := s.store.CountEvents(id)
 	if err != nil {
 		return Summary{}, err
 	}
@@ -397,7 +400,11 @@ func (s *Service) CaseSummary(id string) (Summary, error) {
 		return Summary{}, err
 	}
 
-	investigations := investigate.Run(id, events, findings, correlations)
+	cited, err := s.store.EventsByIDs(wantedEventIDs(findings, correlations))
+	if err != nil {
+		return Summary{}, err
+	}
+	investigations := investigate.Run(id, cited, findings, correlations)
 	invSevCounts := map[string]int{model.SeverityCritical: 0, model.SeverityHigh: 0, model.SeverityMedium: 0, model.SeverityLow: 0}
 	for _, inv := range investigations {
 		invSevCounts[inv.Severity]++
@@ -407,7 +414,7 @@ func (s *Service) CaseSummary(id string) (Summary, error) {
 		Collections:                 len(collections),
 		SourceFiles:                 len(sources),
 		ImportedSourceFiles:         imported,
-		Events:                      len(events),
+		Events:                      eventTotal,
 		Findings:                    len(findings),
 		Correlations:                len(correlations),
 		SeverityCounts:              sevCounts,
@@ -2450,15 +2457,29 @@ func (s *Service) AnalyzeCase(caseID string) (AnalyzeResultSummary, error) {
 
 	s.audit(caseID, model.AuditAnalysisStarted, model.TargetCase, caseID, "Analysis started")
 
-	events, err := s.store.ListEvents(caseID)
+	// Analysis reads the case's events per rule and per correlator, from the
+	// store, instead of holding every event at once. The event total is
+	// counted, not loaded, for the run record.
+	src := s.store.EventSourceFor(caseID)
+	eventTotal, err := s.store.CountEvents(caseID)
+	if err != nil {
+		finishRun(model.AnalysisRunFailed, "counting events failed", 0, 0, 0)
+		s.audit(caseID, model.AuditAnalysisFailed, model.TargetCase, caseID, "Analysis failed: "+err.Error())
+		return AnalyzeResultSummary{}, fmt.Errorf("counting events: %w", err)
+	}
+
+	findings, err := detect.RunFrom(caseID, src)
 	if err != nil {
 		finishRun(model.AnalysisRunFailed, "loading events failed", 0, 0, 0)
 		s.audit(caseID, model.AuditAnalysisFailed, model.TargetCase, caseID, "Analysis failed: "+err.Error())
-		return AnalyzeResultSummary{}, fmt.Errorf("loading events: %w", err)
+		return AnalyzeResultSummary{}, fmt.Errorf("detecting: %w", err)
 	}
-
-	findings := detect.Run(caseID, events)
-	correlations := correlate.Run(caseID, events)
+	correlations, err := correlate.RunFrom(caseID, src)
+	if err != nil {
+		finishRun(model.AnalysisRunFailed, "loading events failed", 0, 0, 0)
+		s.audit(caseID, model.AuditAnalysisFailed, model.TargetCase, caseID, "Analysis failed: "+err.Error())
+		return AnalyzeResultSummary{}, fmt.Errorf("correlating: %w", err)
+	}
 
 	// Stamp the findings with the run that produced them. This happens
 	// AFTER detect.Run and touches only a provenance field, so no rule,
@@ -2485,12 +2506,12 @@ func (s *Service) AnalyzeCase(caseID string) (AnalyzeResultSummary, error) {
 	// reflect the last successful analysis, and this error return is
 	// exactly what tells the caller the CURRENT attempt didn't succeed.
 	if err := s.store.ReplaceAnalysis(caseID, findings, correlations); err != nil {
-		finishRun(model.AnalysisRunFailed, "saving analysis results failed", len(events), 0, 0)
+		finishRun(model.AnalysisRunFailed, "saving analysis results failed", eventTotal, 0, 0)
 		s.audit(caseID, model.AuditAnalysisFailed, model.TargetCase, caseID, "Analysis failed: "+err.Error())
 		return AnalyzeResultSummary{}, fmt.Errorf("saving analysis results: %w", err)
 	}
 
-	finishRun(model.AnalysisRunCompleted, "", len(events), len(findings), len(correlations))
+	finishRun(model.AnalysisRunCompleted, "", eventTotal, len(findings), len(correlations))
 	s.audit(caseID, model.AuditAnalysisCompleted, model.TargetCase, caseID,
 		fmt.Sprintf("Analysis completed: %d finding(s), %d correlation(s)", len(findings), len(correlations)))
 	return AnalyzeResultSummary{Findings: findings, Correlations: correlations}, nil

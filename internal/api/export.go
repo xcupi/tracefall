@@ -154,14 +154,22 @@ var timelineCSVHeader = []string{
 
 // ExportTimelineCSV writes the case's full unified timeline as CSV to w.
 func (s *Service) ExportTimelineCSV(caseID string, w io.Writer) error {
-	events, err := s.store.ListEvents(caseID)
+	tw, err := newTimelineCSVWriter(w)
+	if err != nil {
+		return err
+	}
+	n := 0
+	err = s.store.ForEachEvent(caseID, func(e model.Event) error {
+		n++
+		return tw.add(e)
+	})
 	if err != nil {
 		return fmt.Errorf("loading events: %w", err)
 	}
-	if err := writeTimelineCSV(events, w); err != nil {
+	if err := tw.close(); err != nil {
 		return err
 	}
-	s.audit(caseID, model.AuditExport, model.TargetCase, caseID, fmt.Sprintf("Timeline exported as CSV (%d events)", len(events)))
+	s.audit(caseID, model.AuditExport, model.TargetCase, caseID, fmt.Sprintf("Timeline exported as CSV (%d events)", n))
 	return nil
 }
 
@@ -170,23 +178,43 @@ func (s *Service) ExportTimelineCSV(caseID string, w io.Writer) error {
 // file in a report bundle and the file from the export endpoint must be
 // the same bytes by construction rather than by two copies agreeing.
 func writeTimelineCSV(events []model.Event, w io.Writer) error {
-	cw := csv.NewWriter(w)
-	if err := cw.Write(timelineCSVHeader); err != nil {
+	tw, err := newTimelineCSVWriter(w)
+	if err != nil {
 		return err
 	}
 	for _, e := range events {
-		row := []string{
-			e.Timestamp.UTC().Format(time.RFC3339Nano), e.EventType, e.Host, e.User, e.ProcessName, e.ProcessPath,
-			e.ParentProcessName, fmt.Sprint(e.PID), fmt.Sprint(e.PPID), e.CommandLine, e.FilePath, e.RegistryPath,
-			e.NetworkSource, e.NetworkDest, fmt.Sprint(e.NetworkDestPort), e.ArtifactType,
-			e.CollectionID, e.SourceFileID, e.Parser, fmt.Sprint(e.EventID),
-		}
-		if err := cw.Write(csvSafeRow(row)); err != nil {
+		if err := tw.add(e); err != nil {
 			return err
 		}
 	}
-	cw.Flush()
-	return cw.Error()
+	return tw.close()
+}
+
+// timelineCSVWriter writes the timeline one event at a time, so a case's
+// timeline never has to be held in memory to be written.
+type timelineCSVWriter struct{ cw *csv.Writer }
+
+func newTimelineCSVWriter(w io.Writer) (*timelineCSVWriter, error) {
+	cw := csv.NewWriter(w)
+	if err := cw.Write(timelineCSVHeader); err != nil {
+		return nil, err
+	}
+	return &timelineCSVWriter{cw: cw}, nil
+}
+
+func (t *timelineCSVWriter) add(e model.Event) error {
+	row := []string{
+		e.Timestamp.UTC().Format(time.RFC3339Nano), e.EventType, e.Host, e.User, e.ProcessName, e.ProcessPath,
+		e.ParentProcessName, fmt.Sprint(e.PID), fmt.Sprint(e.PPID), e.CommandLine, e.FilePath, e.RegistryPath,
+		e.NetworkSource, e.NetworkDest, fmt.Sprint(e.NetworkDestPort), e.ArtifactType,
+		e.CollectionID, e.SourceFileID, e.Parser, fmt.Sprint(e.EventID),
+	}
+	return t.cw.Write(csvSafeRow(row))
+}
+
+func (t *timelineCSVWriter) close() error {
+	t.cw.Flush()
+	return t.cw.Error()
 }
 
 var findingsCSVHeader = []string{

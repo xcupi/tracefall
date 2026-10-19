@@ -22,6 +22,17 @@ var webArtifactTypes = map[string]string{
 	model.ArtifactBrowserCache:   "browser cache (a stored response)",
 }
 
+// webArtifactNames returns the browser artifact types the web correlation
+// reads, sorted so the load is reproducible.
+func webArtifactNames() []string {
+	names := make([]string, 0, len(webArtifactTypes))
+	for name := range webArtifactTypes {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
 // BuildWebResourceCorrelations groups events that reference the same web
 // host across two or more distinct browser artifact types.
 //

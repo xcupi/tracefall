@@ -69,10 +69,6 @@ func (s *Service) buildReport(caseID string, now time.Time) (reportBuild, error)
 	if err != nil {
 		return reportBuild{}, fmt.Errorf("loading source files: %w", err)
 	}
-	events, err := s.store.ListEvents(caseID)
-	if err != nil {
-		return reportBuild{}, fmt.Errorf("loading events: %w", err)
-	}
 	findings, err := s.store.ListFindings(caseID)
 	if err != nil {
 		return reportBuild{}, fmt.Errorf("loading findings: %w", err)
@@ -102,9 +98,21 @@ func (s *Service) buildReport(caseID string, now time.Time) (reportBuild, error)
 		return reportBuild{}, err
 	}
 
+	// The events are not held as a set: the timeline streams past once, and
+	// only the events the findings and correlations cite are loaded by id.
+	eventTotal, err := s.store.CountEvents(caseID)
+	if err != nil {
+		return reportBuild{}, fmt.Errorf("counting events: %w", err)
+	}
+	cited, err := s.store.EventsByIDs(wantedEventIDs(findings, correlations))
+	if err != nil {
+		return reportBuild{}, fmt.Errorf("loading cited events: %w", err)
+	}
+
 	// Attachments first: the report prints their hashes.
 	var tl, fl bytes.Buffer
-	if err := writeTimelineCSV(events, &tl); err != nil {
+	timeline, err := s.streamTimeline(caseID, &tl)
+	if err != nil {
 		return reportBuild{}, fmt.Errorf("building timeline.csv: %w", err)
 	}
 	if err := writeFindingsCSV(findings, statuses, &fl); err != nil {
@@ -116,7 +124,8 @@ func (s *Service) buildReport(caseID string, now time.Time) (reportBuild, error)
 	}
 
 	d := s.assembleReportData(reportInputs{
-		c: c, now: now, collections: collections, sourceFiles: sourceFiles, events: events,
+		c: c, now: now, collections: collections, sourceFiles: sourceFiles, events: cited,
+		eventTotal: eventTotal, timeline: timeline,
 		findings: findings, correlations: correlations, runs: runs, audit: auditLog,
 		statuses: statuses, notes: notes, summary: summary,
 		timelineCSV: files[0], findingsCSV: files[1],
@@ -135,11 +144,16 @@ func (s *Service) buildReport(caseID string, now time.Time) (reportBuild, error)
 }
 
 type reportInputs struct {
-	c            model.Case
-	now          time.Time
-	collections  []model.Collection
-	sourceFiles  []model.SourceFile
+	c           model.Case
+	now         time.Time
+	collections []model.Collection
+	sourceFiles []model.SourceFile
+	// events holds the events the report resolves by id (cited by a finding
+	// or a correlation); eventTotal is the whole case, and timeline is the
+	// streamed aggregate of all of it.
 	events       []model.Event
+	eventTotal   int
+	timeline     *timelineAgg
 	findings     []model.Finding
 	correlations []model.Correlation
 	runs         []model.AnalysisRun
@@ -205,7 +219,7 @@ func (s *Service) assembleReportData(in reportInputs) report.Data {
 	}
 
 	d.Investigations = reportInvestigations(in, fs, &d)
-	d.Timeline = reportTimeline(in.events, cited, srcByID)
+	d.Timeline = reportTimeline(in.timeline, in.events, cited, srcByID)
 	d.Coverage = reportCoverage(in.sourceFiles)
 	d.Rules = reportRules(fs, ruleFired)
 
@@ -221,7 +235,7 @@ func (s *Service) assembleReportData(in reportInputs) report.Data {
 
 	d.Attachments = []report.Attachment{
 		{Name: in.timelineCSV.Name, Description: "Complete normalized timeline, one row per event, UTC.",
-			SHA256: reportSHA256(in.timelineCSV.Data), Bytes: int64(len(in.timelineCSV.Data)), Rows: len(in.events)},
+			SHA256: reportSHA256(in.timelineCSV.Data), Bytes: int64(len(in.timelineCSV.Data)), Rows: in.eventTotal},
 		{Name: in.findingsCSV.Name, Description: "All findings with analyst review status.",
 			SHA256: reportSHA256(in.findingsCSV.Data), Bytes: int64(len(in.findingsCSV.Data)), Rows: len(in.findings)},
 	}
@@ -449,64 +463,16 @@ func reportInvestigations(in reportInputs, fs []model.Finding, d *report.Data) [
 	return out
 }
 
-func reportTimeline(events []model.Event, cited map[string]bool, srcByID map[string]model.SourceFile) report.Timeline {
-	tl := report.Timeline{Total: len(events)}
-	byArtifact := map[string]int{}
-	var dated []model.Event
-	for _, e := range events {
-		byArtifact[artifactTypeLabel(e.ArtifactType)]++
-		if isDatedEvent(e) {
-			dated = append(dated, e)
-		}
-	}
-	tl.Dated = len(dated)
-	tl.Undated = tl.Total - tl.Dated
-
-	for name, n := range byArtifact {
-		tl.ByArtifact = append(tl.ByArtifact, report.Count{Name: name, N: n})
-	}
-	sort.Slice(tl.ByArtifact, func(i, j int) bool {
-		if tl.ByArtifact[i].N != tl.ByArtifact[j].N {
-			return tl.ByArtifact[i].N > tl.ByArtifact[j].N
-		}
-		return tl.ByArtifact[i].Name < tl.ByArtifact[j].Name
-	})
-
-	if len(dated) > 0 {
-		sortEvents(dated)
-		first, last := dated[0].Timestamp.UTC(), dated[len(dated)-1].Timestamp.UTC()
-		tl.Earliest, tl.Latest = reportTime(first), reportTime(last)
-
-		layout, unit := "2006-01-02", "day"
-		if last.Sub(first) > 62*24*time.Hour {
-			layout, unit = "2006-01", "month"
-		}
-		tl.PeriodUnit = unit
-		periods := map[string]int{}
-		for _, e := range dated {
-			periods[e.Timestamp.UTC().Format(layout)]++
-		}
-		for p, n := range periods {
-			tl.ByPeriod = append(tl.ByPeriod, report.Count{Name: p, N: n})
-		}
-		sort.Slice(tl.ByPeriod, func(i, j int) bool { return tl.ByPeriod[i].Name < tl.ByPeriod[j].Name })
-	}
-
+// reportTimeline is the timeline section: the streamed aggregate plus the
+// events a finding cites, which are the only events it names.
+func reportTimeline(a *timelineAgg, events []model.Event, cited map[string]bool, srcByID map[string]model.SourceFile) report.Timeline {
 	var key []model.Event
 	for _, e := range events {
 		if cited[e.ID] {
 			key = append(key, e)
 		}
 	}
-	sortEvents(key)
-	if len(key) > maxKeyEvents {
-		tl.KeyOmitted = len(key) - maxKeyEvents
-		key = key[:maxKeyEvents]
-	}
-	for _, e := range key {
-		tl.Key = append(tl.Key, eventRef(e, srcByID))
-	}
-	return tl
+	return timelineFromAgg(a, key, srcByID)
 }
 
 func reportCoverage(files []model.SourceFile) report.Coverage {

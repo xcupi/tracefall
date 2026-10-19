@@ -49,7 +49,7 @@ func TestCorrelationEventIDs_AtEverySize(t *testing.T) {
 	for _, n := range []int{0, 1, 2, 3, 5, 60, 250} {
 		t.Run(fmt.Sprintf("n=%d", n), func(t *testing.T) {
 			events := burstEvents("DESKTOP-0J3S8C2", n)
-			corrs := correlate.BuildTemporalClusters("case-1", events)
+			corrs := correlate.BuildTemporalClusters("case-1", refsOfEvents(events))
 
 			if n < minBurst {
 				// Too small to be a burst worth surfacing; emitting one
@@ -114,9 +114,9 @@ func TestCorrelationEventIDs_AtEverySize(t *testing.T) {
 // every run -- the drill-down's ordering guarantee depends on it.
 func TestCorrelationEventIDs_AreDeterministic(t *testing.T) {
 	events := burstEvents("DESKTOP-0J3S8C2", 60)
-	first := correlate.BuildTemporalClusters("case-1", events)
+	first := correlate.BuildTemporalClusters("case-1", refsOfEvents(events))
 	for i := 0; i < 25; i++ {
-		again := correlate.BuildTemporalClusters("case-1", events)
+		again := correlate.BuildTemporalClusters("case-1", refsOfEvents(events))
 		if len(again) != len(first) {
 			t.Fatalf("run %d produced %d correlations, want %d", i, len(again), len(first))
 		}
@@ -140,7 +140,7 @@ func TestCorrelationEventIDs_AreDeterministic(t *testing.T) {
 // produce exactly one correlation carrying all 60 references.
 func TestCorrelationEventIDs_SixtyEventBurst(t *testing.T) {
 	events := burstEvents("DESKTOP-0J3S8C2", 60)
-	corrs := correlate.BuildTemporalClusters("case-1", events)
+	corrs := correlate.BuildTemporalClusters("case-1", refsOfEvents(events))
 	if len(corrs) != 1 {
 		t.Fatalf("got %d correlations, want 1", len(corrs))
 	}
@@ -164,4 +164,13 @@ func indexOf(s, sub string) int {
 		}
 	}
 	return -1
+}
+
+// refsOfEvents projects test events to the references the temporal correlator reads.
+func refsOfEvents(events []model.Event) []model.EventRef {
+	out := make([]model.EventRef, len(events))
+	for i, e := range events {
+		out[i] = model.RefOf(e)
+	}
+	return out
 }

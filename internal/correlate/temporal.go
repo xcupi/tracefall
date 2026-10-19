@@ -23,17 +23,24 @@ const (
 // per burst that spans multiple artifact types -- a simple, explainable
 // heuristic for "these events likely belong to the same episode of
 // activity" without asserting any causal relationship between them.
-func BuildTemporalClusters(caseID string, events []model.Event) []model.Correlation {
-	byHost := map[string][]model.Event{}
-	for _, e := range events {
+func BuildTemporalClusters(caseID string, refs []model.EventRef) []model.Correlation {
+	byHost := map[string][]model.EventRef{}
+	for _, e := range refs {
 		byHost[e.Host] = append(byHost[e.Host], e)
 	}
 
+	hosts := make([]string, 0, len(byHost))
+	for h := range byHost {
+		hosts = append(hosts, h)
+	}
+	sort.Strings(hosts)
+
 	var out []model.Correlation
-	for host, hostEvents := range byHost {
+	for _, host := range hosts {
+		hostEvents := byHost[host]
 		sort.Slice(hostEvents, func(i, j int) bool { return hostEvents[i].Timestamp.Before(hostEvents[j].Timestamp) })
 
-		var cluster []model.Event
+		var cluster []model.EventRef
 		flush := func() {
 			if len(cluster) < temporalMinEvents {
 				cluster = nil
