@@ -110,5 +110,12 @@ func ApplyWorkerLimits() (applied []string, err error) {
 		return applied, e
 	}
 	applied = append(applied, "no-new-privileges")
+	// Last, because it closes calls this function itself uses. A kernel or
+	// architecture without seccomp leaves the other limits in place; the error
+	// is returned so the caller can say the filter is not active.
+	if err := installSeccomp(); err != nil {
+		return applied, err
+	}
+	applied = append(applied, "seccomp")
 	return applied, nil
 }

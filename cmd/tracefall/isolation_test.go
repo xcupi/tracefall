@@ -23,6 +23,15 @@ func TestMain(m *testing.M) {
 		switch os.Args[1] {
 		case "parse-worker":
 			os.Exit(parseWorkerCmd())
+		case "seccompprobe":
+			runProbe(true)
+			os.Exit(0)
+		case "seccompcontrol":
+			runProbe(false)
+			os.Exit(0)
+		case "seccompspawn":
+			spawnProbe()
+			os.Exit(0)
 		case "hog":
 			_, _ = ingest.ApplyWorkerLimits()
 			b := make([]byte, 16<<30) // far past any limit the tests set

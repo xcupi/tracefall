@@ -394,6 +394,23 @@ parse-worker`, the same executable):
   the worker and anything it started are killed.
 - **Output**: the result the worker may return is bounded (1 GiB).
 - **Privileges**: no core dumps, 256 open files, no gaining of privileges.
+- **System calls (seccomp)**: the worker installs a seccomp filter on all of its
+  threads, after it has started and before it reads the first byte of evidence.
+  It works with or without bubblewrap. A filtered call returns `EPERM`; a call
+  made through a wrong architecture entry (32-bit, x32) kills the worker. The
+  filter refuses what no parser needs and what a compromised process would
+  reach for:
+  - start a program: `execve`, `execveat`
+  - network: `socket`, `connect`, `bind`, `listen`
+  - control other processes: `ptrace`, `process_vm_readv`, `process_vm_writev`
+  - the kernel: `kexec_load`, `init_module`, `finit_module`, `delete_module`,
+    `bpf`, `perf_event_open`, `userfaultfd`, `reboot`
+  - mounts and namespaces: `mount`, `umount2`, `pivot_root`, `chroot`,
+    `unshare`, `setns`, and the new mount API (`open_tree`, `move_mount`,
+    `fsopen`, `fsconfig`, `fsmount`, `fspick`, `mount_setattr`)
+  - key stores: `keyctl`, `add_key`, `request_key`
+  - `io_uring_*`, which is a second route to the file system and network that
+    bypasses per-call filtering
 - **Sandbox**: when bubblewrap is usable, the worker runs in new user, pid, ipc,
   uts, cgroup and network namespaces with no capabilities and a read-only file
   system holding only its own executable, the system libraries and that
@@ -414,9 +431,29 @@ alone; a hung worker is stopped at its deadline; and a full import of a 363,370
 event disk image produced exactly the same events, findings and correlations as
 in-process parsing.
 
-Not covered: no seccomp filter (the sandbox restricts the file system, network
-and capabilities, not system calls), and the memory limit is per worker, not
-per server, so many concurrent imports multiply it.
+The filter is a **deny list**, not an allow list. An allow list is stronger
+but must name every system call the Go runtime and every parser can use, on
+every kernel and architecture, and one missing name kills the worker in
+production. A deny list cannot do that, at the price of leaving everything
+not named available (file reads and writes inside what the sandbox exposes,
+`openat`, `mmap`, `futex` ...). It is built for linux/amd64 and linux/arm64
+only; elsewhere, and on a kernel that refuses the filter, the worker runs
+without it. At start-up the server asks the worker which limits took effect and
+logs them; it warns loudly when `seccomp` is not among them.
+
+Verified: in a worker with the filter, twelve of the refused calls return
+`EPERM`, where the same calls in an identical process without the filter return
+`EBADF`, `ENOENT`, `EINVAL` or succeed (the check compares both, so a call that
+was already refused for lack of privilege is not counted). Reading files,
+starting threads, allocating memory and writing a temporary file keep working.
+A worker that tries to start `/bin/true` is refused. Disabling the filter makes
+the test fail, and so does a wrong syscall number. The arch-specific numbers
+were checked against the kernel headers for both architectures.
+
+Not covered: the memory limit is per worker, not per server, so many
+concurrent imports multiply it. The filter does not restrict `openat` (the
+sandbox does, when present) and cannot stop a parser from misusing a call it
+legitimately has.
 
 ## Transport
 
