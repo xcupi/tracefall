@@ -2995,8 +2995,24 @@ func parseFailure(sf model.SourceFile, stage string, err error) ParseFailure {
 	}
 }
 
+// ClassifyParseError is the classification of a parse error for callers
+// outside the package; the parser worker uses it so the category survives the
+// process boundary.
+func ClassifyParseError(err error) (category, message string) { return classifyParseError(err) }
+
 func classifyParseError(err error) (category, message string) {
+	var classified *ingest.ClassifiedError
+	var failed *ingest.ProcessFailure
 	switch {
+	case errors.As(err, &classified):
+		// Classified by the parser worker, where the sentinel errors exist.
+		return classified.Category, classified.Message
+	case errors.As(err, &failed):
+		// The parser process was stopped or crashed. That is a limit of the
+		// parser meeting this file, not a finding about the evidence.
+		return ParseFailureLimit,
+			"The parser for this file was stopped before it finished (" + failed.Reason + "). " +
+				"The file may be unusually large or crafted to exhaust memory; it was not imported. The rest of the import was not affected."
 	case errors.Is(err, prefetch.ErrUnsupportedCompression):
 		// Tracefall decompresses MAM/LZXPRESS-Huffman Prefetch natively,
 		// including the CRC-header variant, so reaching here means the

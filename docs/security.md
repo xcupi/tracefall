@@ -379,3 +379,47 @@ interacts with legal deletion obligations — not a one-line change.
 Phase 12 deliberately did not implement it. The security log is
 unaffected: it is system-wide and survives case deletion, so *"admin
 deleted case X"* remains recorded even when case X is gone.
+
+## Parser isolation
+
+Artifact parsers read files an attacker may have crafted. A parser can be made
+to allocate without bound, and a Go out-of-memory error cannot be recovered:
+it ends the whole process. `recover()` therefore is not a defence against it.
+
+The server runs every parse in a short-lived child process (`tracefall
+parse-worker`, the same executable):
+
+- **Memory**: an address-space limit (default 4096 MB, `TRACEFALL_PARSER_MEM_MB`).
+- **Time**: a deadline per parse (default 20 minutes, `TRACEFALL_PARSER_TIMEOUT`);
+  the worker and anything it started are killed.
+- **Output**: the result the worker may return is bounded (1 GiB).
+- **Privileges**: no core dumps, 256 open files, no gaining of privileges.
+- **Sandbox**: when bubblewrap is usable, the worker runs in new user, pid, ipc,
+  uts, cgroup and network namespaces with no capabilities and a read-only file
+  system holding only its own executable, the system libraries and that
+  collection's evidence directory. It cannot reach the network, the case
+  database, other cases' evidence or the server's keys.
+- **Failure**: a worker that is killed, times out or returns garbage fails that
+  one file. It is reported as a parser limit, never as damaged evidence, and the
+  rest of the import continues.
+
+The start-up log states which level is in effect. Without bubblewrap the limits
+above still apply but the parser can read the server's files; the log says so.
+`TRACEFALL_PARSER_ISOLATION=off` turns it off and logs a warning. Isolation is
+Linux only; elsewhere parsing stays in-process.
+
+Verified: the parsed events of every fixture are identical in-process, in a
+plain child and in the sandbox; a worker that tries to allocate 16 GB fails
+alone; a hung worker is stopped at its deadline; and a full import of a 363,370
+event disk image produced exactly the same events, findings and correlations as
+in-process parsing.
+
+Not covered: no seccomp filter (the sandbox restricts the file system, network
+and capabilities, not system calls), and the memory limit is per worker, not
+per server, so many concurrent imports multiply it.
+
+## Transport
+
+See `docs/deployment.md`, "Transport security". A non-loopback bind needs TLS
+(`--tls-cert`/`--tls-key`) or an explicit `--insecure-http` behind a proxy.
+

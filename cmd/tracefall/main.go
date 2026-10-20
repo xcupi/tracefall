@@ -35,6 +35,9 @@ import (
 func main() {
 	// Offline subcommand: checking a report bundle needs no database,
 	// no server and no configuration, so it runs before any of them.
+	if len(os.Args) > 1 && os.Args[1] == "parse-worker" {
+		os.Exit(parseWorkerCmd())
+	}
 	if len(os.Args) > 1 && os.Args[1] == "verify-report" {
 		os.Exit(verifyReportCmd(os.Args[2:], os.Stdout))
 	}
@@ -54,6 +57,7 @@ func main() {
 		logger.Error("failed to restrict storage permissions", "error", err)
 		os.Exit(1)
 	}
+	enableParserIsolation(logger)
 	db, err := store.Open(cfg.DBPath)
 	if err != nil {
 		logger.Error("failed to open database", "error", err, "path", cfg.DBPath)

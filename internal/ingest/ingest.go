@@ -458,13 +458,8 @@ func ParseFileWithContext(caseID, collectionID, sourceFileID, root, relPath stri
 	// path used to open the artifact.
 	ctx.EvidencePath = filepath.ToSlash(relPath)
 
-	var parsed parsers.ParseResult
-	var err error
-	if cp, ok := p.(parsers.ContextualParser); ok {
-		parsed, err = cp.ParseWithContext(abs, ctx)
-	} else {
-		parsed, err = p.Parse(abs)
-	}
+	// In-process by default; the server runs each parse in a child process.
+	parsed, err := runner.Run(p, root, abs, ctx)
 	if err != nil {
 		return ParsedFile{}, err
 	}
