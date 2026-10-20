@@ -34,9 +34,10 @@ func TestLoad_EnvOverridesDefault(t *testing.T) {
 	// without authentication is refused rather than started. See
 	// TestLoad_RefusesUnauthenticatedLANExposure.
 	env := fakeEnv(map[string]string{
-		"TRACEFALL_HOST": "0.0.0.0",
-		"TRACEFALL_PORT": "9090",
-		"TRACEFALL_AUTH": "on",
+		"TRACEFALL_HOST":          "0.0.0.0",
+		"TRACEFALL_PORT":          "9090",
+		"TRACEFALL_AUTH":          "on",
+		"TRACEFALL_INSECURE_HTTP": "on", // these tests are about auth, not transport
 	})
 	cfg, err := Load(nil, env)
 	if err != nil {
@@ -134,8 +135,9 @@ func TestLoad_LoopbackWithoutAuthStillWorks(t *testing.T) {
 // LAN exposure WITH authentication is the supported shared deployment.
 func TestLoad_AuthenticatedLANIsAllowed(t *testing.T) {
 	cfg, err := Load(nil, fakeEnv(map[string]string{
-		"TRACEFALL_HOST": "0.0.0.0",
-		"TRACEFALL_AUTH": "true",
+		"TRACEFALL_HOST":          "0.0.0.0",
+		"TRACEFALL_AUTH":          "true",
+		"TRACEFALL_INSECURE_HTTP": "on",
 	}))
 	if err != nil {
 		t.Fatalf("authenticated LAN bind was refused: %v", err)
@@ -151,7 +153,7 @@ func TestLoad_AuthenticatedLANIsAllowed(t *testing.T) {
 // The flag must be able to enable auth as well as the environment
 // variable, and must win over it (established precedence).
 func TestLoad_AuthFlagOverridesEnv(t *testing.T) {
-	cfg, err := Load([]string{"-auth=true", "-host=0.0.0.0"},
+	cfg, err := Load([]string{"-auth=true", "-host=0.0.0.0", "-insecure-http"},
 		fakeEnv(map[string]string{"TRACEFALL_AUTH": "off"}))
 	if err != nil {
 		t.Fatalf("Load: %v", err)
@@ -163,7 +165,7 @@ func TestLoad_AuthFlagOverridesEnv(t *testing.T) {
 
 func TestLoad_AuthEnvSpellings(t *testing.T) {
 	for _, on := range []string{"1", "true", "yes", "on", "enabled", "TRUE", "On"} {
-		cfg, err := Load(nil, fakeEnv(map[string]string{"TRACEFALL_AUTH": on, "TRACEFALL_HOST": "0.0.0.0"}))
+		cfg, err := Load(nil, fakeEnv(map[string]string{"TRACEFALL_AUTH": on, "TRACEFALL_HOST": "0.0.0.0", "TRACEFALL_INSECURE_HTTP": "on"}))
 		if err != nil || !cfg.AuthEnabled {
 			t.Errorf("TRACEFALL_AUTH=%q did not enable auth (err=%v)", on, err)
 		}
@@ -185,5 +187,40 @@ func TestLoad_SessionTTLMustBePositive(t *testing.T) {
 	}
 	if cfg.SessionTTL() <= 0 {
 		t.Errorf("default session TTL = %v, want positive", cfg.SessionTTL())
+	}
+}
+
+// A non-loopback bind needs TLS, or the operator's explicit statement that TLS
+// is terminated in front. Loopback keeps working over plain HTTP.
+func TestLoad_PlainHTTPOnTheNetworkIsRefused(t *testing.T) {
+	lan := map[string]string{"TRACEFALL_HOST": "0.0.0.0", "TRACEFALL_AUTH": "on"}
+	if _, err := Load(nil, fakeEnv(lan)); !errors.Is(err, ErrPlainHTTPExposure) {
+		t.Fatalf("auth without transport security on a LAN bind: want ErrPlainHTTPExposure, got %v", err)
+	}
+	if _, err := Load(nil, fakeEnv(map[string]string{"TRACEFALL_HOST": "127.0.0.1"})); err != nil {
+		t.Fatalf("loopback over plain HTTP must keep working: %v", err)
+	}
+	proxied := map[string]string{"TRACEFALL_HOST": "0.0.0.0", "TRACEFALL_AUTH": "on", "TRACEFALL_INSECURE_HTTP": "on"}
+	if _, err := Load(nil, fakeEnv(proxied)); err != nil {
+		t.Fatalf("the explicit proxy statement was refused: %v", err)
+	}
+}
+
+func TestLoad_TLSServesHTTPSAndMarksCookiesSecure(t *testing.T) {
+	cfg, err := Load([]string{"-tls-cert=c.pem", "-tls-key=k.pem", "-host=0.0.0.0", "-auth"}, fakeEnv(nil))
+	if err != nil {
+		t.Fatalf("TLS on a LAN bind was refused: %v", err)
+	}
+	if !cfg.TLSEnabled() || !cfg.SecureCookies {
+		t.Errorf("TLSEnabled=%v SecureCookies=%v, want both true", cfg.TLSEnabled(), cfg.SecureCookies)
+	}
+}
+
+func TestLoad_CertificateWithoutKeyIsRefused(t *testing.T) {
+	if _, err := Load([]string{"-tls-cert=c.pem"}, fakeEnv(nil)); err == nil {
+		t.Fatal("a certificate without a key was accepted")
+	}
+	if _, err := Load([]string{"-tls-key=k.pem"}, fakeEnv(nil)); err == nil {
+		t.Fatal("a key without a certificate was accepted")
 	}
 }

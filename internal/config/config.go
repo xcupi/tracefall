@@ -41,7 +41,20 @@ type Config struct {
 	// HTTP; enabling it without TLS makes login silently fail, so it is
 	// opt-in rather than inferred.
 	SecureCookies bool
+
+	// TLSCert and TLSKey are PEM files. When both are set Tracefall serves
+	// HTTPS itself (TLS 1.2 or newer) and marks session cookies Secure.
+	TLSCert string
+	TLSKey  string
+	// InsecureHTTP states that plain HTTP is intended on a non-loopback bind,
+	// because TLS is terminated in front of Tracefall (a reverse proxy). It
+	// is the operator's explicit statement; without it, and without TLS, a
+	// non-loopback bind is refused.
+	InsecureHTTP bool
 }
+
+// TLSEnabled reports whether Tracefall terminates TLS itself.
+func (c Config) TLSEnabled() bool { return c.TLSCert != "" && c.TLSKey != "" }
 
 // SessionTTL returns the configured session lifetime.
 func (c Config) SessionTTL() time.Duration {
@@ -64,6 +77,17 @@ var ErrUnsafeLANExposure = errors.New(
 		"    * enable authentication -- TRACEFALL_AUTH=on        (shared/LAN use)\n" +
 		"  See docs/deployment.md.")
 
+// ErrPlainHTTPExposure is returned for a non-loopback bind with neither TLS nor
+// an explicit statement that TLS is terminated elsewhere. Credentials and
+// session cookies would cross the network in clear text.
+var ErrPlainHTTPExposure = errors.New(
+	"refusing to start: Tracefall is configured to listen on a non-loopback address over plain HTTP.\n" +
+		"  Logins, session cookies and evidence would cross the network unencrypted.\n" +
+		"  Either:\n" +
+		"    * serve HTTPS directly   -- --tls-cert FILE --tls-key FILE  (TRACEFALL_TLS_CERT / TRACEFALL_TLS_KEY), or\n" +
+		"    * terminate TLS in front -- --insecure-http  (TRACEFALL_INSECURE_HTTP=on), only behind a reverse proxy you control\n" +
+		"  See docs/deployment.md.")
+
 // Validate rejects configurations that would be unsafe to serve.
 //
 // Fail-closed: an operator who mis-set one variable gets a refusal with
@@ -72,6 +96,12 @@ var ErrUnsafeLANExposure = errors.New(
 func (c Config) Validate() error {
 	if !c.IsLoopbackHost() && !c.AuthEnabled {
 		return ErrUnsafeLANExposure
+	}
+	if (c.TLSCert == "") != (c.TLSKey == "") {
+		return errors.New("tls-cert and tls-key must be given together")
+	}
+	if !c.IsLoopbackHost() && !c.TLSEnabled() && !c.InsecureHTTP {
+		return ErrPlainHTTPExposure
 	}
 	if c.MaxUploadMB <= 0 {
 		return fmt.Errorf("max-upload-mb must be positive, got %d", c.MaxUploadMB)
@@ -134,6 +164,11 @@ func Load(args []string, getenv func(string) string) (Config, error) {
 	secureCookies := fs.Bool("secure-cookies", envOrBool(getenv, "TRACEFALL_SECURE_COOKIES", false),
 		"mark session cookies Secure. Only for a deployment behind HTTPS; breaks login over plain HTTP.")
 
+	tlsCert := fs.String("tls-cert", envOr(getenv, "TRACEFALL_TLS_CERT", ""), "PEM certificate chain; with --tls-key, serve HTTPS (TLS 1.2+)")
+	tlsKey := fs.String("tls-key", envOr(getenv, "TRACEFALL_TLS_KEY", ""), "PEM private key for --tls-cert")
+	insecureHTTP := fs.Bool("insecure-http", envOrBool(getenv, "TRACEFALL_INSECURE_HTTP", false),
+		"allow plain HTTP on a non-loopback bind, for a deployment behind a TLS-terminating reverse proxy")
+
 	if err := fs.Parse(args); err != nil {
 		return Config{}, err
 	}
@@ -141,6 +176,10 @@ func Load(args []string, getenv func(string) string) (Config, error) {
 	cfg := Config{
 		Host: *host, Port: *port, DBPath: *db, DataDir: *dataDir, MaxUploadMB: *maxUploadMB,
 		AuthEnabled: *authOn, SessionTTLMinutes: *sessionTTL, SecureCookies: *secureCookies,
+		TLSCert: *tlsCert, TLSKey: *tlsKey, InsecureHTTP: *insecureHTTP,
+	}
+	if cfg.TLSEnabled() {
+		cfg.SecureCookies = true // cookies must not ride a cleartext request
 	}
 
 	if err := cfg.Validate(); err != nil {

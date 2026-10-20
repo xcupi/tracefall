@@ -38,6 +38,9 @@ built-in default. See `internal/config` for the implementation.
 | `-auth` | `TRACEFALL_AUTH` | `false` | require username/password. **Mandatory for any non-loopback bind.** |
 | `-session-ttl-minutes` | `TRACEFALL_SESSION_TTL_MINUTES` | `720` (12 h) | how long one login stays valid |
 | `-secure-cookies` | `TRACEFALL_SECURE_COOKIES` | `false` | mark session cookies `Secure`. Only behind HTTPS -- **breaks login over plain HTTP** |
+| `-tls-cert` | `TRACEFALL_TLS_CERT` | none | PEM certificate chain. With `-tls-key`, Tracefall serves HTTPS itself (TLS 1.2 or newer, HSTS) and marks session cookies `Secure`. |
+| `-tls-key` | `TRACEFALL_TLS_KEY` | none | PEM private key for `-tls-cert`. Both or neither. |
+| `-insecure-http` | `TRACEFALL_INSECURE_HTTP` | `false` | Allow plain HTTP on a non-loopback bind. Only when a reverse proxy you control terminates TLS in front of Tracefall. |
 | (env only) | `TRACEFALL_ADMIN_PASSWORD` | *(generated)* | password for the bootstrap `admin` account, first start only |
 | (env only) | `TRACEFALL_EVIDENCE_ROOTS` | *(unset)* | folders the server may read for path-based ingest, separated like `PATH` (`:` on Linux). Unset: path ingest is refused, except in local no-auth loopback mode, where any path is accepted. See `docs/security.md`, *Server-path ingest* |
 
@@ -228,3 +231,24 @@ concern -- it's simply extracted and then reported as unsupported by
 ingest already was in Phase 1. Ingestion never fails because of files it
 doesn't know how to parse; it only fails if the archive itself is
 malformed or unsafe.
+
+## Transport security (required on a network)
+
+A non-loopback bind is refused unless it has authentication **and** one of:
+
+- `-tls-cert` and `-tls-key`: Tracefall terminates TLS (1.2 or newer), sends
+  `Strict-Transport-Security`, and marks session cookies `Secure`.
+- `-insecure-http`: your statement that TLS is terminated by a reverse proxy in
+  front of Tracefall. The proxy must send HSTS itself, because Tracefall only
+  sends it on a connection that is really TLS. Set `-secure-cookies` too.
+
+Loopback binds still work over plain HTTP.
+
+A self-signed certificate for a lab:
+
+    openssl req -x509 -newkey rsa:2048 -nodes -keyout key.pem -out cert.pem \
+      -days 365 -subj /CN=tracefall.lab -addext subjectAltName=DNS:tracefall.lab
+
+Checked against a running server: HTTPS (HTTP/2) answers, TLS 1.1 is rejected
+by the server, a plain HTTP request to the TLS port is refused, and the
+startup of a LAN bind without TLS fails with an explanation.

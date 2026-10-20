@@ -36,7 +36,7 @@ func (m memImage) ReadAt(p []byte, off int64) (int, error) {
 }
 
 // fixtureTree writes the source tree every fixture is built from.
-func fixtureTree(t *testing.T, dir string) map[string][]byte {
+func fixtureTree(t testing.TB, dir string) map[string][]byte {
 	t.Helper()
 	want := map[string][]byte{}
 	write := func(rel string, b []byte) {
@@ -85,7 +85,7 @@ func fixtureTree(t *testing.T, dir string) map[string][]byte {
 }
 
 // buildFS runs mkfs with -d on a fresh source tree and returns the image.
-func buildFS(t *testing.T, tool string, args ...string) (memImage, map[string][]byte) {
+func buildFS(t testing.TB, tool string, args ...string) (memImage, map[string][]byte) {
 	t.Helper()
 	if _, err := exec.LookPath(tool); err != nil {
 		t.Skipf("%s not installed", tool)

@@ -65,7 +65,7 @@ func expected(nodes []node, prefix string, out map[string][]byte) map[string][]b
 	return out
 }
 
-func runTool(t *testing.T, tool string, args ...string) {
+func runTool(t testing.TB, tool string, args ...string) {
 	t.Helper()
 	if _, err := exec.LookPath(tool); err != nil {
 		t.Skipf("%s not installed", tool)
@@ -77,7 +77,7 @@ func runTool(t *testing.T, tool string, args ...string) {
 
 // fsckClean runs the file system's checker without changing the image. Exit 0
 // means the image is consistent.
-func fsckClean(t *testing.T, tool string, args ...string) {
+func fsckClean(t testing.TB, tool string, args ...string) {
 	t.Helper()
 	if _, err := exec.LookPath(tool); err != nil {
 		t.Skipf("%s not installed", tool)
@@ -87,7 +87,7 @@ func fsckClean(t *testing.T, tool string, args ...string) {
 	}
 }
 
-func walkFiles(t *testing.T, v *Volume) map[string]fsvol.File {
+func walkFiles(t testing.TB, v *Volume) map[string]fsvol.File {
 	t.Helper()
 	out := map[string]fsvol.File{}
 	st, err := v.Walk(func(f fsvol.File) error {
@@ -103,7 +103,7 @@ func walkFiles(t *testing.T, v *Volume) map[string]fsvol.File {
 	return out
 }
 
-func readAllFile(t *testing.T, v *Volume, f fsvol.File) []byte {
+func readAllFile(t testing.TB, v *Volume, f fsvol.File) []byte {
 	t.Helper()
 	r, err := v.OpenStream(f.Record, "")
 	if err != nil {
@@ -126,7 +126,7 @@ func readAllFile(t *testing.T, v *Volume, f fsvol.File) []byte {
 
 // checkTree compares a walk of the volume with the expected files: each must
 // be listed with its size and content, and nothing else may be listed.
-func checkTree(t *testing.T, v *Volume, want map[string][]byte) {
+func checkTree(t testing.TB, v *Volume, want map[string][]byte) {
 	t.Helper()
 	got := walkFiles(t, v)
 	for p, content := range want {
@@ -176,7 +176,7 @@ type child struct {
 }
 
 type fatWriter struct {
-	t       *testing.T
+	t       testing.TB
 	f       *os.File
 	kind    string
 	bps     int64
@@ -191,7 +191,7 @@ type fatWriter struct {
 	used    []bool
 }
 
-func newFATFixture(t *testing.T, kind string) (string, *fatWriter) {
+func newFATFixture(t testing.TB, kind string) (string, *fatWriter) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "fat.img")
 	size := map[string]string{"FAT12": "4096", "FAT16": "32768", "FAT32": "65536"}[kind]
@@ -514,7 +514,7 @@ func encodeDir(items []dirItem) []byte {
 	return out
 }
 
-func writeFATTree(t *testing.T, kind string) (string, []byte) {
+func writeFATTree(t testing.TB, kind string) (string, []byte) {
 	path, w := newFATFixture(t, kind)
 	root := w.fatTree(tree())
 	w.writeDir(root, 0, true)
@@ -567,7 +567,7 @@ func TestFAT_ReadsWhatWasWritten(t *testing.T) {
 // ---- exFAT
 
 type exWriter struct {
-	t       *testing.T
+	t       testing.TB
 	f       *os.File
 	cb      int64
 	heap    int64
@@ -582,7 +582,7 @@ type exWriter struct {
 	gapNext uint32
 }
 
-func newExFATFixture(t *testing.T) (string, *exWriter) {
+func newExFATFixture(t testing.TB) (string, *exWriter) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "exfat.img")
 	f, err := os.Create(path)
@@ -861,7 +861,7 @@ func (w *exWriter) writeExDir(d *exDir) {
 	}
 }
 
-func writeExFATTree(t *testing.T) string {
+func writeExFATTree(t testing.TB) string {
 	path, w := newExFATFixture(t)
 	root := &exDir{name: "", cluster: w.rootCl}
 	w.exTree(tree(), root)
@@ -912,9 +912,9 @@ func TestExFAT_ReadsWhatWasWritten(t *testing.T) {
 // panic.
 
 func TestDamagedImages_NeverPanic(t *testing.T) {
-	cases := map[string]func(*testing.T) string{
-		"FAT16": func(t *testing.T) string { p, _ := writeFATTree(t, "FAT16"); return p },
-		"FAT32": func(t *testing.T) string { p, _ := writeFATTree(t, "FAT32"); return p },
+	cases := map[string]func(testing.TB) string{
+		"FAT16": func(t testing.TB) string { p, _ := writeFATTree(t, "FAT16"); return p },
+		"FAT32": func(t testing.TB) string { p, _ := writeFATTree(t, "FAT32"); return p },
 		"exFAT": writeExFATTree,
 	}
 	for name, mk := range cases {
@@ -974,7 +974,7 @@ func (b bytesReaderAt) ReadAt(p []byte, off int64) (int, error) {
 // contiguous files do not exercise. The fixture is checked to be fragmented
 // first, so the test cannot pass on a layout that never needed the chain.
 func TestFragmentedChains_AreFollowed(t *testing.T) {
-	check := func(t *testing.T, v *Volume) {
+	check := func(t testing.TB, v *Volume) {
 		t.Helper()
 		files := walkFiles(t, v)
 		f, ok := files["/big.bin"]

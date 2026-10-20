@@ -117,6 +117,7 @@ const (
 func (h *handlers) withSecurity(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		setSecurityHeaders(w, true)
+		setHSTS(w, r)
 
 		// Refused before authentication and routing: a foreign origin or
 		// hostname must not reach any handler, including the public ones.
@@ -297,6 +298,16 @@ func redactPath(path string) string {
 //     travel to any external site.
 //   - no-store on API responses, because they carry evidence content and
 //     must not sit in a shared browser cache.
+//
+// setHSTS tells browsers to use HTTPS only, for a year. It is sent only on a
+// connection that really is TLS, never over plain HTTP, where it would be
+// ignored anyway, and never on the strength of a proxy header.
+func setHSTS(w http.ResponseWriter, r *http.Request) {
+	if r.TLS != nil {
+		w.Header().Set("Strict-Transport-Security", "max-age=31536000")
+	}
+}
+
 func setSecurityHeaders(w http.ResponseWriter, isAPI bool) {
 	h := w.Header()
 	h.Set("X-Content-Type-Options", "nosniff")
@@ -319,6 +330,7 @@ func setSecurityHeaders(w http.ResponseWriter, isAPI bool) {
 func SecurityHeaders(next http.Handler, secure bool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		setSecurityHeaders(w, false)
+		setHSTS(w, r)
 		w.Header().Set("Content-Security-Policy", strings.Join([]string{
 			"default-src 'self'",
 			"script-src 'self'",

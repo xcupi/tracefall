@@ -1,6 +1,7 @@
 package api
 
 import (
+	"crypto/tls"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -43,5 +44,22 @@ func TestLoginThrottle_TableIsBounded(t *testing.T) {
 	}
 	if n := len(th.failures); n > 1 {
 		t.Fatalf("expired entries were not swept: %d left", n)
+	}
+}
+
+// HSTS is sent on a TLS connection and only there.
+func TestSecurityHeaders_HSTSOnlyOverTLS(t *testing.T) {
+	h := SecurityHeaders(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}), true)
+	plain := httptest.NewRecorder()
+	h.ServeHTTP(plain, httptest.NewRequest(http.MethodGet, "/", nil))
+	if v := plain.Header().Get("Strict-Transport-Security"); v != "" {
+		t.Errorf("HSTS sent over plain HTTP: %q", v)
+	}
+	req := httptest.NewRequest(http.MethodGet, "https://localhost/", nil)
+	req.TLS = &tls.ConnectionState{}
+	secure := httptest.NewRecorder()
+	h.ServeHTTP(secure, req)
+	if secure.Header().Get("Strict-Transport-Security") == "" {
+		t.Error("no HSTS over TLS")
 	}
 }

@@ -6,6 +6,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"io"
 	"log/slog"
@@ -156,10 +157,12 @@ func main() {
 	// config.Validate has already REFUSED an unauthenticated non-loopback
 	// bind, so reaching here on a LAN address means authentication is on.
 	// The remaining risk is transport, not access control.
-	if !cfg.IsLoopbackHost() {
-		logger.Warn("listening on a non-loopback host with authentication enabled. " +
-			"Traffic is plain HTTP unless you terminate TLS in front of Tracefall -- keep this on a trusted network " +
-			"and never port-forward it to the public internet.")
+	switch {
+	case cfg.TLSEnabled():
+		logger.Info("serving HTTPS", "min_tls", "1.2")
+	case !cfg.IsLoopbackHost():
+		logger.Warn("serving plain HTTP on a non-loopback host (--insecure-http): " +
+			"TLS must be terminated by a reverse proxy in front of Tracefall.")
 	}
 
 	// Timeouts on the connection phases a client controls before the handler
@@ -173,7 +176,14 @@ func main() {
 		IdleTimeout:       2 * time.Minute,
 		MaxHeaderBytes:    64 << 10,
 	}
-	if err := srv.ListenAndServe(); err != nil {
+	var serveErr error
+	if cfg.TLSEnabled() {
+		srv.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS12}
+		serveErr = srv.ListenAndServeTLS(cfg.TLSCert, cfg.TLSKey)
+	} else {
+		serveErr = srv.ListenAndServe()
+	}
+	if err := serveErr; err != nil {
 		logger.Error("server stopped", "error", err)
 		os.Exit(1)
 	}
