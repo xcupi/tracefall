@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"tracefall/internal/authseq"
+	"tracefall/internal/cmdsem"
 	"tracefall/internal/model"
 	"tracefall/internal/procclass"
 )
@@ -14,7 +15,7 @@ import (
 // All returns every registered detection rule, in a fixed order so
 // Analyze output ordering is stable across runs.
 func All() []Rule {
-	return []Rule{
+	return append([]Rule{
 		officeSpawnsPowerShell{},
 		powershellEncodedCommand{},
 		newRegistryRunKey{},
@@ -41,7 +42,7 @@ func All() []Rule {
 		// Packet captures. See rules_network.go.
 		rdpConnectionBurst{},
 		executableFromBareAddress{},
-	}
+	}, windowsServerRules()...)
 }
 
 // ---------- Rule 1: Office application spawning PowerShell ----------
@@ -640,7 +641,7 @@ func (r servicePersistence) Evaluate(events []model.Event) []model.Finding {
 			"Service %q was installed on host %s at %s, image path %q, start type %s. A single service "+
 				"installation is a weak indicator on its own -- reported as an observed persistence mechanism, "+
 				"not a malware verdict; see correlated findings for corroborating evidence.",
-			orDash(e.Extra["service_name"]), e.Host, e.Timestamp.Format(time.RFC3339), orDash(e.FilePath), orDash(e.Extra["start_type"]))
+			orDash(e.Extra["service_name"]), e.Host, e.Timestamp.Format(time.RFC3339), orDash(cmdsem.Redact(e.FilePath)), orDash(e.Extra["start_type"]))
 		if suspicious {
 			desc += " The service binary is in a user-writable/non-standard location, or invokes a scripting interpreter -- both raise confidence."
 		}

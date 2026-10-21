@@ -1030,6 +1030,11 @@ const EVENT_CATEGORIES = {
   // Login records: a session opening or closing is an authentication event.
   // A boot has no category of its own, so it is "other" rather than invented.
   session_start: "authentication",
+  remote_authentication: "authentication",
+  session_change: "authentication",
+  scheduled_task_change: "persistence",
+  event_log_cleared: "other",
+  audit_policy_change: "other",
   session_end: "authentication",
   system_boot: "other",
   // An su attempt is a change of account, so it is an authentication event.

@@ -56,6 +56,14 @@ type Input struct {
 // user, provider, event ID, artifact type, parser, provenance); this
 // only adds what depends on the event's meaning.
 func Normalize(ev *model.Event, in Input) bool {
+	if ev.Extra == nil {
+		ev.Extra = map[string]string{}
+	}
+	setExtra(ev, "event_provider", in.Provider)
+	setExtra(ev, "event_channel", in.Channel)
+	if handled, mapped := normalizeServerEvent(ev, in); handled {
+		return mapped
+	}
 	payload := in.Data
 	channel := strings.ToLower(in.Channel)
 	eventID := strconv.Itoa(in.EventID)
@@ -194,6 +202,11 @@ func Normalize(ev *model.Event, in Input) bool {
 			setExtra(ev, "member_sid", payload["MemberSid"])
 		}
 		ev.Extra["actor_known"] = "true: Security records the account that made the change"
+		if objType == "computer" {
+			ev.Extra["outcome"] = "success"
+			ev.Extra["evidence_meaning"] = "Security auditing recorded a computer-account directory change by the subject account."
+			ev.Extra["limitations"] = "Does not establish authorization, a machine joining the domain, successful authentication, or activity on that computer."
+		}
 		return true
 
 	// 4768/4769: Kerberos TGT/service-ticket requests -- authentication
@@ -435,6 +448,12 @@ func dashToEmpty(v string) string {
 // an id that is not an account or group change.
 func accountAction(id string) string {
 	switch id {
+	case "4741":
+		return "computer_created"
+	case "4742":
+		return "computer_modified"
+	case "4743":
+		return "computer_deleted"
 	case "4720":
 		return "user_created"
 	case "4722":
@@ -463,6 +482,8 @@ func accountAction(id string) string {
 
 func accountObject(id string) string {
 	switch accountAction(id) {
+	case "computer_created", "computer_modified", "computer_deleted":
+		return "computer"
 	case "group_created", "group_deleted", "group_member_added", "group_member_removed":
 		return "group"
 	}
