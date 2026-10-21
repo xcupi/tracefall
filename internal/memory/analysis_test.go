@@ -21,7 +21,8 @@ if a and a[0] == "-h":
     print("Volatility 3 Framework 2.99.0")
     print("    plugin:")
     for p in ["windows.info.Info","windows.pslist.PsList","windows.psscan.PsScan","windows.cmdline.CmdLine",
-              "windows.netscan.NetScan","windows.malware.malfind.Malfind","windows.svcscan.SvcScan"]:
+              "windows.netscan.NetScan","windows.malware.malfind.Malfind","windows.svcscan.SvcScan",
+              "windows.cmdscan.CmdScan","windows.consoles.Consoles","windows.filescan.FileScan"]:
         print("    " + p)
     sys.exit(0)
 img = a[a.index("-f")+1]
@@ -77,6 +78,9 @@ func fullDoc() map[string]any {
 		"windows.netscan.NetScan":         rows(),
 		"windows.malware.malfind.Malfind": rows(),
 		"windows.svcscan.SvcScan":         rows(),
+		"windows.cmdscan.CmdScan":         rows(),
+		"windows.consoles.Consoles":       rows(),
+		"windows.filescan.FileScan":       rows(),
 	}
 }
 
@@ -100,7 +104,7 @@ func TestCollect_RunsTheWholeSetAndRecordsEachPlugin(t *testing.T) {
 			t.Errorf("%s: status %s (%s)", p.Logical, p.Status, p.Error)
 		}
 	}
-	for _, want := range []string{"pslist", "psscan", "cmdline", "netscan", "malfind", "svcscan"} {
+	for _, want := range []string{"pslist", "psscan", "cmdline", "netscan", "malfind", "svcscan", "cmdscan", "consoles", "filescan"} {
 		if _, ok := byLogical[want]; !ok {
 			t.Errorf("plugin %s was not run", want)
 		}

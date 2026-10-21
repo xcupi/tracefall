@@ -44,6 +44,7 @@ import (
 	lnkparser "tracefall/internal/parsers/lnk"
 	"tracefall/internal/parsers/logfile"
 	"tracefall/internal/parsers/mft"
+	"tracefall/internal/parsers/netcapture"
 	"tracefall/internal/parsers/packagelog"
 	"tracefall/internal/parsers/pecmd"
 	"tracefall/internal/parsers/prefetchraw"
@@ -97,6 +98,9 @@ func Registry() []parsers.ArtifactParser {
 		// is mistaken for one.
 		packagelog.New(),
 		webaccess.New(),
+		// Packet captures: claimed by extension and confirmed by their magic
+		// number, and also found by magic number under any name.
+		netcapture.New(),
 		// Roadmap item 4: the combined Volatility output for a memory
 		// image. Detected by its fixed name and confirmed by its schema
 		// marker, so nothing else can be claimed as one.

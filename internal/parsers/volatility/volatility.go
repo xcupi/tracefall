@@ -477,6 +477,30 @@ func (p Parser) Parse(absPath string) (parsers.ParseResult, error) {
 		add(ev, rawJSON(pluginName["svcscan"], r))
 	}
 
+	// ---- consoles and file objects
+	var consoleNote, filesNote string
+	if haveSnapshot {
+		cmds, screens, notFound := consoleEvents(rowsOf, pluginName, snapshot, add)
+		_, ranCmd := rowsOf["cmdscan"]
+		_, ranCons := rowsOf["consoles"]
+		switch {
+		case cmds+screens > 0:
+		case (ranCmd || ranCons) && !hasConhost(rowsOf) && (rowsOf["pslist"] != nil || rowsOf["psscan"] != nil):
+			consoleNote = consoleHostNote
+		case ranCmd || ranCons:
+			consoleNote = consoleEmptyNote
+		}
+		if notFound > 0 {
+			consoleNote = strings.TrimSpace(consoleNote + fmt.Sprintf(" %d console(s) were found but their structures could not be read.", notFound))
+		}
+		if fr, ok := rowsOf["filescan"]; ok {
+			l, routine, junk, other := fileEvents(fr, pluginName["filescan"], snapshot, add)
+			filesNote = fmt.Sprintf("listed %d; not listed: %d in operating-system or installed-software locations, %d of other types, %d unreadable names", l, routine, other, junk)
+		}
+	} else if len(rowsOf["cmdscan"])+len(rowsOf["consoles"])+len(rowsOf["filescan"]) > 0 {
+		skipped += len(rowsOf["cmdscan"]) + len(rowsOf["consoles"]) + len(rowsOf["filescan"])
+	}
+
 	// ---- the snapshot itself
 	if haveSnapshot {
 		extra := map[string]string{
@@ -489,6 +513,12 @@ func (p Parser) Parse(absPath string) (parsers.ParseResult, error) {
 		if len(failed) > 0 {
 			sort.Strings(failed)
 			extra["plugins_failed"] = strings.Join(failed, ",")
+		}
+		if consoleNote != "" {
+			extra["console_note"] = consoleNote
+		}
+		if filesNote != "" {
+			extra["file_objects"] = filesNote
 		}
 		if truncated {
 			extra["truncated"] = fmt.Sprintf("event cap %d reached", maxEvents)

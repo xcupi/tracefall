@@ -323,6 +323,10 @@ const (
 	// format). Each line is one request the server answered, with the
 	// timestamp and UTC offset the server wrote.
 	ArtifactWebAccessLog = "web_access_log"
+	// ArtifactNetworkCapture is a packet capture (pcap or pcapng). Its
+	// events are stamped by the CAPTURING machine's clock, not by any host
+	// that appears in it; the two can differ (see package clockskew).
+	ArtifactNetworkCapture = "network_capture"
 	// ArtifactPackageLog is a package manager transaction log
 	// (dpkg.log). It records what the package database changed, with the
 	// local time of the change and no time zone.
@@ -897,6 +901,18 @@ const (
 	// could not produce.
 	EventMemorySnapshot = "memory_snapshot"
 
+	// EventMemoryConsole is one command line a console still held in memory
+	// at capture. It is what the console remembered, in order; it does not
+	// say when each command was typed (the console keeps no times).
+	EventMemoryConsole = "console_command_in_memory"
+	// EventMemoryConsoleScreen is the text of a console's screen buffer at
+	// capture: commands and their output as they were displayed.
+	EventMemoryConsoleScreen = "console_screen_in_memory"
+	// EventMemoryFile is a file object the kernel held at capture. It shows
+	// the file was open or cached, not that it still exists on disk, and it
+	// carries no content hash.
+	EventMemoryFile = "file_object_in_memory"
+
 	// EventImageGPSRecorded is a coordinate an image's EXIF GPS block
 	// recorded. The position is OBSERVED in the file; any country derived
 	// from it is DERIVED, and the event keeps the two apart.
@@ -924,6 +940,14 @@ const (
 	// restart. Extra["category"] says which kind. Only a short allow-list
 	// of messages is emitted, so the absence of one proves nothing.
 	EventServiceMessage = "service_message"
+	// EventClockObservation is a clock value seen on the wire: an NTP
+	// packet's transmit time or an HTTP Date header, together with the capture
+	// time of the packet that carried it. Extra["subject_ip"] says whose
+	// clock it is. It is raw input to the clock-skew model, not a finding.
+	EventClockObservation = "clock_observation"
+	// EventCaptureSummary describes a packet capture as a whole: its span,
+	// packet counts, what could not be decoded and which limits were reached.
+	EventCaptureSummary = "capture_summary"
 )
 
 // Event is Tracefall's normalized evidence record. Every parser emits
@@ -1095,6 +1119,22 @@ const (
 	// internal/correlate/web_resource.go for what it does and does not
 	// claim.
 	CorrelationWebResource = "web_resource"
+	// CorrelationClockSkew states that one machine's clock is not the same as
+	// the clock of the capture it was observed in, and by how much. It is an
+	// estimate with an uncertainty; no timestamp is changed. See
+	// internal/correlate/clock_skew.go.
+	CorrelationClockSkew = "clock_skew"
+	// CorrelationWebToHost ties an object a packet capture shows being
+	// delivered over HTTP to host events that name a file of the same name
+	// afterwards. By name and order in time, not by hash. See
+	// internal/correlate/web_to_host.go.
+	CorrelationWebToHost = "web_to_host"
+	// CorrelationHostRelation states that one machine in the case reached
+	// another: a logon on one that came from the address of the other, or
+	// traffic in a capture between the two. Which machine an address belongs
+	// to, and how that is known, is stated in the description. See
+	// internal/correlate/host_relation.go.
+	CorrelationHostRelation = "host_relation"
 )
 
 // Correlation is a deterministic relationship between two or more events,

@@ -383,7 +383,7 @@ func (systemChangeCommand) ID() string { return "system-change-command" }
 func (systemChangeCommand) Inputs() model.EventFilter {
 	return model.EventFilter{Types: []string{
 		model.EventProcessCreate, model.EventPowerShellScript, model.EventPowerShellHistoryCommand,
-		model.EventBashHistoryCommand, model.EventSudoCommand, model.EventScheduledJobRun,
+		model.EventBashHistoryCommand, model.EventSudoCommand, model.EventScheduledJobRun, model.EventMemoryConsole,
 	}}
 }
 
@@ -407,6 +407,8 @@ func commandBasis(eventType string) (basis string, conf string) {
 		return "the shell history shows the command was typed; it does not show that it ran or succeeded", model.ConfidenceLow
 	case model.EventScheduledJobRun:
 		return "cron started the job; the log does not show its result", model.ConfidenceLow
+	case model.EventMemoryConsole:
+		return "a console still held the command in memory at capture, so it was typed there; the console does not show that it ran, succeeded, or when", model.ConfidenceLow
 	default:
 		return "the command line of a process that started; the record does not show that the change took effect", model.ConfidenceMedium
 	}
@@ -422,7 +424,7 @@ func (r systemChangeCommand) Evaluate(events []model.Event) []model.Finding {
 	for _, e := range events {
 		switch e.EventType {
 		case model.EventProcessCreate, model.EventPowerShellScript, model.EventPowerShellHistoryCommand,
-			model.EventBashHistoryCommand, model.EventSudoCommand, model.EventScheduledJobRun:
+			model.EventBashHistoryCommand, model.EventSudoCommand, model.EventScheduledJobRun, model.EventMemoryConsole:
 		default:
 			continue
 		}

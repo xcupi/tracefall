@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"tracefall/internal/model"
 	"tracefall/internal/parsers"
@@ -310,5 +311,17 @@ func TestBruteForceSequence_ASourceThatKeepsGuessingAfterGettingIn(t *testing.T)
 		if len(f.SupportingEvents) > 6 {
 			t.Errorf("a success must not collect failures from after it: %d events", len(f.SupportingEvents))
 		}
+	}
+}
+
+func TestSystemChangeCommand_ACommandRecoveredFromAConsoleInMemoryIsALowConfidenceLead(t *testing.T) {
+	e := model.Event{ID: "c1", Host: "host01", EventType: model.EventMemoryConsole, CommandLine: "netsh advfirewall set allprofiles state off",
+		Timestamp: time.Date(2021, 1, 2, 3, 4, 5, 0, time.UTC), ArtifactType: model.ArtifactMemoryAnalysis}
+	got := systemChangeCommand{}.Evaluate([]model.Event{e})
+	if len(got) != 1 {
+		t.Fatalf("got %d findings", len(got))
+	}
+	if got[0].Confidence != model.ConfidenceLow || !strings.Contains(got[0].Description, "does not show that it ran") {
+		t.Errorf("%s / %s", got[0].Confidence, got[0].Description)
 	}
 }

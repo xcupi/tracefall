@@ -88,6 +88,21 @@ var ruleDocs = map[string]RuleDoc{
 		Basis:      "Administrators run these commands as often as attackers do, so the finding is a lead. Confidence follows what the source proves: a process record shows a start, sudo shows an authorisation, shell history shows typing; none shows the change took effect. Commands that only list state are not matched, and secrets typed on a command line are never copied into a finding. Repeats of the same action by the same account on the same host are one finding with a count.",
 		Techniques: []string{"T1562.004", "T1053.005", "T1053.003", "T1543.003", "T1547.001", "T1098", "T1136.001"},
 	},
+	"rdp-connection-burst": {
+		Title:        "Many Remote Desktop connections from one client",
+		Detects:      "A packet capture showing at least fifty separate connections from one client to one server's Remote Desktop port.",
+		BaseSeverity: "medium", BaseConfidence: "low", MaxSeverity: "high", MaxConfidence: "medium",
+		Escalates:  []string{"A later connection from the same client carried real traffic, i.e. a session got past the handshake (severity to high, confidence to medium)"},
+		Basis:      "The capture proves the connections were attempted, not that any logon failed or succeeded: Remote Desktop is encrypted. The same shape comes from password guessing, a scanner, a health check or a client with a stale saved credential, so confidence stays low until a session follows, and even then the server's own logon events decide.",
+		Techniques: []string{"T1110.001", "T1021.001"},
+	},
+	"executable-over-http-from-address": {
+		Title:        "Executable fetched over HTTP from a bare address",
+		Detects:      "A packet capture showing a program (Windows executable, ELF, MSI, Java archive) delivered whole, with status 200, over unencrypted HTTP from a server addressed by IP rather than by name.",
+		BaseSeverity: "medium", BaseConfidence: "medium", MaxSeverity: "medium", MaxConfidence: "medium",
+		Basis:      "The capture proves the bytes reached the client and gives their hash, so the observation is solid. It does not show the file was saved or run, or what it does; internal tooling is also served from bare addresses. Severity stays medium and the finding is a lead to match against the client's own records.",
+		Techniques: []string{"T1105"},
+	},
 	"memory-process-signals": {
 		Title:        "Corroborated memory process review",
 		Detects:      "One process-level lead for private executable PE memory, independently corroborated executable regions, a successfully compared process-list discrepancy, or writable-image execution with a remote socket in the same acquisition.",

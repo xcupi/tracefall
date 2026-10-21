@@ -58,6 +58,15 @@ var plan = []struct {
 	{"netscan", []string{"windows.netscan.NetScan"}},
 	{"malfind", []string{"windows.malware.malfind.Malfind", "windows.malfind.Malfind"}},
 	{"svcscan", []string{"windows.svcscan.SvcScan"}},
+	// What was typed into command prompts. Volatility 3 reads these from
+	// conhost.exe, so an image of a Windows that hosted consoles elsewhere
+	// yields no rows from either; the parser says so rather than implying
+	// that nothing was typed.
+	{"cmdscan", []string{"windows.cmdscan.CmdScan"}},
+	{"consoles", []string{"windows.consoles.Consoles"}},
+	// File objects the kernel still has: files that were open or cached at
+	// capture, including some that no longer exist on disk.
+	{"filescan", []string{"windows.filescan.FileScan"}},
 }
 
 const infoPlugin = "windows.info.Info"

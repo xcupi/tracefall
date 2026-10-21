@@ -44,9 +44,36 @@ func (c caseEvents) Load(f model.EventFilter) ([]model.Event, error) {
 			args = append(args, a)
 		}
 	}
+	where := `(` + strings.Join(clauses, " OR ") + `)`
+	if len(f.Names) > 0 {
+		names := f.NamesLower()
+		if len(names) == 0 {
+			return nil, nil // names were asked for and none is usable: select nothing
+		}
+		var nc []string
+		for _, n := range names {
+			esc := likeEscape(n)
+			nc = append(nc,
+				`LOWER(file_path) LIKE ? ESCAPE '\'`, `LOWER(file_path) LIKE ? ESCAPE '\'`, `LOWER(file_path) = ?`,
+				`LOWER(process_path) LIKE ? ESCAPE '\'`, `LOWER(process_path) LIKE ? ESCAPE '\'`, `LOWER(process_path) = ?`,
+				`LOWER(process_name) = ?`)
+			// A Windows separator is a backslash, which is also the escape
+			// character here, so it is written doubled to mean itself.
+			args = append(args, "%/"+esc, `%\\`+esc, n, "%/"+esc, `%\\`+esc, n, n)
+		}
+		where += ` AND (` + strings.Join(nc, " OR ") + `)`
+	}
+	if len(f.Within) > 0 {
+		ph := make([]string, len(f.Within))
+		for i, a := range f.Within {
+			ph[i] = "?"
+			args = append(args, a)
+		}
+		where += ` AND artifact_type IN (` + strings.Join(ph, ",") + `)`
+	}
 	// Ordered as ListEvents orders, so a filtered consumer sees its events in
 	// the same relative order a full load would give it.
-	q := `SELECT ` + eventCols + ` FROM events WHERE case_id = ? AND (` + strings.Join(clauses, " OR ") + `) ORDER BY timestamp ASC, id ASC`
+	q := `SELECT ` + eventCols + ` FROM events WHERE case_id = ? AND ` + where + ` ORDER BY timestamp ASC, id ASC`
 	rows, err := c.s.db.Query(q, args...)
 	if err != nil {
 		return nil, fmt.Errorf("loading filtered events: %w", err)
@@ -192,4 +219,11 @@ func (s *Store) ForEachEventLazy(caseID string, needExtra func(eventType string)
 		return e, nil
 	}
 	return s.pageEvents("case_id", caseID, scan, fn)
+}
+
+// likeEscape escapes the characters LIKE treats specially, for use with
+// ESCAPE '\'.
+func likeEscape(s string) string {
+	r := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
+	return r.Replace(s)
 }

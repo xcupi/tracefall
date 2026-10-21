@@ -154,6 +154,12 @@ func (p Parser) ParseWithContext(absPath string, ctx parsers.ParseContext) (pars
 		out.Events = append(out.Events, ev)
 		out.Raw = append(out.Raw, raw)
 	}
+	if hiveType == HiveSoftware {
+		if ev, raw, ok := softwareIdentityEvent(h, hiveType); ok {
+			out.Events = append(out.Events, ev)
+			out.Raw = append(out.Raw, raw)
+		}
+	}
 
 	// Phase 15: the two user-activity structures a per-user hive holds.
 	// Both are no-ops for a hive that does not contain them, and neither
@@ -343,6 +349,11 @@ func hostnameEvent(h *regf.Hive, host string, hiveType HiveType) (model.Event, m
 			"registry_last_write": ts.UTC().Format("2006-01-02T15:04:05Z"),
 			"observation":         "Registry key last-write observed; machine hostname recorded in the SYSTEM hive",
 		},
+	}
+	// What else the same hive says about who this machine is. Each value
+	// carries its own caveat in the key that names it (ip_origin).
+	for k, v := range systemIdentity(h) {
+		ev.Extra[k] = v
 	}
 	rawJSON, _ := json.Marshal(map[string]any{
 		"hive_type":  string(hiveType),

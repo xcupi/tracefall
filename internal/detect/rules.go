@@ -38,6 +38,9 @@ func All() []Rule {
 		accountChangeObserved{},
 		databaseInsecureAccount{},
 		systemChangeCommand{},
+		// Packet captures. See rules_network.go.
+		rdpConnectionBurst{},
+		executableFromBareAddress{},
 	}
 }
 

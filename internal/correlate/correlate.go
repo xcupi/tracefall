@@ -35,6 +35,7 @@ import (
 	"fmt"
 	"sort"
 
+	"tracefall/internal/hostid"
 	"tracefall/internal/model"
 )
 
@@ -66,6 +67,11 @@ var typedInputTypes = []string{
 	model.EventRegistryPersistence,
 	model.EventServiceInstall,
 	model.EventNetworkConnection,
+	// Read by the clock-offset model and the machine-identity table: clock
+	// readings from a capture, and the registry events that name a machine
+	// (its hostname, addresses and operating system).
+	model.EventClockObservation,
+	model.EventRegistryKeyLastWrite,
 }
 
 // RunFrom builds every correlation from src. The typed builders get only the
@@ -88,6 +94,29 @@ func RunFrom(caseID string, src model.EventSource) ([]model.Correlation, error) 
 	out = append(out, BuildCredentialChains(caseID, typed)...)
 	out = append(out, BuildServiceChains(caseID, typed)...)
 	out = append(out, BuildWebResourceCorrelations(caseID, typed)...)
+	reg := hostid.Build(typed)
+	out = append(out, BuildClockSkew(caseID, typed, reg)...)
+	out = append(out, BuildHostRelations(caseID, typed, reg)...)
+
+	// Web objects seen in a capture, and the host events that later name the
+	// same file. Both loads are narrow: only capture requests, and only host
+	// events carrying one of the delivered names.
+	capReqs, err := src.Load(model.EventFilter{Types: []string{model.EventWebRequest}, Within: []string{model.ArtifactNetworkCapture}})
+	if err != nil {
+		return nil, fmt.Errorf("loading capture requests: %w", err)
+	}
+	if names := webObjectNames(capReqs); len(names) > 0 {
+		hostEvs, err := src.Load(model.EventFilter{
+			Types: []string{model.EventFilesystemCreated, model.EventFilesystemModified, model.EventFilesystemChanged, model.EventFileCreate,
+				model.EventUsnCreate, model.EventUsnRename, model.EventProcessCreate, model.EventPrefetchExecution,
+				model.EventAmcacheApplication, model.EventBrowserDownload, model.EventMemoryFile},
+			Names: names,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("loading host events for delivered files: %w", err)
+		}
+		out = append(out, BuildWebToHost(caseID, capReqs, hostEvs, reg, ClockEstimates(typed, reg))...)
+	}
 
 	for i := range out {
 		out[i].CaseID = caseID

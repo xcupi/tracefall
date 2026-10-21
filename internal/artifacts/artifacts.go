@@ -411,6 +411,10 @@ var supportedTypeInfo = map[string]typeInfo{
 		label: "System log (syslog)", family: FamilyLog, priority: PriorityHigh,
 		why: "Records the scheduled jobs cron started and the service warnings a daemon wrote -- for example a database running with an unprotected administrator account.",
 	},
+	model.ArtifactNetworkCapture: {
+		label: "Network capture (pcap)", family: FamilyNetwork, priority: PriorityHigh,
+		why: "Records who talked to whom and when, every name looked up, every HTTP object that crossed the wire with its hash, Remote Desktop connections, and the clocks of the machines involved.",
+	},
 	model.ArtifactWebAccessLog: {
 		label: "Web server access log", family: FamilyLog, priority: PriorityHigh,
 		why: "Records every request a web server answered, with the source address, URL, status and client -- the trail of web attacks and web-shell use.",

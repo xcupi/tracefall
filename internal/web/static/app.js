@@ -880,6 +880,7 @@ const ARTIFACT_TYPE_LABELS = {
   auth_log: "Authentication log (auth.log)",
   syslog: "System log (syslog)",
   web_access_log: "Web server access log",
+  network_capture: "Network capture (pcap)",
   package_log: "Package log (dpkg)",
   journal: "Systemd journal",
   browser_history: "Browser history (Chromium / Firefox)",
@@ -1043,6 +1044,9 @@ const EVENT_CATEGORIES = {
   web_request: "web",
   package_change: "system",
   service_message: "system",
+  // A capture summary and a clock reading describe the capture, not a host.
+  clock_observation: "network",
+  capture_summary: "network",
   // cron started a scheduled job as an account: execution, and a persistence lead.
   scheduled_job_run: "execution",
   // Generic service log entries: context, not a classified action.
@@ -1065,6 +1069,10 @@ const EVENT_CATEGORIES = {
   network_listener: "network",
   memory_injection_suspect: "execution",
   service_in_memory: "persistence",
+  // What a console still held, and the files the kernel still had open.
+  console_command_in_memory: "execution",
+  console_screen_in_memory: "execution",
+  file_object_in_memory: "filesystem",
   memory_snapshot: "other",
 };
 const EVENT_CATEGORY_LABELS = {
@@ -8979,6 +8987,12 @@ const CORR_LABELS = {
   // Phase 14: the same web host seen in two independent browser
   // artifacts. A link between sources, not a narrative chain.
   web_resource: "Web resource correlation",
+  // An estimate of how far one machine's clock is from the capture's.
+  clock_skew: "Clock offset",
+  // A file delivered over HTTP in a capture, then named on a host.
+  web_to_host: "Web delivery to host",
+  // One machine in the case reaching another.
+  host_relation: "Host-to-host relation",
 };
 
 // renderCorrelationsTab splits correlations into activity chains (a
