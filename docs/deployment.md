@@ -41,6 +41,10 @@ built-in default. See `internal/config` for the implementation.
 | `-tls-cert` | `TRACEFALL_TLS_CERT` | none | PEM certificate chain. With `-tls-key`, Tracefall serves HTTPS itself (TLS 1.2 or newer, HSTS) and marks session cookies `Secure`. |
 | `-tls-key` | `TRACEFALL_TLS_KEY` | none | PEM private key for `-tls-cert`. Both or neither. |
 | `-insecure-http` | `TRACEFALL_INSECURE_HTTP` | `false` | Allow plain HTTP on a non-loopback bind. Only when a reverse proxy you control terminates TLS in front of Tracefall. |
+| `-trusted-proxies` | `TRACEFALL_TRUSTED_PROXIES` | none | Comma-separated IPs or CIDRs of the reverse proxies whose `X-Forwarded-For` is believed. Used only to count failed logins per client address; see "Login throttling" in `docs/security.md`. Without it, behind a proxy, every client looks like the proxy and the per-address counters are off. |
+| | `TRACEFALL_MAX_IMPORTS` | `1` | Evidence imports that run at once. An import holds every event of its files in memory until they are saved, so the others wait. See `docs/capacity.md`. |
+| | `TRACEFALL_MAX_HEAVY_OPS` | `2` | Report builds and analyses that run at once. |
+| | `TRACEFALL_PARSER_CONCURRENCY` | = imports | Parser worker processes that run at once, across all imports. Each may use `TRACEFALL_PARSER_MEM_MB` (default 4096) of address space. |
 | (env only) | `TRACEFALL_ADMIN_PASSWORD` | *(generated)* | password for the bootstrap `admin` account, first start only |
 | (env only) | `TRACEFALL_EVIDENCE_ROOTS` | *(unset)* | folders the server may read for path-based ingest, separated like `PATH` (`:` on Linux). Unset: path ingest is refused, except in local no-auth loopback mode, where any path is accepted. See `docs/security.md`, *Server-path ingest* |
 

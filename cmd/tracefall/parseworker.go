@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"tracefall/internal/api"
+	"tracefall/internal/gate"
 	"tracefall/internal/ingest"
 )
 
@@ -67,7 +68,7 @@ func workerLimits(exe string) (applied []string, problem string) {
 // enableParserIsolation makes the server run every parse in a child process,
 // unless TRACEFALL_PARSER_ISOLATION=off. It logs exactly what protection is in
 // effect, because a limit that did not apply must not be reported as applied.
-func enableParserIsolation(logger *slog.Logger) {
+func enableParserIsolation(logger *slog.Logger, capacity serverCapacity) {
 	if os.Getenv("TRACEFALL_PARSER_ISOLATION") == "off" {
 		logger.Warn("parser isolation is OFF (TRACEFALL_PARSER_ISOLATION=off): a crafted file can stop the server")
 		return
@@ -93,6 +94,7 @@ func enableParserIsolation(logger *slog.Logger) {
 	if !hasSeccomp {
 		logger.Warn("parser worker has NO system-call filter (seccomp); the other limits still apply", "reason", problem)
 	}
+	sub.Limit = gate.New(capacity.ParserWorkers)
 	sub.Sandbox = ingest.FindSandbox()
 	if sub.Sandbox == "" {
 		sub.NoNetwork = ingest.NetworkIsolationAvailable()
@@ -105,7 +107,8 @@ func enableParserIsolation(logger *slog.Logger) {
 	case sub.NoNetwork:
 		level = "process limits and no network"
 	}
-	logger.Info("parser isolation on", "level", level, "memory_mb", sub.MemoryMB, "timeout", sub.Timeout.String())
+	logger.Info("parser isolation on", "level", level, "memory_mb", sub.MemoryMB, "timeout", sub.Timeout.String(),
+		"max_workers", capacity.ParserWorkers)
 	if sub.Sandbox == "" {
 		logger.Warn("no sandbox is available (install bubblewrap): a crafted file cannot take the server down, " +
 			"but the parser can still read the server's files" + map[bool]string{true: "", false: " and use the network"}[sub.NoNetwork])

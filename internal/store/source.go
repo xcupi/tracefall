@@ -1,6 +1,7 @@
 package store
 
 import (
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -83,25 +84,95 @@ func (c caseEvents) Refs() ([]model.EventRef, error) {
 	return out, rows.Err()
 }
 
-// ForEachEvent calls fn for every event of the case, ordered by timestamp,
-// then ID, reading one row at a time. Use it where the consumer can work
-// event by event (writing a file, counting); it never holds the case.
-func (s *Store) ForEachEvent(caseID string, fn func(model.Event) error) error {
-	rows, err := s.db.Query(`SELECT `+eventCols+` FROM events WHERE case_id = ? ORDER BY timestamp ASC, id ASC`, caseID)
-	if err != nil {
-		return fmt.Errorf("streaming events: %w", err)
+// eventPageSize is how many events one query reads. A variable so tests can
+// make the pages small enough to cross.
+var eventPageSize = 2000
+
+// tapRow remembers the id and the stored timestamp text of the row scanEventRaw
+// just read, which are what the next page starts after. The columns are
+// eventCols', in that order; the page test fails if that order ever changes.
+type tapRow struct {
+	rows   *sql.Rows
+	ts, id string
+}
+
+func (t *tapRow) Scan(dest ...any) error {
+	if err := t.rows.Scan(dest...); err != nil {
+		return err
 	}
-	defer rows.Close()
-	for rows.Next() {
-		e, err := scanEvent(rows)
+	t.id = *(dest[0].(*string))
+	t.ts = *(dest[3].(*string))
+	return nil
+}
+
+// pageEvents reads the events whose scopeCol equals scope, ordered by timestamp
+// then id, one page of eventPageSize rows per query, and calls fn for each.
+//
+// Each page is read in full and its cursor closed BEFORE fn is called. The
+// store has one database connection, and a cursor held open while fn writes to
+// a slow client would hold it, so one download read slowly would stop every
+// other request. Between pages the connection is free.
+//
+// The next page starts after the last (timestamp, id) of the previous one, using
+// the text exactly as stored, so the order is the one ORDER BY gives. Events
+// written while a stream runs may or may not be seen by it, as with any two
+// queries; a consumer that needs one instant reads while the case is locked.
+func (s *Store) pageEvents(scopeCol, scope string, scan func(row interface{ Scan(...any) error }) (model.Event, error), fn func(model.Event) error) error {
+	var afterTS, afterID string
+	started := false
+	for {
+		q := `SELECT ` + eventCols + ` FROM events WHERE ` + scopeCol + ` = ?`
+		args := []any{scope}
+		if started {
+			q += ` AND (timestamp, id) > (?, ?)`
+			args = append(args, afterTS, afterID)
+		}
+		q += ` ORDER BY timestamp ASC, id ASC LIMIT ?`
+		args = append(args, eventPageSize)
+
+		rows, err := s.db.Query(q, args...)
+		if err != nil {
+			return fmt.Errorf("streaming events: %w", err)
+		}
+		tap := &tapRow{rows: rows}
+		page := make([]model.Event, 0, 256)
+		for rows.Next() {
+			e, err := scan(tap)
+			if err != nil {
+				rows.Close()
+				return err
+			}
+			page = append(page, e)
+		}
+		err = rows.Err()
+		rows.Close()
 		if err != nil {
 			return err
 		}
-		if err := fn(e); err != nil {
-			return err
+
+		for _, e := range page {
+			if err := fn(e); err != nil {
+				return err
+			}
 		}
+		if len(page) < eventPageSize {
+			return nil
+		}
+		afterTS, afterID, started = tap.ts, tap.id, true
 	}
-	return rows.Err()
+}
+
+// ForEachEvent calls fn for every event of the case, ordered by timestamp,
+// then ID. Use it where the consumer can work event by event (writing a file,
+// counting); it never holds the case, and between pages it holds nothing.
+func (s *Store) ForEachEvent(caseID string, fn func(model.Event) error) error {
+	return s.pageEvents("case_id", caseID, scanEvent, fn)
+}
+
+// ForEachEventInCollection is ForEachEvent for the events first observed in one
+// collection, ordered the same way.
+func (s *Store) ForEachEventInCollection(collectionID string, fn func(model.Event) error) error {
+	return s.pageEvents("collection_id", collectionID, scanEvent, fn)
 }
 
 // ForEachEventLazy is ForEachEvent for consumers that need the parsed Extra
@@ -109,23 +180,16 @@ func (s *Store) ForEachEvent(caseID string, fn func(model.Event) error) error {
 // for an event's type; for the other events Extra is nil. Reading and decoding
 // every row's JSON was most of the allocation of an investigation pass.
 func (s *Store) ForEachEventLazy(caseID string, needExtra func(eventType string) bool, fn func(model.Event) error) error {
-	rows, err := s.db.Query(`SELECT `+eventCols+` FROM events WHERE case_id = ? ORDER BY timestamp ASC, id ASC`, caseID)
-	if err != nil {
-		return fmt.Errorf("streaming events: %w", err)
-	}
-	defer rows.Close()
-	for rows.Next() {
-		e, extraJSON, err := scanEventRaw(rows)
+	scan := func(row interface{ Scan(...any) error }) (model.Event, error) {
+		e, extraJSON, err := scanEventRaw(row)
 		if err != nil {
-			return err
+			return model.Event{}, err
 		}
 		if needExtra(e.EventType) {
 			e.Extra = map[string]string{}
 			_ = json.Unmarshal([]byte(extraJSON), &e.Extra)
 		}
-		if err := fn(e); err != nil {
-			return err
-		}
+		return e, nil
 	}
-	return rows.Err()
+	return s.pageEvents("case_id", caseID, scan, fn)
 }

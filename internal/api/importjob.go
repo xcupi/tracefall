@@ -49,6 +49,7 @@ var (
 // Service.ImportEvidence -- no stage is reported that does not
 // correspond to code that runs.
 const (
+	PhaseQueued     = "queued"     // waiting for another import to finish (see Service.SetImportLimit)
 	PhasePreparing  = "preparing"  // resolving the selection, before any file is read
 	PhaseParsing    = "parsing"    // ImportEvidence phase 1: parse every selected file
 	PhaseEnriching  = "enriching"  // phase 2: resolve hosts across the whole batch
@@ -220,6 +221,15 @@ func (s *progressSink) cancelled() bool {
 		return false
 	}
 	return s.job.cancelled()
+}
+
+// context is the context of the import this sink reports on: cancelling the
+// job ends it. Nil-safe; the synchronous path has no job.
+func (s *progressSink) context() context.Context {
+	if s == nil || s.job == nil || s.job.ctx == nil {
+		return nil
+	}
+	return s.job.ctx
 }
 
 func (s *progressSink) phase(name string) {

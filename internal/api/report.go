@@ -739,37 +739,36 @@ func reportSHA256(b []byte) string {
 // ReportHTML renders the report and records its issuance. It returns the
 // document and its SHA-256.
 func (s *Service) ReportHTML(caseID string) ([]byte, string, error) {
+	release, err := s.heavyOp()
+	if err != nil {
+		return nil, "", err
+	}
+	defer release()
 	b, err := s.buildReport(caseID, time.Now().UTC())
 	if err != nil {
 		return nil, "", err
 	}
+	// The HTML is already rendered; the spooled timeline is not part of it.
+	defer b.release()
 	sum := b.Manifest.Report.SHA256
 	s.audit(caseID, model.AuditExport, model.TargetCase, caseID,
 		fmt.Sprintf("Forensic report issued as HTML (report.html SHA-256 %s)", sum))
 	return b.HTML, sum, nil
 }
 
-// ReportBundle returns a ZIP of report.html, manifest.json and the CSV
-// attachments, built from one consistent read so the manifest matches the
-// files by construction.
-func (s *Service) ReportBundle(caseID string) ([]byte, report.Manifest, error) {
-	now := time.Now().UTC()
-	z, manifest, err := s.reportBundleBytes(caseID, now)
-	if err != nil {
-		return nil, report.Manifest{}, err
-	}
-	s.audit(caseID, model.AuditExport, model.TargetCase, caseID,
-		fmt.Sprintf("Forensic report bundle issued (report.html SHA-256 %s)", manifest.Report.SHA256))
-	return z, manifest, nil
-}
-
 // ReportPDF prints the report to PDF. It returns report.ErrNoRenderer
 // when the server has no browser able to do so; nothing is faked.
 func (s *Service) ReportPDF(ctx context.Context, caseID string) ([]byte, error) {
+	release, err := s.heavyOp()
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	b, err := s.buildReport(caseID, time.Now().UTC())
 	if err != nil {
 		return nil, err
 	}
+	defer b.release()
 	pdf, err := report.RenderPDF(ctx, b.HTML)
 	if err != nil {
 		return nil, err

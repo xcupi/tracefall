@@ -65,6 +65,12 @@ func migrate(db *sql.DB) error {
 	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_events_collection ON events(collection_id)`); err != nil {
 		return fmt.Errorf("creating events collection index: %w", err)
 	}
+	// Streaming one collection's events page by page (pageEvents) orders by
+	// (timestamp, id) within the collection; without this index each page
+	// would sort the whole collection again.
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_events_collection_ts_id ON events(collection_id, timestamp, id)`); err != nil {
+		return fmt.Errorf("creating events collection timeline index: %w", err)
+	}
 	// Phase 12 bootstrap refinement: gate an account behind a mandatory
 	// password change. Existing accounts default to 0 -- a deployment
 	// that already has users has already chosen their passwords, and

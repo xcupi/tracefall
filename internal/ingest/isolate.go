@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"tracefall/internal/gate"
 	"tracefall/internal/parsers"
 )
 
@@ -96,6 +97,12 @@ type Subprocess struct {
 	// directory. It cannot reach the network, the case database, other
 	// cases' evidence or the server's keys. Empty means no sandbox.
 	Sandbox string
+	// Limit bounds how many workers run at once across the whole server. Every
+	// worker may use up to MemoryMB, so without it the memory a burst of
+	// imports can take is the number of imports times that. A parse that has
+	// to wait holds no process and its time limit does not start until it
+	// runs. Nil means unbounded.
+	Limit *gate.Gate
 	// NoNetwork asks, when there is no Sandbox, for a network namespace with
 	// no interfaces, where the kernel allows it.
 	NoNetwork bool
@@ -154,6 +161,13 @@ func (s Subprocess) Run(p parsers.ArtifactParser, root, abs string, pctx parsers
 	req, err := json.Marshal(workerRequest{Parser: p.Name(), Path: abs, Context: pctx})
 	if err != nil {
 		return parsers.ParseResult{}, err
+	}
+	if s.Limit != nil {
+		release, err := s.Limit.Acquire(context.Background())
+		if err != nil {
+			return parsers.ParseResult{}, &ProcessFailure{Reason: "waiting for a worker slot failed: " + err.Error()}
+		}
+		defer release()
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), s.timeout())
 	defer cancel()

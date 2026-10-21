@@ -1,7 +1,6 @@
 package api
 
 import (
-	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -9,8 +8,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"sort"
-	"strings"
 	"time"
 
 	"tracefall/internal/model"
@@ -44,6 +41,11 @@ func (s *Service) reportsDir(caseID string) string {
 // The bundle is built before the audit entry is written, so the report never
 // lists its own issuance (the same rule as the on-demand endpoints).
 func (s *Service) GenerateCaseReport(caseID, jobID string) (StoredReport, error) {
+	releaseGate, err := s.heavyOp()
+	if err != nil {
+		return StoredReport{}, err
+	}
+	defer releaseGate()
 	now := time.Now().UTC()
 	b, err := s.buildReport(caseID, now)
 	if err != nil {
@@ -84,34 +86,6 @@ func (s *Service) GenerateCaseReport(caseID, jobID string) (StoredReport, error)
 	return st, nil
 }
 
-// LatestStoredReport returns the newest report bundle the pipeline wrote for
-// the case, with its file name.
-func (s *Service) LatestStoredReport(caseID string) (string, []byte, error) {
-	entries, err := os.ReadDir(s.reportsDir(caseID))
-	if err != nil {
-		return "", nil, ErrNoStoredReport
-	}
-	var names []string
-	for _, e := range entries {
-		n := e.Name()
-		if !e.IsDir() && strings.HasPrefix(n, "report-") && strings.HasSuffix(n, ".zip") {
-			names = append(names, n)
-		}
-	}
-	if len(names) == 0 {
-		return "", nil, ErrNoStoredReport
-	}
-	// The names carry a UTC timestamp of fixed width, so lexical order is
-	// generation order.
-	sort.Strings(names)
-	latest := names[len(names)-1]
-	b, err := os.ReadFile(filepath.Join(s.reportsDir(caseID), latest))
-	if err != nil {
-		return "", nil, fmt.Errorf("reading the stored report: %w", err)
-	}
-	return latest, b, nil
-}
-
 // writeBundleFile writes the report bundle to path and returns its SHA-256
 // and size. The bundle is streamed: the spooled timeline is copied from its
 // own file, never loaded whole.
@@ -134,22 +108,4 @@ func writeBundleFile(path string, generated time.Time, b reportBuild) (string, i
 		return "", 0, err
 	}
 	return hex.EncodeToString(h.Sum(nil)), cw.n, nil
-}
-
-// reportBundleBytes builds the ZIP and its manifest. It writes nothing and
-// records nothing: issuance is the caller's job.
-func (s *Service) reportBundleBytes(caseID string, now time.Time) ([]byte, report.Manifest, error) {
-	b, err := s.buildReport(caseID, now)
-	if err != nil {
-		return nil, report.Manifest{}, err
-	}
-	all := append([]report.File{
-		{Name: "report.html", Data: b.HTML},
-		{Name: report.ManifestName, Data: b.ManifestJSON},
-	}, b.Files...)
-	var buf bytes.Buffer
-	if err := report.BundleTo(&buf, now, all); err != nil {
-		return nil, report.Manifest{}, err
-	}
-	return buf.Bytes(), b.Manifest, nil
 }

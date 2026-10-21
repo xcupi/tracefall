@@ -460,3 +460,67 @@ legitimately has.
 See `docs/deployment.md`, "Transport security". A non-loopback bind needs TLS
 (`--tls-cert`/`--tls-key`) or an explicit `--insecure-http` behind a proxy.
 
+## Login throttling
+
+Failed logins are counted three ways, in memory (a restart is a legitimate reset,
+and a database write per guess would let the throttle itself be the attack):
+
+| Counter | Limit per 15 minutes | What it stops |
+|---|---|---|
+| user + address | 10 | one source guessing one account |
+| address | 30 | one source trying many accounts |
+| user, all sources | 100 | a guess spread over many addresses |
+
+A single per-username counter lets anyone lock any account by failing ten times,
+which is a denial of service against the administrator. With these, a source can
+exhaust only its own budget. To lock an account for everybody, an attacker must fail
+100 times from at least four addresses in one window, and an address that has already
+logged in as that user is not subject to the all-sources counter at all.
+
+**Which address is counted.** The peer's address. `X-Forwarded-For` is believed only
+when the peer is a proxy listed in `--trusted-proxies`; the header is read from the right
+and the first address that is not a trusted proxy is the client, so entries a client put
+at the left are not trusted. An unreadable entry counts the proxy rather than guessing.
+IPv6 is counted per /64, because one customer controls a whole /64 and counting single
+addresses would give an attacker 2^64 of them. Behind a proxy (`--insecure-http`) with
+no `--trusted-proxies`, every request would look like it came from the proxy, so the
+per-address counters are switched off and only the per-username limit applies; the
+server warns at start-up.
+
+**The security log.** A blocked client that keeps retrying writes one row per window,
+not one per retry. Every failed attempt that is tried, and the first refusal, records the source
+address; an address can have at most 30 failed attempts tried per window.
+
+Not covered: nothing stops an attacker with many addresses from locking an account for
+people who have never logged in from a known address. The 100-failure all-sources limit
+makes that expensive, not impossible. The throttle is not a substitute for strong
+passwords (12 characters minimum) and PBKDF2 (600,000 rounds); it bounds online guessing
+only.
+
+## Capacity
+
+Memory is bounded by limits the operator sets, not by how many requests arrive:
+
+- **Imports** (`TRACEFALL_MAX_IMPORTS`, default 1). An import parses every selected file
+  into memory before it saves any, so its memory grows with the collection. A second
+  import waits, shown as "Waiting for another import to finish", and a cancel while it
+  waits imports nothing.
+- **Report builds and analyses** (`TRACEFALL_MAX_HEAVY_OPS`, default 2). A request that is
+  queued gives up when its client does.
+- **Parser workers** (`TRACEFALL_PARSER_CONCURRENCY`). A parse that waits for a slot does
+  not spend its time limit.
+
+Downloads are not held in memory. The report bundle is written to a file, which is
+unlinked as soon as it is open (a crash leaves no copy of a case's report), and sent
+with its length and hashes. A stored report is served from its file with range support.
+The timeline (`GET /timeline`) is streamed from the database. The dashboard's Findings
+and Correlations tabs ask for only the events they cite (`POST /events/lookup`, at most
+1,000 ids per request) instead of downloading the whole timeline.
+
+**One database connection.** The store has a single SQLite connection. A cursor held open
+while the server writes to a slow client would stop every other request, so event streams
+are read a page at a time (2,000 events) and each page's cursor is closed before any
+event is sent. Between pages the connection is free. The price is that a stream no longer
+sees one instant of the data if it is written to meanwhile, and a full pass over a 363,000 event case is
+10-20% slower. See `docs/capacity.md` for measurements and for what this does not solve.
+

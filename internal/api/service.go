@@ -20,6 +20,7 @@
 package api
 
 import (
+	"context"
 	"crypto/sha256"
 	"crypto/sha512"
 	"encoding/hex"
@@ -43,6 +44,7 @@ import (
 	"tracefall/internal/correlate"
 	"tracefall/internal/detect"
 	"tracefall/internal/evtx"
+	"tracefall/internal/gate"
 	"tracefall/internal/ingest"
 	"tracefall/internal/investigate"
 	jumplist "tracefall/internal/jumplist"
@@ -170,7 +172,7 @@ type Service struct {
 	// jobs is: throttling state is operational, not forensic -- it must
 	// not survive a restart, must not be exported with a case, and must
 	// not add a database write per failed guess.
-	throttle *loginThrottle
+	throttle *loginGuard
 	// deletions tracks case deletions in progress, in memory only. See
 	// deleteprogress.go for why it must not be backed by the database.
 	deletions *deletionTracker
@@ -187,14 +189,69 @@ type Service struct {
 	// pathPolicy decides which server paths ingest may read. The zero value
 	// refuses server-path ingest; see evidence_policy.go.
 	pathPolicy evidencePathPolicy
+	// heavy bounds how many memory-heavy operations (report builds, analysis)
+	// run at once across the server; see heavyOp.
+	heavy *gate.Gate
+	// imports bounds how many imports run at once. An import holds every event
+	// of the files it parses in memory until they are saved, so its memory
+	// grows with the collection, and a second import doubles it.
+	imports *gate.Gate
+	// reqCtx is the request this copy of the Service serves, so a heavy
+	// operation that is queued gives up when its client does. Nil outside a
+	// request (the pipeline), where there is nothing to cancel.
+	reqCtx context.Context
+}
+
+// DefaultHeavyOps is how many report builds or analyses may run at once. Each
+// is bounded in memory (a few hundred MB on a 363,000 event case), so this is
+// the number that fixes the server's worst case instead of the number of
+// clients.
+const DefaultHeavyOps = 2
+
+// DefaultImports is how many imports run at once. One, because a single import
+// of a large collection already holds gigabytes (measured: about 5 GB for 363,000
+// events including the parser worker), and a second one waits its turn rather
+// than doubling that. Raise it with SetImportLimit on a machine with the memory.
+const DefaultImports = 1
+
+// SetImportLimit changes how many imports run at once. Call it before serving.
+func (s *Service) SetImportLimit(n int) { s.imports = gate.New(n) }
+
+// ImportStats reports the import gate's counters.
+func (s *Service) ImportStats() gate.Stats { return s.imports.Stats() }
+
+// SetHeavyLimit changes how many memory-heavy operations run at once. Call it
+// before serving.
+func (s *Service) SetHeavyLimit(n int) { s.heavy = gate.New(n) }
+
+// HeavyStats reports the gate's counters.
+func (s *Service) HeavyStats() gate.Stats { return s.heavy.Stats() }
+
+// WithRequest returns a copy of the Service bound to a request's context.
+func (s *Service) WithRequest(ctx context.Context) *Service {
+	c := *s
+	c.reqCtx = ctx
+	return &c
+}
+
+// heavyOp waits for a slot to run a memory-heavy operation. The returned
+// function gives the slot back. It fails only if the request is cancelled
+// while queued.
+func (s *Service) heavyOp() (release func(), err error) {
+	ctx := s.reqCtx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return s.heavy.Acquire(ctx)
 }
 
 func NewService(s *store.Store, files *casefiles.Store) *Service {
 	return &Service{
 		store: s, files: files,
 		extractLimits: archive.DefaultLimits, ad1Limits: ad1.DefaultLimits,
-		jobs: newImportJobs(), throttle: newLoginThrottle(),
+		jobs: newImportJobs(), throttle: newLoginGuard(),
 		deletions: newDeletionTracker(), pipe: newPipelineManager(),
+		heavy: gate.New(DefaultHeavyOps), imports: gate.New(DefaultImports),
 	}
 }
 
@@ -1151,6 +1208,28 @@ func (s *Service) importEvidence(caseID, collectionID string, sourceFileIDs []st
 	if err != nil || collection.CaseID != caseID {
 		return ImportResult{}, ErrCollectionNotFound
 	}
+
+	// Wait for a place to import. Everything above is cheap and is refused
+	// at once; everything below can take gigabytes. A job that is cancelled
+	// while it waits leaves with nothing imported, which is a cancelled
+	// import, not a failed one.
+	ctx := prog.context()
+	if ctx == nil {
+		ctx = s.reqCtx
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	prog.phase(PhaseQueued)
+	releaseImport, err := s.imports.Acquire(ctx)
+	if err != nil {
+		if prog != nil && prog.job != nil {
+			return ImportResult{Collection: collection, Cancelled: true, Unprocessed: len(sourceFileIDs)}, nil
+		}
+		return ImportResult{}, err
+	}
+	defer releaseImport()
+	prog.phase(PhasePreparing)
 
 	// The selection is de-duplicated before anything is parsed.
 	//
@@ -2395,6 +2474,15 @@ type AnalyzeResultSummary struct {
 // collection is added recomputes findings/correlations across the
 // complete, updated evidence set rather than appending to stale ones.
 func (s *Service) AnalyzeCase(caseID string) (AnalyzeResultSummary, error) {
+	release, err := s.heavyOp()
+	if err != nil {
+		return AnalyzeResultSummary{}, err
+	}
+	defer release()
+	return s.analyzeCase(caseID)
+}
+
+func (s *Service) analyzeCase(caseID string) (AnalyzeResultSummary, error) {
 	c, err := s.GetCase(caseID)
 	if err != nil {
 		return AnalyzeResultSummary{}, err
@@ -2527,6 +2615,43 @@ func (s *Service) Timeline(caseID, collectionID string) ([]model.Event, error) {
 		return s.store.ListEventsByCollection(collectionID)
 	}
 	return s.store.ListEvents(caseID)
+}
+
+// ForEachTimelineEvent calls fn for each event of the case (or of one
+// collection), in time order, reading one row at a time. Use it to send a
+// timeline: Timeline holds every event at once, about 2 GB on a 363,000 event
+// case.
+func (s *Service) ForEachTimelineEvent(caseID, collectionID string, fn func(model.Event) error) error {
+	if collectionID != "" {
+		return s.store.ForEachEventInCollection(collectionID, fn)
+	}
+	return s.store.ForEachEvent(caseID, fn)
+}
+
+// MaxEventLookup bounds one EventsLookup request.
+const MaxEventLookup = 1000
+
+// ErrTooManyIDs means a lookup named more events than one request may.
+var ErrTooManyIDs = fmt.Errorf("at most %d event ids per request", MaxEventLookup)
+
+// EventsLookup returns the named events of the case that exist, in no
+// particular order. An id from another case is skipped, not returned: a
+// lookup must never read across cases.
+func (s *Service) EventsLookup(caseID string, ids []string) ([]model.Event, error) {
+	if len(ids) > MaxEventLookup {
+		return nil, ErrTooManyIDs
+	}
+	events, err := s.store.EventsByIDs(ids)
+	if err != nil {
+		return nil, err
+	}
+	out := events[:0]
+	for _, e := range events {
+		if e.CaseID == caseID {
+			out = append(out, e)
+		}
+	}
+	return out, nil
 }
 
 func (s *Service) Findings(caseID string) ([]model.Finding, error) {

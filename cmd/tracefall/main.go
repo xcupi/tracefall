@@ -57,7 +57,8 @@ func main() {
 		logger.Error("failed to restrict storage permissions", "error", err)
 		os.Exit(1)
 	}
-	enableParserIsolation(logger)
+	capacity := serverCapacityFromEnv()
+	enableParserIsolation(logger, capacity)
 	db, err := store.Open(cfg.DBPath)
 	if err != nil {
 		logger.Error("failed to open database", "error", err, "path", cfg.DBPath)
@@ -67,6 +68,7 @@ func main() {
 
 	files := casefiles.NewStore(cfg.DataDir)
 	svc := api.NewService(db, files)
+	capacity.apply(svc, logger)
 
 	// Server-path ingest reads folders that already sit on this machine. The
 	// policy decides which ones; see internal/api/evidence_policy.go.
@@ -141,9 +143,15 @@ func main() {
 	defer stopPipeline()
 
 	authCfg := api.AuthConfig{
-		Enabled:       cfg.AuthEnabled,
-		SessionTTL:    cfg.SessionTTL(),
-		SecureCookies: cfg.SecureCookies,
+		Enabled:        cfg.AuthEnabled,
+		SessionTTL:     cfg.SessionTTL(),
+		SecureCookies:  cfg.SecureCookies,
+		TrustedProxies: cfg.TrustedProxies,
+		BehindProxy:    cfg.InsecureHTTP,
+	}
+	if cfg.InsecureHTTP && len(cfg.TrustedProxies) == 0 {
+		logger.Warn("behind a proxy with no --trusted-proxies: failed logins cannot be counted per client address, " +
+			"so only the per-username limit applies")
 	}
 
 	mux := http.NewServeMux()

@@ -196,13 +196,16 @@ func (h *handlers) verifyAudit(w http.ResponseWriter, r *http.Request) {
 // was generated.
 func (h *handlers) reportLatest(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	name, b, err := h.as(r).LatestStoredReport(id)
+	name, f, info, err := h.as(r).OpenLatestStoredReport(id)
 	if h.fail(w, err) {
 		return
 	}
+	defer f.Close()
 	w.Header().Set("Content-Type", "application/zip")
 	w.Header().Set("Content-Disposition", `attachment; filename="`+name+`"`)
-	w.Write(b)
+	// Streamed from the file, with Range support: a large bundle is never held
+	// in memory.
+	http.ServeContent(w, r, name, info.ModTime(), f)
 }
 
 func (h *handlers) exportCase(w http.ResponseWriter, r *http.Request) {

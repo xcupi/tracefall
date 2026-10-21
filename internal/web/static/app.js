@@ -6560,6 +6560,7 @@ async function runImportWithProgress(caseId, collectionId, ids, progressHost, co
 }
 
 const IMPORT_PHASE_LABELS = {
+  queued: "Waiting for another import to finish",
   preparing: "Preparing",
   parsing: "Parsing files",
   enriching: "Resolving hosts",
@@ -7747,12 +7748,38 @@ function buildStatusIndex(statuses) {
   return idx;
 }
 
+// fetchEventsById returns {id: event} for the events the ids name. The findings
+// and correlations tabs used to download the whole timeline to look these up,
+// which on a 363,000 event case was 482 MB for the browser and about 2 GB of
+// memory on the server, every time the tab opened. This asks only for what is
+// cited, in requests of at most 1000 ids, four at a time.
+async function fetchEventsById(caseId, ids) {
+  const unique = [...new Set((ids || []).filter(Boolean))];
+  const CHUNK = 1000;
+  const PARALLEL = 4;
+  const chunks = [];
+  for (let i = 0; i < unique.length; i += CHUNK) chunks.push(unique.slice(i, i + CHUNK));
+  const byId = {};
+  let next = 0;
+  async function worker() {
+    while (next < chunks.length) {
+      const chunk = chunks[next++];
+      const events = await api(`/cases/${caseId}/events/lookup`, {
+        method: "POST",
+        body: JSON.stringify({ ids: chunk }),
+      });
+      for (const e of events) byId[e.id] = e;
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(PARALLEL, chunks.length) }, worker));
+  return byId;
+}
+
 async function renderFindingsTab(content, caseId) {
   content.innerHTML = `<p class="empty">Loading findings...</p>`;
-  const [findings, correlations, timeline, statuses] = await Promise.all([
+  const [findings, correlations, statuses] = await Promise.all([
     api(`/cases/${caseId}/findings`),
     api(`/cases/${caseId}/correlations`).catch(() => []),
-    api(`/cases/${caseId}/timeline`).catch(() => []),
     api(`/cases/${caseId}/analyst-status`).catch(() => []),
   ]);
   const statusIdx = buildStatusIndex(statuses);
@@ -7760,7 +7787,8 @@ async function renderFindingsTab(content, caseId) {
     content.innerHTML = `<p class="empty">No findings yet. Run analysis first.</p>`;
     return;
   }
-  const eventsById = Object.fromEntries(timeline.map((e) => [e.id, e]));
+  const eventsById = await fetchEventsById(caseId, findings.flatMap((f) => f.supporting_event_ids || []))
+    .catch(() => ({}));
   const eventCorrIdx = buildEventCorrelationIndex(correlations);
   // Host/user/collection options come from the findings' own supporting
   // events -- the same join findingMatchesFilters uses to match on them,
@@ -8948,16 +8976,16 @@ const CORR_LABELS = {
 // describe a link between events, not a story with a beginning and end).
 async function renderCorrelationsTab(content, caseId) {
   content.innerHTML = `<p class="empty">Loading correlated activity...</p>`;
-  const [corrs, timeline, findings] = await Promise.all([
+  const [corrs, findings] = await Promise.all([
     api(`/cases/${caseId}/correlations`),
-    api(`/cases/${caseId}/timeline`).catch(() => []),
     api(`/cases/${caseId}/findings`).catch(() => []),
   ]);
   if (corrs.length === 0) {
     content.innerHTML = `<p class="empty">No correlations yet. Run analysis first.</p>`;
     return;
   }
-  const eventsById = Object.fromEntries(timeline.map((e) => [e.id, e]));
+  const eventsById = await fetchEventsById(caseId, corrs.flatMap((c) => c.event_ids || []))
+    .catch(() => ({}));
   const eventFindingIdx = buildEventFindingIndex(findings);
   const chains = corrs.filter((c) => isChainCorrelationType(c.correlation_type));
   const others = corrs.filter((c) => !isChainCorrelationType(c.correlation_type));

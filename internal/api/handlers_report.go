@@ -2,7 +2,9 @@ package api
 
 import (
 	"errors"
+	"io"
 	"net/http"
+	"strconv"
 
 	"tracefall/internal/report"
 )
@@ -40,13 +42,19 @@ func (h *handlers) reportHTML(w http.ResponseWriter, r *http.Request) {
 // reportBundle serves the report with its manifest and CSV attachments.
 func (h *handlers) reportBundle(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	z, m, err := h.as(r).ReportBundle(id)
+	d, err := h.as(r).ReportBundleFile(id)
+	if isCancelled(err) {
+		return // the client left while queued; nobody is listening
+	}
 	if h.fail(w, err) {
 		return
 	}
+	defer d.Close()
 	reportHeaders(w, "application/zip", "tracefall-report-"+id+".zip", false)
-	w.Header().Set("X-Tracefall-Report-SHA256", m.Report.SHA256)
-	_, _ = w.Write(z)
+	w.Header().Set("X-Tracefall-Report-SHA256", d.ReportSHA256)
+	w.Header().Set("X-Tracefall-Bundle-SHA256", d.BundleSHA256)
+	w.Header().Set("Content-Length", strconv.FormatInt(d.Size, 10))
+	_, _ = io.Copy(w, d.File)
 }
 
 // reportPDF serves the report printed to PDF. Where the server has no

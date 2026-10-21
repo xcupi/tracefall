@@ -14,7 +14,6 @@ import (
 	"io"
 	"time"
 
-	"tracefall/internal/investigate"
 	"tracefall/internal/model"
 	"tracefall/internal/version"
 )
@@ -76,11 +75,13 @@ func (s *Service) ExportCase(caseID string) (CaseExport, error) {
 	if err != nil {
 		return CaseExport{}, fmt.Errorf("loading correlations: %w", err)
 	}
-	events, err := s.store.ListEvents(caseID)
+	// Streamed from the store: the export carries no events of its own, only
+	// the investigations computed from them, and holding every event of the
+	// case for that cost about a gigabyte on a 363,000 event case.
+	investigations, err := s.caseInvestigations(caseID, findings, correlations)
 	if err != nil {
-		return CaseExport{}, fmt.Errorf("loading events: %w", err)
+		return CaseExport{}, fmt.Errorf("computing investigations: %w", err)
 	}
-	investigations := investigate.Run(caseID, events, findings, correlations)
 	attackTechniques, err := s.AttackSummary(caseID)
 	if err != nil {
 		return CaseExport{}, fmt.Errorf("loading ATT&CK summary: %w", err)

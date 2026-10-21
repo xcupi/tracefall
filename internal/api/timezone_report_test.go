@@ -3,6 +3,7 @@ package api
 import (
 	"archive/zip"
 	"bytes"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -99,9 +100,14 @@ func TestGenerateCaseReport_StoresTheBundleAndAuditsIt(t *testing.T) {
 	if !strings.HasPrefix(st.File, "report-") || !strings.HasSuffix(st.File, ".zip") {
 		t.Errorf("file name %q", st.File)
 	}
-	name, body, err := svc.LatestStoredReport(c.ID)
+	name, lf, linfo, err := svc.OpenLatestStoredReport(c.ID)
 	if err != nil {
-		t.Fatalf("LatestStoredReport: %v", err)
+		t.Fatalf("OpenLatestStoredReport: %v", err)
+	}
+	body, err := io.ReadAll(lf)
+	lf.Close()
+	if err != nil || int64(len(body)) != linfo.Size() {
+		t.Fatalf("reading the stored report: %v (%d bytes, file says %d)", err, len(body), linfo.Size())
 	}
 	if name != st.File {
 		t.Errorf("latest = %q, generated = %q", name, st.File)

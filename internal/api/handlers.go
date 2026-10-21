@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bufio"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -133,6 +134,7 @@ func NewRouterWithAuth(svc *Service, logger *slog.Logger, maxUploadBytes int64, 
 	// never collide.
 	mux.HandleFunc("GET /api/cases/{id}/events", h.eventSearch)
 	mux.HandleFunc("GET /api/cases/{id}/events/facets", h.eventFacets)
+	mux.HandleFunc("POST /api/cases/{id}/events/lookup", h.eventsLookup)
 	mux.HandleFunc("GET /api/cases/{id}/events/{eventID}", h.eventProvenance)
 	// Phase 21: the Photo Map. geo/photos is a second VIEW of the
 	// image_gps events the EXIF parser already produced -- it creates no
@@ -220,7 +222,7 @@ func NewRouterWithAuth(svc *Service, logger *slog.Logger, maxUploadBytes int64, 
 // shared h.svc carries no identity and would record every action as the
 // generic local operator.
 func (h *handlers) as(r *http.Request) *Service {
-	return h.svc.WithActor(principalFrom(r))
+	return h.svc.WithActor(principalFrom(r)).WithRequest(r.Context())
 }
 
 type handlers struct {
@@ -668,7 +670,49 @@ func (h *handlers) analyzeCase(w http.ResponseWriter, r *http.Request) {
 func (h *handlers) timeline(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	collectionID := r.URL.Query().Get("collection")
-	events, err := h.as(r).Timeline(id, collectionID)
+	// Sent as it is read, so the server's memory does not depend on the size
+	// of the case or on how many people ask at once.
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	bw := bufio.NewWriterSize(w, 64<<10)
+	bw.WriteByte('[')
+	enc := json.NewEncoder(bw)
+	first := true
+	err := h.as(r).ForEachTimelineEvent(id, collectionID, func(e model.Event) error {
+		if !first {
+			bw.WriteByte(',')
+		}
+		first = false
+		return enc.Encode(e)
+	})
+	if err == nil {
+		bw.WriteByte(']')
+		err = bw.Flush()
+	}
+	if err != nil {
+		// The status line is already sent. Ending the response cleanly would
+		// hand the client a truncated array that parses as valid JSON only by
+		// accident, so the connection is cut instead.
+		h.log.Error("timeline stream failed", "case", id, "error", err)
+		panic(http.ErrAbortHandler)
+	}
+}
+
+// eventsLookup returns the named events. The dashboard asks for the events its
+// findings and correlations cite instead of downloading the whole timeline.
+func (h *handlers) eventsLookup(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	var req struct {
+		IDs []string `json:"ids"`
+	}
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	events, err := h.as(r).EventsLookup(id, req.IDs)
+	if errors.Is(err, ErrTooManyIDs) {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	if h.fail(w, err) {
 		return
 	}
