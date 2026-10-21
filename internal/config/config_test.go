@@ -224,3 +224,42 @@ func TestLoad_CertificateWithoutKeyIsRefused(t *testing.T) {
 		t.Fatal("a key without a certificate was accepted")
 	}
 }
+
+func TestParseTrustedProxies(t *testing.T) {
+	got, err := ParseTrustedProxies(" 10.0.0.5 , 192.168.1.0/24,::1,  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"10.0.0.5/32", "192.168.1.0/24", "::1/128"}
+	if len(got) != len(want) {
+		t.Fatalf("got %v", got)
+	}
+	for i, p := range got {
+		if p.String() != want[i] {
+			t.Errorf("entry %d = %s, want %s", i, p, want[i])
+		}
+	}
+	if none, err := ParseTrustedProxies(""); err != nil || len(none) != 0 {
+		t.Errorf("empty list: %v %v", none, err)
+	}
+	// A typo must stop the server, not leave a proxy silently untrusted.
+	for _, bad := range []string{"10.0.0", "10.0.0.0/33", "proxy.example.com", "10.0.0.5,,oops"} {
+		if _, err := ParseTrustedProxies(bad); err == nil {
+			t.Errorf("%q was accepted", bad)
+		}
+	}
+}
+
+func TestLoad_ReadsTrustedProxiesFromFlagAndEnvironment(t *testing.T) {
+	cfg, err := Load([]string{"-trusted-proxies=10.0.0.5"}, fakeEnv(nil))
+	if err != nil || len(cfg.TrustedProxies) != 1 {
+		t.Fatalf("flag: %v %v", cfg.TrustedProxies, err)
+	}
+	cfg, err = Load(nil, fakeEnv(map[string]string{"TRACEFALL_TRUSTED_PROXIES": "10.0.0.0/8"}))
+	if err != nil || len(cfg.TrustedProxies) != 1 {
+		t.Fatalf("env: %v %v", cfg.TrustedProxies, err)
+	}
+	if _, err := Load([]string{"-trusted-proxies=nonsense"}, fakeEnv(nil)); err == nil {
+		t.Fatal("an unreadable proxy list was accepted")
+	}
+}

@@ -56,7 +56,7 @@ func (h *handlers) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	token, user, err := h.svc.Login(req.Username, req.Password, h.auth.SessionTTL)
+	token, user, err := h.svc.LoginFrom(req.Username, req.Password, h.auth.SessionTTL, h.auth.clientAddr(r))
 	if err != nil {
 		switch {
 		case errors.Is(err, ErrTooManyAttempts):
@@ -184,7 +184,7 @@ func (h *handlers) changeOwnPassword(w http.ResponseWriter, r *http.Request) {
 	// Re-authenticate with the NEW password to issue a fresh session.
 	// Logging in again rather than minting a session directly keeps one
 	// code path responsible for session creation.
-	token, user, err := h.svc.Login(p.Username, req.NewPassword, h.auth.SessionTTL)
+	token, user, err := h.svc.LoginFrom(p.Username, req.NewPassword, h.auth.SessionTTL, h.auth.clientAddr(r))
 	if err != nil {
 		// The password change succeeded; only the convenience re-login
 		// failed. Clear the dead cookies and let the user sign in again

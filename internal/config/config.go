@@ -14,6 +14,7 @@ import (
 	"flag"
 	"fmt"
 	"net"
+	"net/netip"
 	"strconv"
 	"strings"
 	"time"
@@ -51,6 +52,11 @@ type Config struct {
 	// is the operator's explicit statement; without it, and without TLS, a
 	// non-loopback bind is refused.
 	InsecureHTTP bool
+	// TrustedProxies are the reverse proxies (IP or CIDR) whose
+	// X-Forwarded-For header is believed when counting failed logins per
+	// client address. Without it, behind a proxy, every client looks like the
+	// proxy and the per-address login counter is switched off.
+	TrustedProxies []netip.Prefix
 }
 
 // TLSEnabled reports whether Tracefall terminates TLS itself.
@@ -169,6 +175,9 @@ func Load(args []string, getenv func(string) string) (Config, error) {
 	insecureHTTP := fs.Bool("insecure-http", envOrBool(getenv, "TRACEFALL_INSECURE_HTTP", false),
 		"allow plain HTTP on a non-loopback bind, for a deployment behind a TLS-terminating reverse proxy")
 
+	trustedProxies := fs.String("trusted-proxies", envOr(getenv, "TRACEFALL_TRUSTED_PROXIES", ""),
+		"comma-separated IPs or CIDRs of reverse proxies whose X-Forwarded-For header is trusted for login throttling")
+
 	if err := fs.Parse(args); err != nil {
 		return Config{}, err
 	}
@@ -181,6 +190,11 @@ func Load(args []string, getenv func(string) string) (Config, error) {
 	if cfg.TLSEnabled() {
 		cfg.SecureCookies = true // cookies must not ride a cleartext request
 	}
+	proxies, err := ParseTrustedProxies(*trustedProxies)
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.TrustedProxies = proxies
 
 	if err := cfg.Validate(); err != nil {
 		return Config{}, err
@@ -220,4 +234,31 @@ func envOrInt(getenv func(string) string, key string, def int64) int64 {
 		return def
 	}
 	return n
+}
+
+// ParseTrustedProxies reads a comma-separated list of IPs and CIDRs. A bare IP
+// is a single-address prefix. An unreadable entry is an error, not skipped:
+// a typo must not silently leave the header untrusted or, worse, widen it.
+func ParseTrustedProxies(list string) ([]netip.Prefix, error) {
+	var out []netip.Prefix
+	for _, item := range strings.Split(list, ",") {
+		item = strings.TrimSpace(item)
+		if item == "" {
+			continue
+		}
+		if strings.Contains(item, "/") {
+			p, err := netip.ParsePrefix(item)
+			if err != nil {
+				return nil, fmt.Errorf("trusted-proxies: %q is not a valid CIDR", item)
+			}
+			out = append(out, p.Masked())
+			continue
+		}
+		a, err := netip.ParseAddr(item)
+		if err != nil {
+			return nil, fmt.Errorf("trusted-proxies: %q is not a valid IP address", item)
+		}
+		out = append(out, netip.PrefixFrom(a.Unmap(), a.Unmap().BitLen()))
+	}
+	return out, nil
 }

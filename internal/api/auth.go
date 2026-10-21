@@ -97,14 +97,18 @@ type throttleEntry struct {
 	first time.Time
 }
 
-func newLoginThrottle() *loginThrottle {
+func newLoginThrottle() *loginThrottle { return newThrottleWithMax(10) }
+
+// newThrottleWithMax counts failures per key and refuses the key once it has
+// max of them inside the window. 10 in 15 minutes is generous for a mistyped
+// password and useless for online guessing against a 12-character minimum;
+// offline attack is bounded by PBKDF2, not by this. loginGuard combines three
+// of these (see loginguard.go).
+func newThrottleWithMax(max int) *loginThrottle {
 	return &loginThrottle{
 		failures: map[string]*throttleEntry{},
-		// 10 attempts in 15 minutes: generous for a mistyped password,
-		// useless for an online guessing attack against a 12-character
-		// minimum. Offline attack is bounded by PBKDF2, not by this.
-		max:    10,
-		window: 15 * time.Minute,
+		max:      max,
+		window:   15 * time.Minute,
 	}
 }
 
@@ -206,13 +210,27 @@ func (p Principal) Can(role string) bool {
 // stored. The token is never logged, never audited, and never placed in
 // a URL.
 func (s *Service) Login(username, password string, ttl time.Duration) (string, model.User, error) {
+	return s.LoginFrom(username, password, ttl, "")
+}
+
+// LoginFrom is Login with the address the request came from, which the
+// throttle counts against (see loginGuard). An empty addr means it is unknown.
+func (s *Service) LoginFrom(username, password string, ttl time.Duration, addr string) (string, model.User, error) {
 	username = strings.TrimSpace(username)
 	key := strings.ToLower(username)
 	now := time.Now().UTC()
+	from := ""
+	if addr != "" {
+		from = " (from " + addr + ")"
+	}
 
-	if !s.throttle.allowed(key, now) {
-		s.auditSecurity("", model.AuditLoginFailed, model.TargetUser, "", username,
-			"Login blocked: too many failed attempts")
+	if !s.throttle.allowed(key, addr, now) {
+		// One security-log row per blocked client and window. Logging every
+		// refused retry would let a loop fill the log.
+		if s.throttle.shouldLogBlock(key, addr, now) {
+			s.auditSecurity("", model.AuditLoginFailed, model.TargetUser, "", username,
+				"Login blocked: too many failed attempts"+from+"; further refusals in this window are not logged")
+		}
 		return "", model.User{}, ErrTooManyAttempts
 	}
 	// Password verification is deliberately expensive (600k PBKDF2 rounds), so
@@ -231,17 +249,17 @@ func (s *Service) Login(username, password string, ttl time.Duration) (string, m
 		// An unknown username still costs a password verification, so the
 		// response time does not reveal whether the account exists.
 		_, _ = auth.VerifyPassword(dummyHash, password)
-		s.throttle.recordFailure(key, now)
+		s.throttle.failure(key, addr, now)
 		s.auditSecurity("", model.AuditLoginFailed, model.TargetUser, "", username,
-			"Login failed: invalid credentials")
+			"Login failed: invalid credentials"+from)
 		return "", model.User{}, ErrInvalidCredentials
 	}
 
 	ok, verr := auth.VerifyPassword(u.PasswordHash, password)
 	if verr != nil || !ok {
-		s.throttle.recordFailure(key, now)
+		s.throttle.failure(key, addr, now)
 		s.auditSecurity("", model.AuditLoginFailed, model.TargetUser, u.ID, username,
-			"Login failed: invalid credentials")
+			"Login failed: invalid credentials"+from)
 		return "", model.User{}, ErrInvalidCredentials
 	}
 	if u.Disabled {
@@ -267,8 +285,8 @@ func (s *Service) Login(username, password string, ttl time.Duration) (string, m
 		return "", model.User{}, fmt.Errorf("creating session: %w", err)
 	}
 	_ = s.store.TouchUserLogin(u.ID, now)
-	s.throttle.reset(key)
-	s.auditSecurity("", model.AuditLoginSucceeded, model.TargetUser, u.ID, u.Username, "Login succeeded")
+	s.throttle.success(key, addr, now)
+	s.auditSecurity("", model.AuditLoginSucceeded, model.TargetUser, u.ID, u.Username, "Login succeeded"+from)
 	return token, u, nil
 }
 

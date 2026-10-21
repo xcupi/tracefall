@@ -5,6 +5,7 @@ import (
 	"crypto/subtle"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"strings"
 	"time"
@@ -104,6 +105,14 @@ type AuthConfig struct {
 	// HTTPS. Off by default because Tracefall speaks plain HTTP by
 	// design; setting it without TLS would make login silently fail.
 	SecureCookies bool
+	// TrustedProxies are the addresses of reverse proxies whose
+	// X-Forwarded-For header is believed. Empty means the header is never
+	// used.
+	TrustedProxies []netip.Prefix
+	// BehindProxy says a proxy terminates TLS in front of Tracefall
+	// (--insecure-http). With no TrustedProxies, every request then appears to
+	// come from the proxy, so failed logins are not counted per address.
+	BehindProxy bool
 }
 
 const (
