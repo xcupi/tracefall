@@ -44,6 +44,11 @@ type Analysis struct {
 	CollectedAt time.Time         `json:"collected_at"`
 	Info        map[string]string `json:"info"`
 	Plugins     []PluginResult    `json:"plugins"`
+	// Recovered is what was read back from files found in memory. It is empty
+	// when recovery was off, the plugin was missing, or nothing qualified;
+	// RecoveryNote says which.
+	Recovered    []RecoveredFile `json:"recovered_files,omitempty"`
+	RecoveryNote string          `json:"recovery_note,omitempty"`
 }
 
 // plan is the ordered set of plugins, by logical name, with the names
@@ -175,6 +180,14 @@ func Collect(ctx context.Context, r *Runner, image string, progress func(plugin 
 		}
 		res.Status, res.Rows = StatusOK, rows
 		a.Plugins = append(a.Plugins, res)
+	}
+	for _, pr := range a.Plugins {
+		if pr.Logical == "filescan" && pr.Status == StatusOK {
+			if err := ctx.Err(); err != nil {
+				return a, err
+			}
+			a.Recovered, a.RecoveryNote = r.Recover(ctx, image, pr.Rows, available, progress)
+		}
 	}
 	return a, nil
 }

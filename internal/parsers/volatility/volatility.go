@@ -478,7 +478,7 @@ func (p Parser) Parse(absPath string) (parsers.ParseResult, error) {
 	}
 
 	// ---- consoles and file objects
-	var consoleNote, filesNote string
+	var consoleNote, filesNote, recoveryNote string
 	if haveSnapshot {
 		cmds, screens, notFound := consoleEvents(rowsOf, pluginName, snapshot, add)
 		_, ranCmd := rowsOf["cmdscan"]
@@ -489,6 +489,10 @@ func (p Parser) Parse(absPath string) (parsers.ParseResult, error) {
 			consoleNote = consoleHostNote
 		case ranCmd || ranCons:
 			consoleNote = consoleEmptyNote
+		}
+		recoveryNote = recoveredEvents(a.Recovered, snapshot, add)
+		if recoveryNote == "" {
+			recoveryNote = a.RecoveryNote
 		}
 		if notFound > 0 {
 			consoleNote = strings.TrimSpace(consoleNote + fmt.Sprintf(" %d console(s) were found but their structures could not be read.", notFound))
@@ -519,6 +523,9 @@ func (p Parser) Parse(absPath string) (parsers.ParseResult, error) {
 		}
 		if filesNote != "" {
 			extra["file_objects"] = filesNote
+		}
+		if recoveryNote != "" {
+			extra["file_recovery"] = recoveryNote
 		}
 		if truncated {
 			extra["truncated"] = fmt.Sprintf("event cap %d reached", maxEvents)

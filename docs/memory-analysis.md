@@ -80,6 +80,28 @@ was not contained. There is NO memory limit (Volatility maps the whole image).
   counted in the snapshot event's `file_objects` (routine locations, other
   types, unreadable names). Names are matched against files delivered over
   HTTP in a capture by the correlation `web_to_host`.
+- Recovered files (`windows.dumpfiles`, after `filescan`): up to 60 runnable
+  files (executables, libraries, scripts) outside the operating system's
+  locations, users' and temporary locations first, browser caches last. Each is
+  dumped by its file-object address into a private directory inside the
+  sandbox's cache directory, inspected without being run (`internal/payload`),
+  and deleted: only hashes and the inspection are kept.
+  `file_content_from_memory` has `sha256`/`md5`/`sha1`, `file_signature`, the
+  parts of a Windows program (machine, sections, imports, injection APIs,
+  exports, claimed build time), indicators, and readable strings.
+  - **What comes back is what was in memory.** A page that was not resident
+    returns as zeros. `zero_pages` says how many; at a tenth or more the event
+    is `sparse=true`, and indicators about something being absent (few imports,
+    no signature, malformed PE) are withheld and listed in
+    `indicators_withheld`, because the part may simply not have been resident.
+  - An image-section dump is laid out as mapped, so its hash is not the hash of
+    the file on disk. A data-section dump is the cached file data, and equals the
+    file only when every page was cached.
+  - The snapshot event's `file_recovery` counts what was recovered, what was not
+    in memory, what was too large (32 MiB, sized but not read) and what failed.
+    A file not in memory says nothing about whether it existed.
+  - When a delivered object (see `web_to_host`) has the same SHA-256 as
+    recovered bytes, the correlation says the content is the same.
 - Snapshot: one event at the image's system time with Volatility version,
   isolation and plugin outcomes.
 
@@ -130,4 +152,4 @@ console was empty, so command rows come from constructed fixtures. An older
 Windows (consoles hosted by csrss.exe) yields nothing from these plugins.
 
 Not covered: Linux/macOS memory, pagefile/hiberfil, driver/handle/registry
-plugins, dumping files out of memory for payload inspection, YARA scanning.
+plugins, process dumping, YARA scanning.

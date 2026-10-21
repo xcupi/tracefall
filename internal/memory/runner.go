@@ -97,6 +97,12 @@ type Config struct {
 	Timeout time.Duration
 	// MaxOutputBytes bounds one run's output. Default 256 MiB.
 	MaxOutputBytes int64
+	// DumpMaxFiles bounds how many files are recovered from an image for
+	// inspection. Zero means 60; a negative number turns recovery off.
+	DumpMaxFiles int
+	// DumpMaxBytes bounds one recovered file. Larger ones are not read.
+	// Default 32 MiB.
+	DumpMaxBytes int64
 	// AllowUnsandboxed permits running without bubblewrap.
 	AllowUnsandboxed bool
 }
@@ -377,11 +383,25 @@ func classify(runErr error, stderr string) error {
 
 // Run runs one plugin against image and returns its raw JSON output.
 func (r *Runner) Run(ctx context.Context, image, plugin string, extra ...string) ([]byte, RunInfo, error) {
+	return r.RunInto(ctx, image, "", plugin, extra...)
+}
+
+// RunInto is Run for a plugin that writes files. outDir must lie inside the
+// runner's cache directory, which is the only writable path the sandbox has.
+func (r *Runner) RunInto(ctx context.Context, image, outDir, plugin string, extra ...string) ([]byte, RunInfo, error) {
 	args := []string{"-q", "-r", "json", "-f", image}
 	for _, d := range r.cfg.SymbolDirs {
 		args = append(args, "-s", d)
 	}
-	args = append(args, "--cache-path", r.cfg.CacheDir, plugin)
+	args = append(args, "--cache-path", r.cfg.CacheDir)
+	if outDir != "" {
+		rel, err := filepath.Rel(r.cfg.CacheDir, outDir)
+		if err != nil || rel == "." || strings.HasPrefix(rel, "..") {
+			return nil, RunInfo{}, fmt.Errorf("memory: output directory %q is not inside the cache directory", outDir)
+		}
+		args = append(args, "-o", outDir)
+	}
+	args = append(args, plugin)
 	args = append(args, extra...)
 	return r.run(ctx, image, args, r.cfg.MaxOutputBytes)
 }

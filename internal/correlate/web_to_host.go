@@ -177,7 +177,7 @@ func BuildWebToHost(caseID string, capture, host []model.Event, reg *hostid.Regi
 			// A file object in a memory image is dated to the capture of the
 			// image, which can be long after the transfer; for it only the
 			// order matters, since it shows the file was still around then.
-			if h.EventType != model.EventMemoryFile && ts.After(at.Add(webToHostWindow)) {
+			if h.EventType != model.EventMemoryFile && h.EventType != model.EventMemoryFileContent && ts.After(at.Add(webToHostWindow)) {
 				continue
 			}
 			seen[h.ID] = true
@@ -219,6 +219,16 @@ func BuildWebToHost(caseID string, capture, host []model.Event, reg *hostid.Regi
 				break
 			}
 		}
+		sameBytes := false
+		for _, m := range matched {
+			if m.EventType == model.EventMemoryFileContent && m.Extra["sha256"] == o.sha {
+				sameBytes = true
+			}
+		}
+		matchNote := "The match is by file name and order in time, not by content: the host's records do not carry the file's hash, so this shows a file of the same name appeared, not that it is the same file. "
+		if sameBytes {
+			matchNote = "Bytes recovered from the host's memory have the same SHA-256 as the object that was delivered, so the content is the same, not just the name. "
+		}
 		kind := o.sig
 		if kind == "" {
 			kind = "unrecognised content"
@@ -229,10 +239,10 @@ func BuildWebToHost(caseID string, capture, host []model.Event, reg *hostid.Regi
 			Description: fmt.Sprintf(
 				"The capture shows %s (%s, %s bytes, SHA-256 %s) returned by %s with status %s to %s; %s. "+
 					"%d event(s) on %s name a file called %q within %s after it. %s "+
-					"The match is by file name and order in time, not by content: the host's records do not carry the file's hash, so this shows a file of the same name appeared, not that it is the same file. "+
+					"%s"+
 					"The capture shows the bytes crossed the wire; the host events are what show the file existing or running. Confirm with the file itself.",
 				o.name, kind, o.size, o.sha, o.ev.NetworkDest, o.ev.Extra["status"], o.ev.NetworkSource, clientNote,
-				len(seen), strings.Join(hostList, ", "), o.name, webToHostWindow, clockNote),
+				len(seen), strings.Join(hostList, ", "), o.name, webToHostWindow, clockNote, matchNote),
 			EventIDs: ids, FirstSeen: at, LastSeen: laterOf(at, matched[len(matched)-1].Timestamp),
 		})
 		if len(out) >= maxWebToHost {

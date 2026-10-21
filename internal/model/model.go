@@ -912,6 +912,12 @@ const (
 	// the file was open or cached, not that it still exists on disk, and it
 	// carries no content hash.
 	EventMemoryFile = "file_object_in_memory"
+	// EventMemoryFileContent is what was read back of a file from memory and
+	// inspected without running it: its hash, what it is by its bytes, and the
+	// properties of a Windows program. The bytes are what memory held (the
+	// resident pages, laid out as the cache or the loader had them), so the
+	// hash is the hash of that, not necessarily of the file on disk.
+	EventMemoryFileContent = "file_content_from_memory"
 
 	// EventImageGPSRecorded is a coordinate an image's EXIF GPS block
 	// recorded. The position is OBSERVED in the file; any country derived

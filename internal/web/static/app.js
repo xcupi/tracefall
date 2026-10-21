@@ -1073,6 +1073,7 @@ const EVENT_CATEGORIES = {
   console_command_in_memory: "execution",
   console_screen_in_memory: "execution",
   file_object_in_memory: "filesystem",
+  file_content_from_memory: "filesystem",
   memory_snapshot: "other",
 };
 const EVENT_CATEGORY_LABELS = {

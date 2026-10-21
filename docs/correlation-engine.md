@@ -173,7 +173,8 @@ name afterwards: file system, USN, process creation, prefetch, Amcache, browser
 download, and file objects in memory. By name and order in time, not by hash.
 Window: from 2 minutes before to 24 hours after on the capture's scale, using
 the clock offset when one exists; a file object in a memory image only has to
-be later. The description says this is a lead that needs the file itself.
+be later. Recovered file content whose SHA-256 equals the delivered object's makes
+the tie one of content, and the description says so. The description says this is a lead that needs the file itself.
 
 ### `host_relation`
 

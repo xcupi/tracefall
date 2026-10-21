@@ -6,9 +6,10 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"unicode"
 
+	"tracefall/internal/memory"
 	"tracefall/internal/model"
+	"tracefall/internal/payload"
 )
 
 const (
@@ -152,56 +153,6 @@ func hasConhost(rowsOf map[string][]map[string]any) bool {
 	return false
 }
 
-// Locations whose contents are the operating system's or installed
-// software's own, where a file object says nothing about what happened.
-var routinePathPrefixes = []string{
-	`\windows\system32\`, `\windows\syswow64\`, `\windows\winsxs\`, `\windows\assembly\`, `\windows\microsoft.net\`,
-	`\windows\servicing\`, `\windows\fonts\`, `\windows\globalization\`, `\windows\systemapps\`, `\windows\immersivecontrolpanel\`,
-	`\windows\inf\`, `\windows\branding\`, `\windows\resources\`, `\windows\media\`, `\windows\cursors\`,
-	`\program files\`, `\program files (x86)\`, `\programdata\microsoft\windows defender\`, `\programdata\package cache\`,
-}
-
-// Extensions of things a person runs, opens as a document, or unpacks.
-var interestingExt = map[string]bool{
-	".exe": true, ".dll": true, ".scr": true, ".sys": true, ".bat": true, ".cmd": true, ".ps1": true, ".vbs": true, ".vbe": true,
-	".js": true, ".jse": true, ".wsf": true, ".hta": true, ".jar": true, ".lnk": true, ".msi": true, ".com": true, ".cpl": true,
-	".doc": true, ".docx": true, ".docm": true, ".xls": true, ".xlsx": true, ".xlsm": true, ".ppt": true, ".pptx": true, ".pdf": true,
-	".rtf": true, ".zip": true, ".rar": true, ".7z": true, ".gz": true, ".tar": true, ".iso": true, ".img": true, ".vhd": true,
-	".txt": true, ".csv": true, ".kdbx": true, ".pst": true, ".ost": true, ".dmp": true, ".mem": true, ".pcap": true, ".pcapng": true,
-	".sql": true, ".bak": true, ".evtx": true, ".reg": true,
-}
-
-// plausibleName rejects the garbage the pool scan returns when it reads a
-// freed or partly overwritten object: control characters, the replacement
-// character and private-use code points.
-func plausibleName(n string) bool {
-	if !strings.HasPrefix(n, `\`) || len(n) < 3 {
-		return false
-	}
-	for _, r := range n {
-		if r == unicode.ReplacementChar || r == 0xFFFF || unicode.IsControl(r) || (r >= 0xE000 && r <= 0xF8FF) || r > 0xFFFF {
-			return false
-		}
-	}
-	return true
-}
-
-func routineFilePath(lower string) bool {
-	for _, p := range routinePathPrefixes {
-		if strings.HasPrefix(lower, p) {
-			return true
-		}
-	}
-	return false
-}
-
-func fileExt(lower string) string {
-	if i := strings.LastIndexAny(lower, `\.`); i >= 0 && lower[i] == '.' {
-		return lower[i:]
-	}
-	return ""
-}
-
 // fileEvents lists the file objects worth a reader's time: runnable, document,
 // archive and data files outside the operating system's own locations. The
 // rest are counted, not dropped silently.
@@ -209,19 +160,18 @@ func fileEvents(rows []map[string]any, plugin string, snapshot time.Time, add fu
 	seen := map[string]bool{}
 	for i, r := range rows {
 		name := str(r, "Name")
-		if !plausibleName(name) {
+		switch memory.ClassifyFile(name) {
+		case memory.FileGarbage:
 			junk++
 			continue
-		}
-		lower := strings.ToLower(name)
-		switch {
-		case routineFilePath(lower):
+		case memory.FileRoutine:
 			routine++
 			continue
-		case !interestingExt[fileExt(lower)]:
+		case memory.FileOther:
 			other++
 			continue
 		}
+		lower := strings.ToLower(name)
 		if seen[lower] {
 			continue
 		}
@@ -242,4 +192,126 @@ func fileEvents(rows []map[string]any, plugin string, snapshot time.Time, add fu
 		listed++
 	}
 	return listed, routine, junk, other
+}
+
+// recoveredEvents turns files read back from memory into events: one per part
+// (the cached data and the mapped image of a program are two different byte
+// strings), and a count of what could not be recovered.
+func recoveredEvents(files []memory.RecoveredFile, snapshot time.Time, add func(model.Event, string)) (summary string) {
+	counts := map[string]int{}
+	seen := map[string]bool{}
+	for i, f := range files {
+		counts[f.Status]++
+		for j, part := range f.Parts {
+			rep := part.Report
+			if rep.SHA256 == "" && !rep.Truncated {
+				continue // too large to read: counted, no content to describe
+			}
+			key := strings.ToLower(f.Name) + "|" + part.Cache + "|" + rep.SHA256
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			ex := map[string]string{
+				"timestamp_basis": "memory_snapshot", "memory_cache": part.Cache, "recovered_bytes": strconv.FormatInt(part.Size, 10),
+				"sha256": rep.SHA256, "md5": rep.MD5, "sha1": rep.SHA1, "file_signature": rep.Type, "entropy": strconv.FormatFloat(rep.Entropy, 'f', 2, 64),
+				"file_object_offset": fmt.Sprintf("0x%x", f.FileObject),
+				"observation": "bytes read back from memory and inspected without running them. They are the pages that were resident, laid out as the cache or the loader held them: " +
+					"an image-section dump of a program is laid out as mapped, so this hash is not necessarily the hash of the file on disk",
+			}
+			if rep.Truncated {
+				ex["inspection_truncated"] = "true"
+			}
+			if rep.Type == "" {
+				ex["file_signature"] = "unknown"
+				ex["file_signature_note"] = "the file's first bytes were not recognised; if the first page was not resident in memory they are zeros"
+			}
+			sparse := false
+			if part.TotalPages > 0 {
+				ex["zero_pages"] = fmt.Sprintf("%d of %d", part.ZeroPages, part.TotalPages)
+				if part.ZeroPages*10 >= part.TotalPages { // a tenth or more of the pages are blank
+					sparse = true
+					ex["sparse"] = "true"
+					ex["sparse_note"] = "pages that were not in memory come back as zeros, so imports, signatures and other structure that are absent here may only be absent from what was resident"
+				}
+			}
+			if pe := rep.PE; pe != nil {
+				ex["pe_machine"], ex["pe_subsystem"] = pe.Machine, pe.Subsystem
+				ex["pe_dll"] = strconv.FormatBool(pe.DLL)
+				ex["pe_sections"] = strconv.Itoa(len(pe.Sections))
+				ex["pe_import_count"] = strconv.Itoa(pe.ImportCount)
+				ex["pe_signature_directory"] = strconv.FormatBool(pe.HasSignature)
+				ex["pe_overlay_bytes"] = strconv.FormatInt(pe.OverlayBytes, 10)
+				if !pe.ClaimedBuild.IsZero() {
+					ex["pe_claimed_build_time"] = pe.ClaimedBuild.UTC().Format(time.RFC3339)
+					ex["pe_claimed_build_note"] = "written by whoever built the file; it can be set to anything"
+				}
+				if pe.ImpHash != "" {
+					ex["pe_imphash"] = pe.ImpHash
+				}
+				if len(pe.ImportDLLs) > 0 {
+					ex["pe_import_dlls"] = strings.Join(pe.ImportDLLs, ",")
+				}
+				if len(pe.InjectionAPIs) > 0 {
+					ex["pe_injection_apis"] = strings.Join(pe.InjectionAPIs, ",")
+				}
+				if len(pe.Exports) > 0 {
+					ex["pe_exports"] = strings.Join(pe.Exports, ",")
+				}
+			}
+			inds := rep.Indicators
+			if sparse {
+				// An indicator that says something is missing cannot be
+				// trusted when the missing part may simply not have been in
+				// memory.
+				var kept []payload.Indicator
+				var withheld []string
+				for _, ind := range inds {
+					if ind.ID == "very_few_imports" || ind.ID == "no_signature_directory" || ind.ID == "malformed_pe" {
+						withheld = append(withheld, ind.ID)
+						continue
+					}
+					kept = append(kept, ind)
+				}
+				inds = kept
+				if len(withheld) > 0 {
+					ex["indicators_withheld"] = strings.Join(withheld, ",")
+				}
+			}
+			if len(inds) > 0 {
+				ids := make([]string, len(inds))
+				details := make([]string, len(inds))
+				for k, ind := range inds {
+					ids[k], details[k] = ind.ID, ind.Detail
+				}
+				ex["indicators"] = strings.Join(ids, ",")
+				ex["indicator_details"] = strings.Join(details, "; ")
+				ex["indicator_meaning"] = "properties that are common in malware and in legitimate software alike; none is a verdict"
+			}
+			for k, v := range map[string][]string{"strings_urls": rep.Strings.URLs, "strings_ipv4": rep.Strings.IPv4, "strings_commands": rep.Strings.Commands,
+				"strings_registry": rep.Strings.Registry, "strings_notable": rep.Strings.Notable} {
+				if len(v) > 0 {
+					ex[k] = strings.Join(v, " | ")
+				}
+			}
+			add(model.Event{
+				Timestamp: snapshot, EventType: model.EventMemoryFileContent, FilePath: f.Name, Confidence: 0.9,
+				SourceReference: fmt.Sprintf("windows.dumpfiles file %d part %d", i, j), Extra: ex,
+			}, rawFileJSON(f, j))
+		}
+	}
+	if len(files) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("tried %d file(s): %d recovered, %d not in memory (not cached or already released), %d too large to read, %d failed",
+		len(files), counts[memory.RecoveredOK], counts[memory.RecoveredNone], counts[memory.RecoveredTooLarge], counts[memory.RecoveredFailed])
+}
+
+// rawFileJSON is the raw record of one recovered part: what was asked and what
+// came back, without the strings lists the event already carries.
+func rawFileJSON(f memory.RecoveredFile, part int) string {
+	p := f.Parts[part]
+	return rawJSON("windows.dumpfiles", map[string]any{
+		"Name": f.Name, "FileObject": f.FileObject, "Cache": p.Cache, "Size": p.Size, "SHA256": p.Report.SHA256, "Type": p.Report.Type,
+	})
 }

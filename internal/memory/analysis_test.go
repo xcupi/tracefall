@@ -22,12 +22,28 @@ if a and a[0] == "-h":
     print("    plugin:")
     for p in ["windows.info.Info","windows.pslist.PsList","windows.psscan.PsScan","windows.cmdline.CmdLine",
               "windows.netscan.NetScan","windows.malware.malfind.Malfind","windows.svcscan.SvcScan",
-              "windows.cmdscan.CmdScan","windows.consoles.Consoles","windows.filescan.FileScan"]:
+              "windows.cmdscan.CmdScan","windows.consoles.Consoles","windows.filescan.FileScan","windows.dumpfiles.DumpFiles"]:
         print("    " + p)
     sys.exit(0)
 img = a[a.index("-f")+1]
-plugin = a[-1]
+plugin = [x for x in a if x.startswith("windows.")][-1]
 doc = json.load(open(img))
+if plugin == "windows.dumpfiles.DumpFiles":
+    # "dump:<virtaddr>" maps to {"error": text} or a list of
+    # {"cache", "result", "content"}; the files are written to -o.
+    va = a[a.index("--virtaddr")+1]
+    d = doc.get("dump:" + va, [])
+    if isinstance(d, dict):
+        sys.stderr.write(d["error"] + "\n"); sys.exit(1)
+    out = a[a.index("-o")+1]
+    rows = []
+    for e in d:
+        if e.get("content") is not None:
+            open(out + "/" + e["result"].split("/")[-1], "w").write(e["content"])
+        rows.append({"Cache": e["cache"], "FileName": "x", "FileObject": int(va), "Result": e["result"], "__children": []})
+    print()
+    print(json.dumps(rows))
+    sys.exit(0)
 if plugin not in doc:
     sys.stderr.write("Plugin not found: " + plugin + "\n"); sys.exit(2)
 v = doc[plugin]

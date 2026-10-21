@@ -131,3 +131,18 @@ func TestWebToHost_AFileObjectInALaterMemoryImageIsStillTied(t *testing.T) {
 		t.Fatalf("a file still in memory days later is the strongest kind of tie: %+v", got)
 	}
 }
+
+func TestWebToHost_RecoveredBytesWithTheSameHashMakeItTheSameContent(t *testing.T) {
+	cap := []model.Event{delivery("w1", "payload.exe", "Windows executable (MZ)", "200", "complete")}
+	mem := model.Event{ID: "m1", Host: "WS-B", ArtifactType: model.ArtifactMemoryAnalysis, EventType: model.EventMemoryFileContent,
+		Timestamp: skewBase.Add(2 * time.Hour), FilePath: `\Users\u\payload.exe`, Extra: map[string]string{"sha256": strings.Repeat("ab", 32)}}
+	got := BuildWebToHost("case-1", cap, []model.Event{mem}, hostid.Build(nil), nil)
+	if len(got) != 1 || !strings.Contains(got[0].Description, "the content is the same, not just the name") || strings.Contains(got[0].Description, "not by content") {
+		t.Fatalf("%+v", got)
+	}
+	mem.Extra["sha256"] = strings.Repeat("00", 32)
+	got = BuildWebToHost("case-1", cap, []model.Event{mem}, hostid.Build(nil), nil)
+	if len(got) != 1 || !strings.Contains(got[0].Description, "not by content") {
+		t.Fatalf("a different hash leaves it a name match: %+v", got)
+	}
+}

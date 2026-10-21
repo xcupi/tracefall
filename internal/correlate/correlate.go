@@ -109,7 +109,7 @@ func RunFrom(caseID string, src model.EventSource) ([]model.Correlation, error) 
 		hostEvs, err := src.Load(model.EventFilter{
 			Types: []string{model.EventFilesystemCreated, model.EventFilesystemModified, model.EventFilesystemChanged, model.EventFileCreate,
 				model.EventUsnCreate, model.EventUsnRename, model.EventProcessCreate, model.EventPrefetchExecution,
-				model.EventAmcacheApplication, model.EventBrowserDownload, model.EventMemoryFile},
+				model.EventAmcacheApplication, model.EventBrowserDownload, model.EventMemoryFile, model.EventMemoryFileContent},
 			Names: names,
 		})
 		if err != nil {
