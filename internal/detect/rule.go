@@ -51,16 +51,31 @@ func newFinding(caseID, ruleID, title, severity, confidence, description string,
 	}
 }
 
+// timeRange spans the dated events only. An event with no recorded time has
+// no place on a window; counting its zero value would start every window at
+// year 1.
 func timeRange(events []model.Event) (first, last time.Time) {
-	for i, e := range events {
-		if i == 0 || e.Timestamp.Before(first) {
+	for _, e := range events {
+		if e.Timestamp.IsZero() {
+			continue
+		}
+		if first.IsZero() || e.Timestamp.Before(first) {
 			first = e.Timestamp
 		}
-		if i == 0 || e.Timestamp.After(last) {
+		if last.IsZero() || e.Timestamp.After(last) {
 			last = e.Timestamp
 		}
 	}
 	return first, last
+}
+
+// fmtTime renders an event time for finding text. A zero time is "not
+// recorded", never a date.
+func fmtTime(t time.Time) string {
+	if t.IsZero() {
+		return "(time not recorded)"
+	}
+	return t.Format(time.RFC3339)
 }
 
 func byType(events []model.Event, t string) []model.Event {

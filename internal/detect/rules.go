@@ -69,7 +69,7 @@ func (r officeSpawnsPowerShell) Evaluate(events []model.Event) []model.Finding {
 		desc := fmt.Sprintf(
 			"%s launched %s (PID %d) at %s on host %s, user %s. Office applications spawning a scripting "+
 				"interpreter is a common initial-execution pattern for malicious document macros/payloads.",
-			e.ParentProcessName, e.ProcessName, e.PID, e.Timestamp.Format(time.RFC3339), e.Host, orDash(e.User))
+			e.ParentProcessName, e.ProcessName, e.PID, fmtTime(e.Timestamp), e.Host, orDash(e.User))
 		findings = append(findings, newFinding(e.CaseID, r.ID(), title, model.SeverityHigh, model.ConfidenceMedium,
 			desc, []string{"T1059.001", "T1204.002"}, []model.Event{e}))
 	}
@@ -142,7 +142,7 @@ func (r powershellEncodedCommand) finding(e model.Event, cmd string, indicators 
 	title := "PowerShell execution with suspicious command indicators"
 	desc := fmt.Sprintf(
 		"PowerShell activity on host %s (user %s) at %s matched %d suspicious indicator(s): %s. Command/script: %s",
-		e.Host, orDash(e.User), e.Timestamp.Format(time.RFC3339), len(indicators), strings.Join(indicators, ", "), truncate(cmd, 300))
+		e.Host, orDash(e.User), fmtTime(e.Timestamp), len(indicators), strings.Join(indicators, ", "), truncate(cmd, 300))
 	severity := model.SeverityMedium
 	confidence := model.ConfidenceMedium
 	if len(indicators) >= 2 {
@@ -178,7 +178,7 @@ func (r newRegistryRunKey) Evaluate(events []model.Event) []model.Finding {
 			"A Run key entry %q pointing to %q was observed under %s on host %s at %s. A single Run key "+
 				"is a weak indicator on its own -- this is reported as an observed persistence mechanism, "+
 				"not a malware verdict; see correlated findings for corroborating execution evidence.",
-			orDash(e.Extra["value_name"]), orDash(e.FilePath), e.RegistryPath, e.Host, e.Timestamp.Format(time.RFC3339))
+			orDash(e.Extra["value_name"]), orDash(e.FilePath), e.RegistryPath, e.Host, fmtTime(e.Timestamp))
 		if suspicious {
 			desc += " The target path is located in a user-writable/non-standard directory, which raises confidence."
 		}
@@ -220,7 +220,7 @@ func (r newScheduledTask) Evaluate(events []model.Event) []model.Finding {
 		title := fmt.Sprintf("Scheduled Task persistence: %s", orDash(e.Extra["task_name"]))
 		when := "registration date is not recorded in the task file"
 		if !e.Timestamp.IsZero() {
-			when = "registered at " + e.Timestamp.Format(time.RFC3339)
+			when = "registered at " + fmtTime(e.Timestamp)
 		} else if local := e.Extra["timestamp_local"]; local != "" {
 			when = "registration date " + local + " (local time, zone not recorded)"
 		}
@@ -269,7 +269,7 @@ func (r suspiciousProcessChain) Evaluate(events []model.Event) []model.Finding {
 			"%s spawned %s (PID %d, path %q) at %s on host %s. A scripting interpreter launching a process "+
 				"from a non-standard location or invoking another living-off-the-land binary is consistent "+
 				"with payload staging/execution.",
-			e.ParentProcessName, e.ProcessName, e.PID, orDash(e.ProcessPath), e.Timestamp.Format(time.RFC3339), e.Host)
+			e.ParentProcessName, e.ProcessName, e.PID, orDash(e.ProcessPath), fmtTime(e.Timestamp), e.Host)
 		findings = append(findings, newFinding(e.CaseID, r.ID(), title, model.SeverityHigh, model.ConfidenceMedium,
 			desc, []string{"T1059", "T1059.001"}, []model.Event{e}))
 	}
@@ -355,6 +355,10 @@ func (r executionThenPersistence) Evaluate(events []model.Event) []model.Finding
 		if !ok {
 			continue
 		}
+		// "Then" needs two known times; undated evidence has no order.
+		if ex.Timestamp.IsZero() || p.Timestamp.IsZero() {
+			continue
+		}
 		mechanism, techniques := persistenceMechanism(p)
 		if procclass.IsPowerShell(ex.ProcessName) {
 			techniques = append(techniques, "T1059.001")
@@ -364,8 +368,8 @@ func (r executionThenPersistence) Evaluate(events []model.Event) []model.Finding
 			"%q executed at %s on host %s, then a %s referencing the same executable was established at "+
 				"%s (%s later). Execution immediately followed by persistence for the same "+
 				"binary is a strong indicator of an intentional persistence step, not incidental activity.",
-			target, ex.Timestamp.Format(time.RFC3339), p.Host, mechanism,
-			p.Timestamp.Format(time.RFC3339), humanizeDuration(p.Timestamp.Sub(ex.Timestamp)))
+			target, fmtTime(ex.Timestamp), p.Host, mechanism,
+			fmtTime(p.Timestamp), humanizeDuration(p.Timestamp.Sub(ex.Timestamp)))
 		findings = append(findings, newFinding(p.CaseID, r.ID(), title, model.SeverityCritical, model.ConfidenceHigh,
 			desc, techniques, []model.Event{ex, p}))
 	}
@@ -539,7 +543,7 @@ func (r officeSpawnsScriptInterpreter) Evaluate(events []model.Event) []model.Fi
 		desc := fmt.Sprintf(
 			"%s launched %s (PID %d) at %s on host %s, user %s, command line: %s. Office applications spawning a "+
 				"scripting interpreter is a common initial-execution pattern for malicious document macros/payloads.",
-			e.ParentProcessName, e.ProcessName, e.PID, e.Timestamp.Format(time.RFC3339), e.Host, orDash(e.User), truncate(e.CommandLine, 300))
+			e.ParentProcessName, e.ProcessName, e.PID, fmtTime(e.Timestamp), e.Host, orDash(e.User), truncate(e.CommandLine, 300))
 		findings = append(findings, newFinding(e.CaseID, r.ID(), title, model.SeverityHigh, model.ConfidenceMedium,
 			desc, []string{technique, "T1204.002"}, []model.Event{e}))
 	}
@@ -622,7 +626,7 @@ func (r suspiciousParentChildLineage) Evaluate(events []model.Event) []model.Fin
 		title := fmt.Sprintf("Suspicious process lineage: %s -> %s", e.ParentProcessName, e.ProcessName)
 		desc := fmt.Sprintf(
 			"%s (PID %d) at %s on host %s: %s. Path: %q, command line: %s.",
-			e.ProcessName, e.PID, e.Timestamp.Format(time.RFC3339), e.Host, reason, orDash(e.ProcessPath), truncate(e.CommandLine, 300))
+			e.ProcessName, e.PID, fmtTime(e.Timestamp), e.Host, reason, orDash(e.ProcessPath), truncate(e.CommandLine, 300))
 		findings = append(findings, newFinding(e.CaseID, r.ID(), title, severity, confidence,
 			desc, []string{"T1059"}, []model.Event{e}))
 	}
@@ -655,7 +659,7 @@ func (r servicePersistence) Evaluate(events []model.Event) []model.Finding {
 			"Service %q was installed on host %s at %s, image path %q, start type %s. A single service "+
 				"installation is a weak indicator on its own -- reported as an observed persistence mechanism, "+
 				"not a malware verdict; see correlated findings for corroborating evidence.",
-			orDash(e.Extra["service_name"]), e.Host, e.Timestamp.Format(time.RFC3339), orDash(cmdsem.Redact(e.FilePath)), orDash(e.Extra["start_type"]))
+			orDash(e.Extra["service_name"]), e.Host, fmtTime(e.Timestamp), orDash(cmdsem.Redact(e.FilePath)), orDash(e.Extra["start_type"]))
 		if suspicious {
 			desc += " The service binary is in a user-writable/non-standard location, or invokes a scripting interpreter -- both raise confidence."
 		}
@@ -705,7 +709,7 @@ func (r registryPersistenceExtended) Evaluate(events []model.Event) []model.Find
 			"A %s was observed at %s on host %s: %s set to %q. This location is not a plain Run/RunOnce key -- "+
 				"%s is a less common autostart/hijack mechanism than a Run key, which raises baseline confidence "+
 				"that this is intentional persistence rather than incidental configuration.",
-			mechanism, e.Timestamp.Format(time.RFC3339), e.Host, e.RegistryPath, orDash(e.FilePath), mechanism)
+			mechanism, fmtTime(e.Timestamp), e.Host, e.RegistryPath, orDash(e.FilePath), mechanism)
 		findings = append(findings, newFinding(e.CaseID, r.ID(), title, severity, confidence, desc,
 			techniques, []model.Event{e}))
 	}
@@ -740,7 +744,7 @@ func (r explicitCredentialUse) Evaluate(events []model.Event) []model.Finding {
 			"Process %q on host %s used explicit credentials for user %q to access %q at %s. This is routine for "+
 				"RunAs, scheduled tasks, and mapped drives with alternate credentials -- reported as an observation, "+
 				"not a credential-theft verdict.",
-			orDash(e.ProcessPath), e.Host, orDash(e.Extra["target_user_name"]), orDash(e.Extra["target_server_name"]), e.Timestamp.Format(time.RFC3339))
+			orDash(e.ProcessPath), e.Host, orDash(e.Extra["target_user_name"]), orDash(e.Extra["target_server_name"]), fmtTime(e.Timestamp))
 		findings = append(findings, newFinding(e.CaseID, r.ID(), title, model.SeverityLow, model.ConfidenceLow,
 			desc, []string{"T1078"}, []model.Event{e}))
 	}
@@ -821,7 +825,7 @@ func (r privilegedLogonObserved) Evaluate(events []model.Event) []model.Finding 
 		desc := fmt.Sprintf(
 			"User %q was assigned special/administrative privileges at logon on host %s: %d privileged logon(s) across %d logon session(s), first at %s, last at %s.",
 			orDash(first.User), orDash(first.Host), len(evs), len(logons),
-			first.Timestamp.Format(time.RFC3339), evs[len(evs)-1].Timestamp.Format(time.RFC3339))
+			fmtTime(first.Timestamp), fmtTime(evs[len(evs)-1].Timestamp))
 		if len(names) > 0 {
 			desc += " Privileges recorded: " + strings.Join(names, ", ") + "."
 		}
@@ -881,6 +885,9 @@ func (r networkAfterExecution) Evaluate(events []model.Event) []model.Finding {
 			if ex.PID > 0 && n.PID > 0 && ex.PID != n.PID {
 				continue
 			}
+			if n.Timestamp.IsZero() || ex.Timestamp.IsZero() {
+				continue // no recorded time, no order
+			}
 			if n.Timestamp.Before(ex.Timestamp) || n.Timestamp.Sub(ex.Timestamp) > networkAfterExecWindow {
 				continue
 			}
@@ -908,7 +915,7 @@ func (r networkAfterExecution) Evaluate(events []model.Event) []model.Finding {
 				"non-standard-path binary is consistent with payload retrieval or command-and-control, though "+
 				"many legitimate administrative scripts also reach out to the network -- destination/port were "+
 				"not used to assess severity here, only the executing process's own behavior.",
-			ex.ProcessPath, ex.Timestamp.Format(time.RFC3339), ex.Host, orDash(conn.NetworkDest), conn.Timestamp.Format(time.RFC3339),
+			ex.ProcessPath, fmtTime(ex.Timestamp), ex.Host, orDash(conn.NetworkDest), fmtTime(conn.Timestamp),
 			humanizeDuration(conn.Timestamp.Sub(ex.Timestamp)))
 		findings = append(findings, newFinding(ex.CaseID, r.ID(), title, severity, confidence, desc,
 			techniques, []model.Event{ex, conn}))
@@ -949,7 +956,7 @@ func (r remoteLogonObserved) Evaluate(events []model.Event) []model.Finding {
 			"User %q logged on to host %s via a remote-interactive (RDP) session at %s, source %s. Remote "+
 				"administration over RDP is routine in most environments -- reported as an observation, not a "+
 				"lateral-movement verdict.",
-			orDash(e.User), e.Host, e.Timestamp.Format(time.RFC3339), orDash(e.NetworkSource))
+			orDash(e.User), e.Host, fmtTime(e.Timestamp), orDash(e.NetworkSource))
 		findings = append(findings, newFinding(e.CaseID, r.ID(), title, model.SeverityLow, model.ConfidenceLow,
 			desc, []string{"T1021.001"}, []model.Event{e}))
 	}

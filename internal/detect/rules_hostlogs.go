@@ -210,7 +210,7 @@ func (r webAttackIndicators) Evaluate(events []model.Event) []model.Finding {
 				"A request of this shape is an attempt. The access log records the status the server returned, not what the "+
 				"application did with the request: a 2xx answer does not prove the attack worked, and a 4xx answer does not "+
 				"prove it failed.",
-			orDash(k.src), len(reqs), orDash(k.host), reqs[0].Timestamp.Format(time.RFC3339), reqs[len(reqs)-1].Timestamp.Format(time.RFC3339),
+			orDash(k.src), len(reqs), orDash(k.host), fmtTime(reqs[0].Timestamp), fmtTime(reqs[len(reqs)-1].Timestamp),
 			whatWasRead(k.category), webattack.Label(k.category), statusSummary(status), clipText(reqs[0].Extra["uri"], 160))
 		out = append(out, newFinding(reqs[0].CaseID, r.ID(), title, sev, conf, desc,
 			[]string{webattack.Technique(k.category)}, capEvents(reqs)))
@@ -507,7 +507,7 @@ func (r systemChangeCommand) Evaluate(events []model.Event) []model.Finding {
 		first := g.events[0]
 		times := ""
 		if !first.Timestamp.IsZero() {
-			times = fmt.Sprintf(" first at %s", first.Timestamp.Format(time.RFC3339))
+			times = fmt.Sprintf(" first at %s", fmtTime(first.Timestamp))
 		} else if st := first.Extra[partialtime.KeyStamp]; st != "" {
 			times = fmt.Sprintf(" first at %q (no year in the log)", st)
 		}
