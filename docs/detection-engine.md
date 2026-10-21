@@ -285,6 +285,26 @@ Confidence follows what the source proves: `medium` for a process record,
 effect. Secrets on a command line are masked (`cmdsem.Redact`) before the
 command is copied into a finding.
 
+## Packet capture rules
+
+### `rdp-connection-burst`
+
+One finding per client and server when a capture shows at least 50 separate
+connections from one client to a Remote Desktop port. `medium` / `low` alone.
+`high` / `medium` when a later connection from the same client went on for at
+least 200 packets (a few dozen is a handshake with negotiation, which probes
+produce too). The description names the client port of the first long
+connection so it can be matched to the server's logon event, because the
+capture cannot show whether a logon succeeded. A scanner, a health check and a
+client with a stale credential look the same.
+
+### `executable-over-http-from-address`
+
+A program (Windows executable, ELF, MSI, Java archive) delivered whole with
+status 200 over HTTP from a server addressed by IP rather than name. One
+finding per client, server and hash. `medium` / `medium`: the bytes and their
+hash are proven; that they were saved or run is not.
+
 ## Adding a rule
 
 1. Add a new unexported type in `internal/detect/rules.go` implementing

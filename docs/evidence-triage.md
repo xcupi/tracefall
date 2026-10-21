@@ -102,6 +102,7 @@ what the binary can actually parse:
 | `syslog` | System log (syslog) | Log | High | `syslog@1` |
 | `web_access_log` | Web server access log | Log | High | `webaccess@1` |
 | `package_log` | Package log (dpkg) | Log | Medium | `packagelog@1` |
+| `network_capture` | Network capture (pcap) | Network | High | `netcapture@1` |
 | `journal` | Systemd journal | Log | Medium | `journal@1` |
 | `prefetch` | Prefetch | Prefetch | High | `prefetch@1`, `pecmd@1` |
 | `registry_run_key` | Registry (RECmd export) | Registry | High | `recmd@1` |
@@ -1525,3 +1526,51 @@ so the event's `Timestamp` stays zero and the date is kept as written in
 dated artifacts once the host's zone is established. The event proves the
 package database changed. It does not show that anything in the package ran, or
 who asked. `apt/history.log` and `apt/term.log` are not parsed.
+
+### Network capture (`netcapture@1`)
+
+Reads classic pcap (both byte orders, microsecond and nanosecond) and pcapng,
+by extension (`.pcap`, `.pcapng`, `.cap`) confirmed by the magic number, and
+also under any name by magic number. Link types: Ethernet, Linux cooked v1 and
+v2, raw IP, BSD loopback. Others are counted in `capture_summary`. The file is
+read as a stream; every table has a limit and a limit that was reached is
+written into `capture_summary.limits_reached`.
+
+Events:
+
+- `network_connection`: one per conversation (client, server, server port,
+  protocol) with packets and bytes each way. `application` (`rdp`, `http`,
+  `tls`, `dns`, `ntp`) is set only when the bytes parsed as that protocol. A
+  port number alone appears as `service_hint` and proves nothing. A second
+  event per Remote Desktop connection of at least 20 packets, with its client
+  port (`session=true`), which is what a Windows logon event naming the same
+  port refers to. The Remote Desktop cookie is the user name the client sent,
+  not an authenticated identity.
+- `dns_query`: DNS, mDNS and LLMNR lookups with answers. A response with no
+  query in the capture is marked `query_in_capture=false`.
+- `web_request`: one per HTTP transaction with method, URI, host, status,
+  user agent, and for a response seen whole, `response_sha256`, `response_size`
+  and `file_signature` (by magic number, not extension). A body is never
+  stored. A body that was not seen whole has no hash (`reassembly=incomplete`).
+  A 206 response is a byte range, marked `partial_content`, and its hash will
+  not match the object's.
+- `clock_observation`: an NTP packet or an HTTP `Date` header with the capture
+  time of the packet that carried it. Input to the clock-offset model.
+- `capture_summary`: span, counts, undecodable packets, limits reached.
+
+**Time.** Every timestamp is the clock of the machine that captured. It is not
+the clock of any host in the capture and nothing here corrects it. A TCP
+four-tuple reused by a new connection (a SYN with a different sequence number)
+is a new connection.
+
+**Not shown.** Encrypted payloads (TLS, the inside of a Remote Desktop
+session). What a host did with bytes that reached it. A capture shows only
+what crossed the interface it was taken on.
+
+## Static payload inspection (`internal/payload`)
+
+Used to name what an HTTP object is. Magic number, SHA-256 and, for PE files,
+sections with entropy, imports, exports, signature directory and appended data,
+and network, path, registry and command strings. Static only: nothing is
+executed, no hash is looked up anywhere, and Authenticode is not verified. An
+indicator is a property common in malware, never a verdict.

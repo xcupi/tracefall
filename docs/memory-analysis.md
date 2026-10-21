@@ -60,6 +60,26 @@ was not contained. There is NO memory limit (Volatility maps the whole image).
   memory, which JIT-compiled code also produces. Dated to the snapshot.
 - Services: `service_in_memory`, dated to the snapshot. A state, not an
   installation event.
+- Consoles (`cmdscan`, `consoles`): `console_command_in_memory`, one per
+  command a console still held, in order, with `console_title` and
+  `console_application` when known. A command found by both plugins is one
+  event (`found_by`). The console keeps no time per command, so the event is
+  dated to the snapshot (`timestamp_basis=memory_snapshot`). Also
+  `console_screen_in_memory`: the text of a screen buffer (commands and their
+  output), truncated at 4000 characters. Volatility 3 reads these from
+  `conhost.exe` only. When the process list has none, the snapshot event says
+  so in `console_note`: the absence of commands then means nothing. When the
+  plugins ran and found none, the note says a closed or cleared console proves
+  nothing either. Commands feed the rule `system-change-command`
+  (confidence low: a command in a console was typed there, not shown to have
+  run).
+- File objects (`filescan`): `file_object_in_memory`, for runnable, document,
+  archive and data files outside the operating system's and installed
+  software's own locations. The file was open or cached at capture; it may
+  not exist on disk and no content hash is known. Everything not listed is
+  counted in the snapshot event's `file_objects` (routine locations, other
+  types, unreadable names). Names are matched against files delivered over
+  HTTP in a capture by the correlation `web_to_host`.
 - Snapshot: one event at the image's system time with Volatility version,
   isolation and plugin outcomes.
 
@@ -104,5 +124,10 @@ completeness. See [the original baseline](validation-cyberdefenders-baseline.md)
 for the pre-fix failures and other coverage limits. Unit fixtures are constructed;
 the multi-GB lab images remain external and are not in this repository.
 
+Console and file-object parsing follows the plugin column names read from
+Volatility 3 2.28.2's source and was run on a real Windows 10 image; that image's
+console was empty, so command rows come from constructed fixtures. An older
+Windows (consoles hosted by csrss.exe) yields nothing from these plugins.
+
 Not covered: Linux/macOS memory, pagefile/hiberfil, driver/handle/registry
-plugins, process dumping, YARA scanning.
+plugins, dumping files out of memory for payload inspection, YARA scanning.

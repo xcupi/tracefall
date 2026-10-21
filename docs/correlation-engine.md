@@ -14,7 +14,7 @@ defined, documented heuristic with a named time window. If a step in a
 narrative isn't backed by an actual event, it's simply absent from the
 correlation — never filled in with an assumption.
 
-## The six correlation types
+## The correlation types
 
 Types `process_chain`, `entity`, `temporal`, and `activity_chain` are from
 Phase 1. `credential_chain` and `service_chain` were added in Phase 4 —
@@ -140,6 +140,52 @@ installed but never observed starting produces no chain — only the
 standalone `service-persistence` finding (rule 10) — since a 2-step chain
 of "installed, then nothing else observed" isn't a narrative worth
 surfacing as a correlation.
+
+## Capture, clock and identity correlations
+
+### `clock_skew`
+
+Evidence is stamped by different clocks. For each clock the case lets it
+compare with a capture (`internal/correlate/clock_skew.go`,
+`internal/clockskew`) the engine estimates the offset, subject minus capture.
+
+Every observation is an interval, not a point. Sources: NTP client and server
+times, NTP request/reply exchanges, HTTP `Date` headers, and a Windows logon
+recorded on a host inside the TCP connection that carried it (matched by source
+address and port). Allowances: up to 2 seconds between a value being written
+and captured, and the one-second resolution of the values.
+
+For one subject the estimate is the intersection of the intervals. Intervals
+that do not intersect but whose midpoints differ by at most 5 seconds are one
+steady offset (timing noise, slow drift) and are reported as a range. A larger
+disagreement is reported as "not constant": the clock changed, or observations
+pair unrelated events. Public web servers are pooled and only an offset at least
+80 percent of them agree on is used, because some servers' clocks are wrong. An
+offset that is a whole number of quarter hours is noted as the size of a
+time-zone difference, as a hypothesis about cause only. A clock that agrees with
+the capture within the measurement is not reported. No timestamp is changed.
+
+### `web_to_host`
+
+An object a capture shows delivered whole (status 200, runnable by signature or
+extension, not a generic page) is tied to host events naming a file of the same
+name afterwards: file system, USN, process creation, prefetch, Amcache, browser
+download, and file objects in memory. By name and order in time, not by hash.
+Window: from 2 minutes before to 24 hours after on the capture's scale, using
+the clock offset when one exists; a file object in a memory image only has to
+be later. The description says this is a lead that needs the file itself.
+
+### `host_relation`
+
+One machine in the case reaching another: a logon (network, Remote Desktop,
+explicit credentials, remote unlock) whose source address belongs to another
+machine of the case, and captured conversations between two such addresses.
+Both ends must resolve through `internal/hostid`, which ties an address to a
+machine and keeps the basis: static configuration or a live socket in memory
+(strongest), the last DHCP lease, a name a client reported at logon, a DNS
+answer. An address two machines claim equally is ambiguous and left out. The
+relation reports its weakest basis and says so when it rests on a client's own
+claim.
 
 ## Adding a new correlation heuristic
 
