@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"tracefall/internal/parsers"
 )
 
 func TestTaskIdentity_LocalRegistrationReading(t *testing.T) {
@@ -40,7 +41,7 @@ func TestTaskIdentity_NamespaceSurvivesEqualCommands(t *testing.T) {
 				if err := os.WriteFile(p, []byte(`<Task><RegistrationInfo><Date>`+date+`</Date></RegistrationInfo><Actions><Exec><Command>cmd.exe</Command></Exec></Actions></Task>`), 0600); err != nil {
 					t.Fatal(err)
 				}
-				r, err := New().Parse(p)
+				r, err := New().ParseWithContext(p, parsers.ParseContext{EvidencePath: "Windows/System32/Tasks/" + folder + "/Task01"})
 				if err != nil {
 					t.Fatal(err)
 				}

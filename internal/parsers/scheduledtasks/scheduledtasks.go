@@ -68,6 +68,13 @@ type taskXML struct {
 }
 
 func (p Parser) Parse(absPath string) (parsers.ParseResult, error) {
+	return p.ParseWithContext(absPath, parsers.ParseContext{})
+}
+
+// ParseWithContext takes the task's namespace path from the evidence-relative
+// path in ctx. Without it only the task's own name is known: the server's
+// absolute path says where the evidence was stored, not where the task lived.
+func (p Parser) ParseWithContext(absPath string, ctx parsers.ParseContext) (parsers.ParseResult, error) {
 	data, err := os.ReadFile(absPath)
 	if err != nil {
 		return parsers.ParseResult{}, err
@@ -131,7 +138,7 @@ func (p Parser) Parse(absPath string) (parsers.ParseResult, error) {
 		// configuration signal (requests elevation), so it's kept
 		// distinct rather than folded into a generic field.
 		"run_level": runLevel,
-		"task_path": taskPathFrom(absPath, taskName),
+		"task_path": taskPathFrom(ctx.EvidencePath, taskName),
 	}
 
 	extra["timestamp_original"] = t.RegistrationInfo.Date
@@ -180,8 +187,24 @@ func (p Parser) Parse(absPath string) (parsers.ParseResult, error) {
 func taskPathFrom(absPath, taskName string) string {
 	norm := filepath.ToSlash(absPath)
 	segments := strings.Split(norm, "/")
+	if absPath == "" {
+		return `\` + taskName
+	}
+	// Prefer the System32\Tasks root; fall back to the first Tasks segment.
+	start := -1
 	for i, seg := range segments {
 		if strings.EqualFold(seg, "Tasks") && i+1 < len(segments) {
+			if start < 0 {
+				start = i
+			}
+			if i > 0 && (strings.EqualFold(segments[i-1], "System32") || strings.EqualFold(segments[i-1], "SysNative")) {
+				start = i
+				break
+			}
+		}
+	}
+	for i, seg := range segments {
+		if i == start && strings.EqualFold(seg, "Tasks") && i+1 < len(segments) {
 			rest := segments[i+1:]
 			rest[len(rest)-1] = taskName // drop the .xml extension on the final segment
 			return `\` + strings.Join(rest, `\`)

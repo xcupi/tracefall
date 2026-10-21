@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"tracefall/internal/parsers"
 	"unicode/utf16"
 
 	"tracefall/internal/model"
@@ -117,7 +118,7 @@ func TestParse_Phase4RunLevelAndTaskPath(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	res, err := New().Parse(path)
+	res, err := New().ParseWithContext(path, parsers.ParseContext{EvidencePath: "Windows/System32/Tasks/Microsoft/Windows/UpdateOrchestrator/Schedule Scan.xml"})
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
