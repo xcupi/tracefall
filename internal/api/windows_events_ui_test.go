@@ -27,3 +27,12 @@ func TestUI_WindowsRemoteEventCategories(t *testing.T) {
 		}
 	}
 }
+
+func TestUI_WindowsTaskExecutionAndPowerShellEngineCategories(t *testing.T) {
+	src := string(appJS(t))
+	for typ, cat := range map[string]string{"scheduled_task_run": "execution", "powershell_engine_lifecycle": "other"} {
+		if !strings.Contains(src, typ+`: "`+cat+`"`) {
+			t.Errorf("%s lacks %s category", typ, cat)
+		}
+	}
+}

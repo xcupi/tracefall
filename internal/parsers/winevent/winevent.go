@@ -64,6 +64,9 @@ func Normalize(ev *model.Event, in Input) bool {
 	if handled, mapped := normalizeServerEvent(ev, in); handled {
 		return mapped
 	}
+	if handled, mapped := normalizeTaskPSEvent(ev, in); handled {
+		return mapped
+	}
 	payload := in.Data
 	channel := strings.ToLower(in.Channel)
 	eventID := strconv.Itoa(in.EventID)

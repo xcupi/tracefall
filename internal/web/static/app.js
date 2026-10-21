@@ -1033,6 +1033,10 @@ const EVENT_CATEGORIES = {
   remote_authentication: "authentication",
   session_change: "authentication",
   scheduled_task_change: "persistence",
+  // Task Scheduler execution-side records: the scheduler observed a run.
+  scheduled_task_run: "execution",
+  // Engine lifecycle only; says nothing about which command ran.
+  powershell_engine_lifecycle: "other",
   event_log_cleared: "other",
   audit_policy_change: "other",
   session_end: "authentication",
