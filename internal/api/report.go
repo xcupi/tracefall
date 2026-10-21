@@ -715,10 +715,35 @@ func reportLimitations(d report.Data, in reportInputs) []string {
 			strings.Join(names, "; ")+". They need to be examined by other means.")
 	}
 	pending := 0
+	// Records with no mapping are normal (most event kinds in a log are not
+	// analysed), so they are summarised in one line. Failed, undated or capped
+	// reads are real losses and are listed per file, bounded, with the rest
+	// counted.
+	const maxCoverageLines = 20
+	var problems []string
+	unmappedOnly, unmappedRecords := 0, 0
 	for _, sf := range in.sourceFiles {
-		if sf.ParseCoverage.Incomplete() {
-			lim = append(lim, fmt.Sprintf("%s: parser coverage is incomplete or undated; unmapped=%d records_failed=%d chunks_failed=%d undated=%d capped=%t. See source-level parser coverage before drawing conclusions.", sf.Path, sf.ParseCoverage.Unmapped, sf.ParseCoverage.RecordsFailed, sf.ParseCoverage.ChunksFailed, sf.ParseCoverage.Undated, sf.ParseCoverage.LimitReached))
+		c := sf.ParseCoverage
+		if !c.Incomplete() {
+			continue
 		}
+		if c.Undated > 0 || c.RecordsFailed > 0 || c.ChunksFailed > 0 || c.LimitReached || c.UnlistedRecords > 0 {
+			problems = append(problems, fmt.Sprintf("%s: parser coverage is incomplete; records_failed=%d chunks_failed=%d undated=%d capped=%t unmapped=%d. See source-level parser coverage before drawing conclusions.", sf.Path, c.RecordsFailed, c.ChunksFailed, c.Undated, c.LimitReached, c.Unmapped))
+			continue
+		}
+		unmappedOnly++
+		unmappedRecords += c.Unmapped
+	}
+	sort.Strings(problems)
+	for i, l := range problems {
+		if i == maxCoverageLines {
+			lim = append(lim, fmt.Sprintf("%d more source file(s) have incomplete parser coverage; see each file's coverage.", len(problems)-maxCoverageLines))
+			break
+		}
+		lim = append(lim, l)
+	}
+	if unmappedOnly > 0 {
+		lim = append(lim, fmt.Sprintf("%d source file(s) contain %d record(s) of event kinds Tracefall does not map; they remain in the original evidence and in each file's parser coverage census. Unmapped is not the same as benign.", unmappedOnly, unmappedRecords))
 	}
 	for _, sf := range in.sourceFiles {
 		if sf.ImportStatus == model.SourceFileDiscovered && sf.Supported {

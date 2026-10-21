@@ -26,6 +26,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"tracefall/internal/model"
 	"tracefall/internal/normalize"
@@ -121,10 +122,10 @@ func (p Parser) Parse(absPath string) (parsers.ParseResult, error) {
 
 		ts, ok := normalize.Timestamp(rw.TimeCreated)
 		if !ok {
-			// No usable timestamp -- this record can't be placed on the
-			// timeline, so it's dropped rather than defaulting to a
-			// fabricated time that would corrupt correlation.
-			continue
+			// No usable timestamp. The record is kept undated, as the raw
+			// EVTX parser keeps it, rather than dropped or given an invented
+			// time; the basis says why it has none.
+			ts = time.Time{}
 		}
 
 		ev := model.Event{
@@ -138,6 +139,10 @@ func (p Parser) Parse(absPath string) (parsers.ParseResult, error) {
 			Confidence:      1.0,
 			SourceReference: "row:" + fmt.Sprint(rowNum-1),
 			Extra:           map[string]string{},
+		}
+		if !ok {
+			ev.Extra["timestamp_basis"] = "not_recorded"
+			ev.Extra["timestamp_note"] = "record contains no usable timestamp; observation retained undated"
 		}
 		// The channel/EventID mapping is shared with the raw .evtx parser
 		// (internal/parsers/winevent) so the same Windows record read from
