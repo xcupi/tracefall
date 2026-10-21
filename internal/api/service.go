@@ -594,6 +594,11 @@ func (s *Service) CollectionDetail(caseID, collectionID string) (CollectionDetai
 // none of it has been parsed yet. See ImportEvidence.
 type DiscoverResult struct {
 	Collection model.Collection `json:"collection"`
+	// RelatedCollections lists memory images found inside a folder. Each is
+	// analysed as its own collection (a memory image is one collection, not
+	// a file among a folder's artifacts), or disclosed here with the reason
+	// it was not.
+	RelatedCollections []RelatedCollection `json:"related_collections,omitempty"`
 	// SourceFiles is the FIRST PAGE of the discovered catalog, each file
 	// carrying its triage classification (artifact class, forensic
 	// priority, and -- when unsupported -- why). The classification is
@@ -723,6 +728,7 @@ func (s *Service) DiscoverEvidenceFromPath(caseID, path string) (DiscoverResult,
 	}
 	s.audit(caseID, model.AuditEvidenceDiscovered, model.TargetCollection, collection.ID,
 		fmt.Sprintf("Evidence discovered from local path %q: %d file(s), %d supported", path, res.DiscoveredCount, res.SupportedCount))
+	res.RelatedCollections = s.discoverNestedMemoryImages(caseID, path)
 	return res, nil
 }
 

@@ -36,6 +36,19 @@ resolved against the installed Volatility; malfind moved between releases).
 A plugin that fails is recorded with its error and the rest continue; the
 snapshot event and the report list what failed.
 
+## A memory image inside a folder
+
+A memory image is analysed by Volatility as a whole, so it is its own
+collection, never one file among a folder's artifacts. When a folder ingest
+finds one (a known magic, or a `.mem`, `.vmem` or `.lime` name), Tracefall
+discovers it as a separate collection in the same case and lists it in the
+response under `related_collections`; the unattended pipeline imports it too.
+`.dmp`, `.dump` and `.raw` are taken from inside a folder only with a memory
+magic, because crash dumps and raw exports are common in triage folders. When
+an image cannot be analysed (Volatility not configured, symbols missing, more
+than eight images), the folder is still catalogued and the entry says why.
+Images nested in an uploaded ZIP are not handled this way.
+
 ## Containment
 
 Every run uses bubblewrap: new user, network, PID and IPC namespaces, empty

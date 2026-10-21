@@ -345,6 +345,7 @@ func (s *Service) executeIngest(job model.PipelineJob, res *PipelineResult) *pip
 	}
 
 	// ---- discover
+	var related []RelatedCollection
 	if collectionID == "" {
 		if st := cancelled(); st != nil {
 			return st
@@ -361,6 +362,7 @@ func (s *Service) executeIngest(job model.PipelineJob, res *PipelineResult) *pip
 		switch {
 		case err == nil:
 			collectionID = disc.Collection.ID
+			related = disc.RelatedCollections
 		case errors.As(err, &dup) && job.Attempts > 1:
 			collectionID = dup.CollectionID // committed before the crash
 		default:
@@ -388,6 +390,31 @@ func (s *Service) executeIngest(job model.PipelineJob, res *PipelineResult) *pip
 		}
 		res.FilesImported, res.FilesSkipped = len(imp.Imported), len(imp.Skipped)
 		res.FilesFailed = len(imp.ParseFailures)
+	}
+	// A memory image found inside the folder is its own collection; import it
+	// like the folder so an unattended run does not leave it unanalysed.
+	for _, rc := range related {
+		if rc.Status != "discovered" || rc.CollectionID == "" {
+			continue
+		}
+		if st := cancelled(); st != nil {
+			return st
+		}
+		rids, err := svc.EvidenceFileIDs(job.CaseID, rc.CollectionID, EvidenceFilter{})
+		if err != nil {
+			return fail(err)
+		}
+		if len(rids) == 0 {
+			continue
+		}
+		imp, err := svc.ImportEvidence(job.CaseID, rc.CollectionID, rids)
+		if err != nil {
+			slog.Warn("pipeline: nested memory image import failed", "job", job.ID, "path", rc.Path, "error", err)
+			return fail(err)
+		}
+		res.FilesImported += len(imp.Imported)
+		res.FilesSkipped += len(imp.Skipped)
+		res.FilesFailed += len(imp.ParseFailures)
 	}
 	if n, err := s.store.CountEvents(job.CaseID); err == nil {
 		res.Events = n
