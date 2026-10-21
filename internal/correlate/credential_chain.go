@@ -1,19 +1,16 @@
 package correlate
 
 import (
+	"fmt"
 	"sort"
 	"time"
 
+	"tracefall/internal/authseq"
 	"tracefall/internal/model"
 )
 
-// Windowing constants for credential-related chains. Deliberately not
-// shared with internal/detect's bruteForceThenSuccess rule -- see
-// correlate.go's package doc: correlation is independent of detection, so
-// it doesn't import detect's internals, even for a constant. The values
-// themselves are the same because they describe the same real-world
-// pattern (a burst of failures followed by a success), not because the
-// packages are coupled.
+// Windowing constants are local policy; the neutral authseq helper is shared
+// by detection and correlation without either engine depending on the other.
 const (
 	credBruteForceThreshold     = 3
 	credBruteForceGapWindow     = 10 * time.Minute
@@ -21,15 +18,11 @@ const (
 	credAbuseLookWindow         = 2 * time.Hour
 )
 
-// BuildCredentialChains links credential-related event sequences into
-// evidence-backed narratives:
-//
-//   - brute force: a burst of failed logons (Security 4625) for the same
-//     (host, user) followed by a successful logon (4624).
-//   - credential abuse: explicit-credential use (4648) followed by a
-//     process actually running as that target account, followed by
-//     whatever that process did next -- stopping wherever the evidence
-//     stops, exactly like BuildActivityChains.
+// BuildCredentialChains links compatible authentication observations. Failures
+// are partitioned by acquisition, account/domain, source and logon context;
+// each success closes its run even while other failures continue. Explicit
+// credential attempts produce qualified hypotheses, never causal execution or
+// credential-abuse claims from account/process names and time alone.
 func BuildCredentialChains(caseID string, events []model.Event) []model.Correlation {
 	var out []model.Correlation
 	out = append(out, buildBruteForceChains(caseID, events)...)
@@ -39,108 +32,134 @@ func BuildCredentialChains(caseID string, events []model.Event) []model.Correlat
 }
 
 func buildBruteForceChains(caseID string, events []model.Event) []model.Correlation {
-	type key struct{ host, user string }
-	failuresByKey := map[key][]model.Event{}
-	successesByKey := map[key][]model.Event{}
-	for _, e := range byType(events, model.EventLogonFailure) {
-		k := key{e.Host, e.User}
-		failuresByKey[k] = append(failuresByKey[k], e)
-	}
-	for _, e := range byType(events, model.EventLogonSuccess) {
-		k := key{e.Host, e.User}
-		successesByKey[k] = append(successesByKey[k], e)
-	}
-
-	keys := make([]key, 0, len(failuresByKey))
-	for k := range failuresByKey {
-		keys = append(keys, k)
-	}
-	sort.Slice(keys, func(i, j int) bool {
-		if keys[i].host != keys[j].host {
-			return keys[i].host < keys[j].host
-		}
-		return keys[i].user < keys[j].user
-	})
-
 	var out []model.Correlation
-	for _, k := range keys {
-		failures := append([]model.Event{}, failuresByKey[k]...)
-		sort.Slice(failures, func(i, j int) bool { return failures[i].Timestamp.Before(failures[j].Timestamp) })
-
-		var burst []model.Event
-		flush := func() {
-			if len(burst) < credBruteForceThreshold {
-				burst = nil
-				return
-			}
-			last := burst[len(burst)-1]
-			for _, s := range successesByKey[k] {
-				if s.Timestamp.After(last.Timestamp) && withinWindow(last.Timestamp, s.Timestamp, credBruteForceSuccessWindow) {
-					chain := append(append([]model.Event{}, burst...), s)
-					out = append(out, buildTypedChainCorrelation(caseID, model.CorrelationCredentialChain, "Brute-force chain", chain))
-					break
-				}
-			}
-			burst = nil
+	for _, chain := range authseq.BeforeSuccess(events, credBruteForceThreshold, credBruteForceGapWindow, credBruteForceSuccessWindow) {
+		if chain[0].CaseID != "" && chain[0].CaseID != caseID {
+			continue
 		}
-		for i, f := range failures {
-			if i > 0 && !withinWindow(failures[i-1].Timestamp, f.Timestamp, credBruteForceGapWindow) {
-				flush()
-			}
-			burst = append(burst, f)
-		}
-		flush()
+		out = append(out, buildTypedChainCorrelation(caseID, model.CorrelationCredentialChain, "Brute-force chain", chain))
 	}
 	return out
 }
 
 func buildCredentialAbuseChains(caseID string, events []model.Event) []model.Correlation {
-	explicitCreds := byType(events, model.EventLogonExplicitCreds)
+	// Name/time alone is useful triage, not an execution or abuse finding.
+	// 4648's subject session belongs to the caller, NOT to the target account.
+	domain := func(e model.Event) string {
+		if d := e.Extra["subject_domain"]; d != "" {
+			return d
+		}
+		return e.Extra["target_domain"]
+	}
+	usable := func(e model.Event) bool { return processTime(e) && e.ArtifactType != model.ArtifactMemoryAnalysis }
+	ordered := func(a, b model.Event) bool {
+		return usable(a) && usable(b) && b.Timestamp.After(a.Timestamp) && b.Timestamp.Sub(a.Timestamp) <= credAbuseLookWindow
+	}
+	same := func(a, b model.Event) bool { return a.Host != "" && processScope(a) == processScope(b) }
 	creates := byType(events, model.EventProcessCreate)
-	netConns := byType(events, model.EventNetworkConnection)
-	registryRuns := byType(events, model.EventRegistryRunKey)
-	scheduledTasks := byType(events, model.EventScheduledTaskCreate)
-
-	// See activity_chain.go's identical indexing for why: without this,
-	// every explicit-credential event rescans every process-create in the
-	// case looking for the account it ran as.
-	createsByHostUser := indexEvents(creates, func(e model.Event) string { return chainKey(e.Host, e.User) })
-	createsByHostParent := indexEvents(creates, func(e model.Event) string { return chainKey(e.Host, e.ParentProcessName) })
-	registryRunsByHostProc := indexEvents(registryRuns, func(e model.Event) string { return chainKey(e.Host, e.ProcessName) })
-	scheduledTasksByHostProc := indexEvents(scheduledTasks, func(e model.Event) string { return chainKey(e.Host, e.ProcessName) })
-	netConnsByHostProc := indexEvents(netConns, func(e model.Event) string { return chainKey(e.Host, e.ProcessName) })
-
+	byPID := indexEvents(creates, func(e model.Event) string { return fmt.Sprintf("%s\x00%d", processScope(e), e.PID) })
+	byAccount := indexEvents(creates, func(e model.Event) string { return processScope(e) + "\x00" + e.User })
+	follows := indexEvents(events, func(e model.Event) string { return processScope(e) + "\x00" + e.User })
+	creds := byType(events, model.EventLogonExplicitCreds)
+	sort.Slice(creds, func(i, j int) bool {
+		if !creds[i].Timestamp.Equal(creds[j].Timestamp) {
+			return creds[i].Timestamp.Before(creds[j].Timestamp)
+		}
+		return creds[i].ID < creds[j].ID
+	})
 	var out []model.Correlation
-	for _, cred := range explicitCreds {
-		targetUser := cred.Extra["target_user_name"]
-		if targetUser == "" {
+	for _, cred := range creds {
+		target := cred.Extra["target_user_name"]
+		if target == "" || !usable(cred) || (cred.CaseID != "" && cred.CaseID != caseID) {
 			continue
 		}
-		proc, ok := earliestAfter(createsByHostUser[chainKey(cred.Host, targetUser)], cred.Host, targetUser, cred.Timestamp, credAbuseLookWindow)
-		if !ok {
+		if server := cred.Extra["target_server_name"]; server != "" && server != "-" && server != "localhost" && server != cred.Host {
 			continue
 		}
-		chain := []model.Event{cred, proc}
-
-		if child, ok := findChild(createsByHostParent[chainKey(proc.Host, proc.ProcessName)], proc); ok {
-			chain = append(chain, child)
+		var proc model.Event
+		candidateDomains := map[string]bool{}
+		count := 0
+		for _, p := range byAccount[processScope(cred)+"\x00"+target] {
+			if !same(cred, p) || !ordered(cred, p) || (cred.Extra["target_domain"] != "" && domain(p) != cred.Extra["target_domain"]) {
+				continue
+			}
+			if id := cred.Extra["target_logon_id"]; id != "" && (id == "0x0" || id != p.Extra["logon_id"]) {
+				continue
+			}
+			if guid := cred.Extra["target_logon_guid"]; guid != "" && guid != p.Extra["logon_guid"] {
+				continue
+			}
+			candidateDomains[domain(p)] = true
+			if count == 0 || p.Timestamp.Before(proc.Timestamp) {
+				proc = p
+				count = 1
+			} else if p.Timestamp.Equal(proc.Timestamp) {
+				count++
+			}
 		}
-		last := chain[len(chain)-1]
-		lk := chainKey(last.Host, last.ProcessName)
-		if p, ok := findPersistence(last.Host, last.ProcessName, last.Timestamp, activityLookWindow, registryRunsByHostProc[lk], scheduledTasksByHostProc[lk]); ok {
-			chain = append(chain, p)
-		} else if n, ok := findNetwork(netConnsByHostProc[lk], last.Host, last.ProcessName, last.Timestamp, activityLookWindow); ok {
-			chain = append(chain, n)
-		}
-
-		if len(chain) < 3 {
-			// Explicit creds with no corroborating follow-on activity
-			// isn't a chain worth surfacing on its own -- detect's
-			// explicitCredentialUse rule already reports the bare
-			// observation.
+		if count != 1 || (cred.Extra["target_domain"] == "" && len(candidateDomains) > 1) {
 			continue
 		}
-		out = append(out, buildTypedChainCorrelation(caseID, model.CorrelationCredentialChain, "Credential abuse chain", chain))
+		var next model.Event
+		count = 0
+		for _, e := range follows[processScope(proc)+"\x00"+proc.User] {
+			if !same(proc, e) || !ordered(proc, e) || domain(e) != domain(proc) {
+				continue
+			}
+			if a, c := proc.Extra["logon_id"], e.Extra["logon_id"]; a != "" && c != "" && a != c {
+				continue
+			}
+			if a, c := proc.Extra["process_guid"], e.Extra["process_guid"]; e.EventType != model.EventProcessCreate && a != "" && c != "" && a != c {
+				continue
+			}
+			match := false
+			switch e.EventType {
+			case model.EventProcessCreate:
+				match = e.ParentProcessName == proc.ProcessName && (e.PPID == 0 || proc.PID == 0 || e.PPID == proc.PID)
+			case model.EventNetworkConnection, model.EventRegistryRunKey, model.EventScheduledTaskCreate:
+				match = e.ProcessName == proc.ProcessName && (e.PID == 0 || proc.PID == 0 || e.PID == proc.PID)
+			}
+			if e.EventType == model.EventProcessCreate {
+				if g := e.Extra["parent_process_guid"]; g != "" && g != proc.Extra["process_guid"] {
+					match = false
+				}
+			}
+			if exit := proc.Extra["exit_time"]; exit != "" {
+				end, err := time.Parse(time.RFC3339Nano, exit)
+				if err != nil || !e.Timestamp.Before(end) {
+					match = false
+				}
+			}
+			if proc.PID > 0 {
+				for _, p := range byPID[fmt.Sprintf("%s\x00%d", processScope(proc), proc.PID)] {
+					if p.ID == proc.ID {
+						continue
+					}
+					if !processTime(p) || (!p.Timestamp.Before(proc.Timestamp) && !p.Timestamp.After(e.Timestamp)) {
+						match = false
+						break
+					}
+				}
+			}
+			if !match {
+				continue
+			}
+			if count == 0 || e.Timestamp.Before(next.Timestamp) {
+				next = e
+				count = 1
+			} else if e.Timestamp.Equal(next.Timestamp) {
+				count++
+			}
+		}
+		if count != 1 {
+			continue
+		}
+		c := buildTypedChainCorrelation(caseID, model.CorrelationCredentialChain, "Hypothetical explicit-credential relationship", []model.Event{cred, proc, next})
+		c.Description = "Hypothetical temporal relationship between an explicit-credential attempt and account-name/process-name observations in compatible acquisition, domain and available session context. These observations do not establish successful credential use or causal execution; absent target-session binding, they do not identify execution caused by this attempt."
+		if cred.Extra["target_domain"] == "" {
+			c.Description += " Unknown target domain: only an account-name hypothesis is available, not an identified target account."
+		}
+		out = append(out, c)
 	}
 	return out
 }
@@ -153,24 +172,4 @@ func withinWindow(a, b time.Time, window time.Duration) bool {
 		d = -d
 	}
 	return d <= window
-}
-
-// earliestAfter returns the earliest event in events for (host, user)
-// with Timestamp >= at and within window of it -- the process that first
-// ran as the target account after the explicit-credential logon.
-func earliestAfter(events []model.Event, host, user string, at time.Time, window time.Duration) (model.Event, bool) {
-	var best model.Event
-	found := false
-	for _, e := range events {
-		if e.Host != host || e.User != user {
-			continue
-		}
-		if e.Timestamp.Before(at) || e.Timestamp.Sub(at) > window {
-			continue
-		}
-		if !found || e.Timestamp.Before(best.Timestamp) {
-			best, found = e, true
-		}
-	}
-	return best, found
 }

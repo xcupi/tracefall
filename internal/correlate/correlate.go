@@ -3,8 +3,9 @@
 // invents an event or a link that isn't backed by the evidence actually
 // present in the case. Three kinds of correlation are implemented:
 //
-//   - process_chain:   a child process's recorded parent-process name
-//     matches an actual parent process-create event on the same host.
+//   - process_chain: a recorded parent PID/GUID with compatible lifetime
+//     and acquisition identifies a parent instance. A unique name/time-only
+//     relationship is explicitly hypothetical and never identifies a PID.
 //   - temporal:        events on the same host clustered into bursts of
 //     activity separated by quiet gaps.
 //   - activity_chain:  a narrative sequence (e.g. logon -> Office ->

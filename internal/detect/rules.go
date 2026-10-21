@@ -3,10 +3,10 @@ package detect
 import (
 	"fmt"
 	"regexp"
-	"sort"
 	"strings"
 	"time"
 
+	"tracefall/internal/authseq"
 	"tracefall/internal/model"
 	"tracefall/internal/procclass"
 )
@@ -281,75 +281,12 @@ func (r bruteForceThenSuccess) Inputs() model.EventFilter {
 }
 
 func (r bruteForceThenSuccess) Evaluate(events []model.Event) []model.Finding {
-	type key struct{ host, user string }
-	failuresByKey := map[key][]model.Event{}
-	successesByKey := map[key][]model.Event{}
-
-	for _, e := range byType(events, model.EventLogonFailure) {
-		k := key{e.Host, e.User}
-		failuresByKey[k] = append(failuresByKey[k], e)
-	}
-	for _, e := range byType(events, model.EventLogonSuccess) {
-		k := key{e.Host, e.User}
-		successesByKey[k] = append(successesByKey[k], e)
-	}
-
 	var findings []model.Finding
-	// Keys are walked in order, and each burst is built from failures ordered
-	// by timestamp then id, so the findings (and their supporting-event order,
-	// which feeds the finding id) are the same on every run.
-	keys := make([]key, 0, len(failuresByKey))
-	for k := range failuresByKey {
-		keys = append(keys, k)
-	}
-	sort.Slice(keys, func(i, j int) bool {
-		if keys[i].host != keys[j].host {
-			return keys[i].host < keys[j].host
-		}
-		return keys[i].user < keys[j].user
-	})
-	for _, k := range keys {
-		failures := failuresByKey[k]
-		sort.SliceStable(failures, func(i, j int) bool {
-			if !failures[i].Timestamp.Equal(failures[j].Timestamp) {
-				return failures[i].Timestamp.Before(failures[j].Timestamp)
-			}
-			return failures[i].ID < failures[j].ID
-		})
-
-		// Build contiguous bursts of failures where consecutive gaps stay within bruteForceGapWindow.
-		var burst []model.Event
-		flush := func() {
-			if len(burst) < bruteForceThreshold {
-				burst = nil
-				return
-			}
-			last := burst[len(burst)-1]
-			for _, s := range successesByKey[k] {
-				if s.Timestamp.After(last.Timestamp) && withinWindow(last.Timestamp, s.Timestamp, bruteForceSuccessWindow) {
-					supporting := append(append([]model.Event{}, burst...), s)
-					title := fmt.Sprintf("%d failed logons followed by success for %s", len(burst), orDash(k.user))
-					desc := fmt.Sprintf(
-						"User %q on host %s had %d failed logon attempts between %s and %s, followed by a "+
-							"successful logon at %s. This pattern is consistent with brute-force or password-"+
-							"spray credential access followed by successful authentication.",
-						orDash(k.user), k.host, len(burst), burst[0].Timestamp.Format(time.RFC3339),
-						last.Timestamp.Format(time.RFC3339), s.Timestamp.Format(time.RFC3339))
-					findings = append(findings, newFinding(s.CaseID, r.ID(), title, model.SeverityHigh, model.ConfidenceHigh,
-						desc, []string{"T1110", "T1078"}, supporting))
-					break // one finding per burst is enough
-				}
-			}
-			burst = nil
-		}
-
-		for i, f := range failures {
-			if i > 0 && !withinWindow(failures[i-1].Timestamp, f.Timestamp, bruteForceGapWindow) {
-				flush()
-			}
-			burst = append(burst, f)
-		}
-		flush()
+	for _, chain := range authseq.BeforeSuccess(events, bruteForceThreshold, bruteForceGapWindow, bruteForceSuccessWindow) {
+		s := chain[len(chain)-1]
+		title := fmt.Sprintf("%d failed logons followed by success for %s", len(chain)-1, orDash(s.User))
+		desc := fmt.Sprintf("User %q on host %s had %d failed logon attempts followed by a successful authentication. This temporal pattern is consistent with credential guessing; it does not establish that the attempts caused the success.", orDash(s.User), s.Host, len(chain)-1)
+		findings = append(findings, newFinding(s.CaseID, r.ID(), title, model.SeverityHigh, model.ConfidenceHigh, desc, []string{"T1110", "T1078"}, chain))
 	}
 	return findings
 }
