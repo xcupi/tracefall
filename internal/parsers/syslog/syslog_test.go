@@ -164,3 +164,78 @@ func TestReal_SyslogSample(t *testing.T) {
 		t.Errorf("%d jobs matched no known group; the sample changed or the parser mangled a command", groups["other"])
 	}
 }
+
+func parseText(t *testing.T, name, body string) parsers.ParseResult {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), name)
+	if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	res, err := New().Parse(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return res
+}
+
+func TestDetect_DaemonLogButNotMessages(t *testing.T) {
+	p := New()
+	for _, ok := range []string{"daemon.log", "var/log/daemon.log", "DAEMON.LOG", "daemon.log.1"} {
+		if !p.Detect(ok) {
+			t.Errorf("Detect(%q) = false", ok)
+		}
+	}
+	for _, no := range []string{"messages", "daemon.log.gz", "daemon.logger", "kern.log"} {
+		if p.Detect(no) {
+			t.Errorf("Detect(%q) = true", no)
+		}
+	}
+}
+
+func TestParse_DatabaseServiceMessages(t *testing.T) {
+	body := "" +
+		"Mar 18 10:18:30 host01 mysqld_safe[7136]: 100318 10:18:30 [ERROR] Aborting\n" +
+		"Mar 18 10:18:33 host01 mysqld[7355]: 100318 10:18:33  InnoDB: Database was not shut down normally!\n" +
+		"Mar 18 10:18:42 host01 /etc/mysql/debian-start[7526]: mysql.user                                         OK\n" +
+		"Mar 18 10:18:42 host01 /etc/mysql/debian-start[7566]: WARNING: mysql.user contains 2 root accounts without password!\n" +
+		"Apr 14 14:44:36 host01 /etc/mysql/debian-start[5624]: WARNING: mysqlcheck has found corrupt tables\n" +
+		"Mar 18 10:18:31 host01 mysqld[7275]: 100318 10:18:31 [Note] /usr/sbin/mysqld: ready for connections.\n" +
+		"Mar 18 10:18:31 host01 dhclient: can't create /var/lib/dhcp3/dhclient.eth0.leases: Permission denied\n" +
+		"Mar 18 10:18:31 host01 ntpd[1]: failed to initialize interface for address ::1\n"
+	res := parseText(t, "daemon.log", body)
+	var cats []string
+	for _, e := range res.Events {
+		if e.EventType != model.EventServiceMessage {
+			t.Fatalf("unexpected type %q", e.EventType)
+		}
+		cats = append(cats, e.Extra["category"])
+		if !e.Timestamp.IsZero() {
+			t.Error("no year in the log; Timestamp must stay zero")
+		}
+		if e.Extra["meaning"] == "" || e.Extra["message"] == "" {
+			t.Errorf("an event must say what the line does and does not show: %v", e.Extra)
+		}
+	}
+	want := []string{"database_error", "database_integrity", "database_insecure_account", "database_integrity", "database_lifecycle"}
+	if strings.Join(cats, ",") != strings.Join(want, ",") {
+		t.Fatalf("categories %v, want %v (other daemons and the 'OK' check line are not on the allow-list)", cats, want)
+	}
+	if got := res.Events[0].Extra["embedded_stamp"]; got != "100318 10:18:30" {
+		t.Errorf("embedded stamp %q must be kept verbatim", got)
+	}
+	if res.Events[2].ProcessName != "debian-start" || res.Events[2].Extra["program"] != "debian-start" {
+		t.Errorf("program should be the base name: %q", res.Events[2].ProcessName)
+	}
+	if res.Events[2].SourceReference != "line:4" {
+		t.Errorf("source reference %q", res.Events[2].SourceReference)
+	}
+}
+
+func TestParse_AMessageFromAnotherProgramIsNotClaimed(t *testing.T) {
+	// The same words from a program that is not a MySQL component are not
+	// evidence about MySQL.
+	res := parseText(t, "syslog", "Mar 18 10:18:42 host01 someapp[1]: WARNING: mysql.user contains 2 root accounts without password!\n")
+	if len(res.Events) != 0 {
+		t.Fatalf("got %d events from the wrong program", len(res.Events))
+	}
+}

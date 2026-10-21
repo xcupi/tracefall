@@ -22,6 +22,21 @@
 //     command it authorised; it does not prove the command ran.
 //   - sshd: "Accepted <method> for U from IP port N" -> logon_success, and
 //     "Failed <method> for [invalid user] U from IP port N" -> logon_failure.
+//   - useradd, userdel, usermod, groupadd, groupdel, gpasswd, passwd and
+//     chpasswd -> account_change. The log says the system applied the
+//     change; it does not say who asked for it, so the event's User is
+//     empty and the account or group changed is in Extra["object_name"].
+//     The shadow-group twin of a group line is not emitted: it repeats
+//     the line before it.
+//
+// # Relative time
+//
+// A year-less stamp still orders the lines of ONE file and measures the
+// distance between them. Each event therefore also carries
+// Extra["partial_ordinal"] (seconds from 1 January 00:00:00 of an
+// unspecified year) and Extra["partial_calendar"]. See package partialtime
+// for what that can and cannot support: it never yields a date, never
+// compares two files, and gives no distance across a New Year.
 //
 // PAM session open/close lines and systemd or CRON noise are not emitted:
 // they repeat the action lines above or describe nothing an examiner acts
@@ -40,6 +55,7 @@ import (
 	"tracefall/internal/model"
 	"tracefall/internal/normalize"
 	"tracefall/internal/parsers"
+	"tracefall/internal/partialtime"
 )
 
 const parserName = "authlog@1"
@@ -59,6 +75,29 @@ var (
 	sshFail   = regexp.MustCompile(`^Failed (\S+) for (invalid user )?(\S+) from (\S+) port ([0-9]+)`)
 )
 
+// Account-management lines. shadow-utils quotes names with a backtick and an
+// apostrophe in older releases and with two apostrophes in newer ones.
+const q = "[`']"
+
+var (
+	acctNewUser    = regexp.MustCompile(`^new user: name=([^,]+), UID=([0-9]+), GID=([0-9]+), home=([^,]*), shell=(.*)$`)
+	acctNewGroup   = regexp.MustCompile(`^new group: name=([^,]+), GID=([0-9]+)`)
+	acctDelUser    = regexp.MustCompile("^delete user " + q + "([^'`]+)" + q)
+	acctDelGroupA  = regexp.MustCompile("^removed group " + q + "([^'`]+)" + q)
+	acctDelGroupB  = regexp.MustCompile("^group " + q + "([^'`]+)" + q + " removed")
+	acctAddMember  = regexp.MustCompile("^add " + q + "([^'`]+)" + q + " to group " + q + "([^'`]+)" + q)
+	acctDelMember  = regexp.MustCompile("^delete " + q + "([^'`]+)" + q + " from group " + q + "([^'`]+)" + q)
+	acctPwChanged  = regexp.MustCompile(`^pam_unix\((?:passwd|chpasswd):chauthtok\): password changed for (\S+)`)
+	acctModPw      = regexp.MustCompile("^change user " + q + "([^'`]+)" + q + " password")
+	acctLockUnlock = regexp.MustCompile("^(lock|unlock) user " + q + "([^'`]+)" + q + " password")
+	acctModOther   = regexp.MustCompile("^change user " + q + "([^'`]+)" + q + " (.+)$")
+)
+
+var accountProcs = map[string]bool{
+	"useradd": true, "userdel": true, "usermod": true, "groupadd": true, "groupdel": true,
+	"groupmod": true, "gpasswd": true, "passwd": true, "chpasswd": true,
+}
+
 // Parser implements parsers.ArtifactParser.
 type Parser struct{}
 
@@ -75,8 +114,12 @@ func (Parser) Detect(relPath string) bool {
 	if strings.EqualFold(base, "auth.log") {
 		return true
 	}
-	return regexp.MustCompile(`(?i)^auth\.log\.[0-9]+$`).MatchString(base)
+	return authRotation.MatchString(base)
 }
+
+// authRotation matches the numbered plain rotations. Red Hat's "secure" is
+// the same log, but its name is too common to claim by name alone.
+var authRotation = regexp.MustCompile(`(?i)^auth\.log\.[0-9]+$`)
 
 // DetectContent returns false: syslog text has no signature to sniff, and
 // claiming any log that looks like one would misclassify other files.
@@ -106,6 +149,7 @@ func (p Parser) ParseWithContext(absPath string, ctx parsers.ParseContext) (pars
 
 	sourceName := filepath.Base(absPath)
 	var out parsers.ParseResult
+	var stamps []string // every stamp in the file, so the calendar is the file's
 	for i, line := range strings.Split(text, "\n") {
 		line = strings.TrimRight(line, "\r")
 		if strings.TrimSpace(line) == "" {
@@ -116,6 +160,7 @@ func (p Parser) ParseWithContext(absPath string, ctx parsers.ParseContext) (pars
 			continue
 		}
 		stamp, host, proc, msg := m[1], m[2], m[3], m[4]
+		stamps = append(stamps, stamp)
 		ref := "line:" + strconv.Itoa(i+1)
 
 		var ev *model.Event
@@ -126,6 +171,10 @@ func (p Parser) ParseWithContext(absPath string, ctx parsers.ParseContext) (pars
 			ev = sudoEvent(msg)
 		case "sshd":
 			ev = sshEvent(msg)
+		default:
+			if accountProcs[proc] {
+				ev = accountEvent(proc, msg)
+			}
 		}
 		if ev == nil {
 			continue
@@ -146,7 +195,70 @@ func (p Parser) ParseWithContext(absPath string, ctx parsers.ParseContext) (pars
 		out.Events = append(out.Events, *ev)
 		out.Raw = append(out.Raw, model.RawEvidence{SourceReference: ref, Raw: line})
 	}
+	// The calendar needs the whole file: one "Feb 29" anywhere makes it a
+	// leap-year log, and every event is read against the same calendar.
+	cal := partialtime.CalendarFor(stamps)
+	for i := range out.Events {
+		partialtime.Annotate(out.Events[i].Extra, out.Events[i].Extra["timestamp_partial"], cal)
+	}
 	return out, nil
+}
+
+// accountEvent maps one shadow-utils or PAM account line to an
+// account_change event, or nil for a line it does not recognise or one that
+// only repeats the line before it (the shadow-group twin).
+func accountEvent(proc, msg string) *model.Event {
+	if strings.Contains(msg, "shadow group") {
+		return nil
+	}
+	mk := func(action, objType, name string, extra map[string]string) *model.Event {
+		if extra == nil {
+			extra = map[string]string{}
+		}
+		extra["action"], extra["object_type"], extra["object_name"] = action, objType, name
+		extra["actor_known"] = "false: the log records that the change was applied, not who requested it"
+		return &model.Event{
+			EventType: model.EventAccountChange, ProcessName: proc, Confidence: 0.9, Extra: extra,
+		}
+	}
+	if m := acctNewUser.FindStringSubmatch(msg); m != nil {
+		return mk("user_created", "user", m[1], map[string]string{"uid": m[2], "gid": m[3], "home": m[4], "shell": m[5]})
+	}
+	if m := acctNewGroup.FindStringSubmatch(msg); m != nil {
+		return mk("group_created", "group", m[1], map[string]string{"gid": m[2]})
+	}
+	if m := acctDelUser.FindStringSubmatch(msg); m != nil {
+		return mk("user_deleted", "user", m[1], nil)
+	}
+	if m := acctDelGroupA.FindStringSubmatch(msg); m != nil {
+		return mk("group_deleted", "group", m[1], nil)
+	}
+	if m := acctDelGroupB.FindStringSubmatch(msg); m != nil {
+		return mk("group_deleted", "group", m[1], nil)
+	}
+	if m := acctAddMember.FindStringSubmatch(msg); m != nil {
+		return mk("group_member_added", "group", m[2], map[string]string{"member": m[1]})
+	}
+	if m := acctDelMember.FindStringSubmatch(msg); m != nil {
+		return mk("group_member_removed", "group", m[2], map[string]string{"member": m[1]})
+	}
+	if m := acctPwChanged.FindStringSubmatch(msg); m != nil {
+		return mk("password_changed", "user", m[1], nil)
+	}
+	if m := acctModPw.FindStringSubmatch(msg); m != nil {
+		return mk("password_changed", "user", m[1], nil)
+	}
+	if m := acctLockUnlock.FindStringSubmatch(msg); m != nil {
+		action := "password_locked"
+		if m[1] == "unlock" {
+			action = "password_unlocked"
+		}
+		return mk(action, "user", m[2], nil)
+	}
+	if m := acctModOther.FindStringSubmatch(msg); m != nil {
+		return mk("user_modified", "user", m[1], map[string]string{"change": m[2]})
+	}
+	return nil
 }
 
 func suEvent(msg string) *model.Event {

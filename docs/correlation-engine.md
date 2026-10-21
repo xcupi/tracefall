@@ -122,6 +122,13 @@ narratives:
   steps — bare 4648 activity with no follow-on stays a standalone
   low-confidence finding (rule 12), never inflated into a chain.
 
+**Sequence brute force (logs with no year).** `buildSequenceBruteForceChains`
+makes the same chain for `auth.log`-style events, which have no timestamp. It
+uses only line order and the distance between stamps inside one file
+(`internal/partialtime`), keyed by account and source address. The chain has no
+first/last-seen date, and it is never built across two files or across a New
+Year.
+
 ### `service_chain`
 
 Built by `internal/correlate/service_chain.go`'s `BuildServiceChains`: a

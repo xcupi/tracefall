@@ -32,6 +32,12 @@ func All() []Rule {
 		networkAfterExecution{},
 		remoteLogonObserved{},
 		memoryProcessSignals{},
+		// Linux and server logs. See rules_hostlogs.go.
+		bruteForceSequence{},
+		webAttackIndicators{},
+		accountChangeObserved{},
+		databaseInsecureAccount{},
+		systemChangeCommand{},
 	}
 }
 

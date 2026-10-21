@@ -50,6 +50,44 @@ type RuleDoc struct {
 // ruleDocs is keyed by Rule.ID(). Values are the levels the rule code in
 // rules.go actually assigns.
 var ruleDocs = map[string]RuleDoc{
+	"brute-force-then-success-sequence": {
+		Title:        "Failed logons then success, ordered within a log that has no year",
+		Detects:      "Three or more failed logons for one account from one address, each close to the one before it in the same log file, followed within thirty minutes by a successful logon for the same account from the same address.",
+		BaseSeverity: "high", BaseConfidence: "medium", MaxSeverity: "high", MaxConfidence: "medium",
+		Basis:      "Same shape as the dated brute-force rule, for logs that carry no year. Order comes from line numbers and the distance between stamps in ONE file; the date is unknown and no year is guessed. Confidence is medium, not high, because relative time cannot be checked against another source and the pattern is also a person mistyping a password. The account and the address must both match, so one source cannot be blamed for another's failures. Lines from different files, or across a New Year, are never joined.",
+		Techniques: []string{"T1110", "T1078"},
+	},
+	"web-attack-indicators": {
+		Title:        "Web requests that resemble an attack",
+		Detects:      "Requests in a web server access log, grouped by source address and kind, whose URL or user agent resembles SQL injection, path traversal, command injection, cross-site scripting, a web shell, a vulnerability scanner or a probe of an administration interface.",
+		BaseSeverity: "low", BaseConfidence: "low", MaxSeverity: "high", MaxConfidence: "medium",
+		Escalates:  []string{"Five or more such requests from one source, or more than one kind from the same source (confidence to medium)", "A web-shell request answered with a 2xx status (severity to high)"},
+		Basis:      "The log shows what was asked and what status came back, never what the application did, so every finding is worded as an attempt. Single words are not matched, only constructs that do not occur in ordinary browsing (union select, ../../, php://). A single hit on an administration URL is background noise on any public server, so that kind needs three requests. A scanner is identified by its self-declared user agent, which an attacker controls, so it is low severity.",
+		Techniques: []string{"T1190", "T1505.003", "T1595.002", "T1595.003"},
+	},
+	"account-change-observed": {
+		Title:        "Local account created or added to a privileged group",
+		Detects:      "A system log recording a new local account, or an account added to a group that grants administrative power or remote access.",
+		BaseSeverity: "low", BaseConfidence: "medium", MaxSeverity: "high", MaxConfidence: "high",
+		Escalates:  []string{"Account added to an administrative or remote-access group (severity to high)", "Account created with user id 0 (severity and confidence to high)"},
+		Basis:      "The record shows the change was applied, not who asked for it. Accounts with no login shell and a system-range id are skipped because package installs create them routinely. Deletions, password changes and other group changes stay on the timeline without a finding.",
+		Techniques: []string{"T1136.001", "T1098"},
+	},
+	"database-insecure-account": {
+		Title:        "Database server reported administrator accounts without a password",
+		Detects:      "The database server's own start-up check logging that administrator accounts have no password.",
+		BaseSeverity: "medium", BaseConfidence: "high", MaxSeverity: "medium", MaxConfidence: "high",
+		Basis:      "The server itself reported it, so confidence in the observation is high. Severity is medium because the log shows the weakness existed, not that anyone used it. The log has no year, so duration is reported as a number of warnings, not a date range.",
+		Techniques: []string{"T1078.001"},
+	},
+	"system-change-command": {
+		Title:        "Command that changes the firewall, persistence or accounts",
+		Detects:      "A command line that adds or removes a firewall rule, turns the firewall off, installs a scheduled task, service, Run key, cron entry or authorized key, or creates an account or adds one to a group.",
+		BaseSeverity: "low", BaseConfidence: "low", MaxSeverity: "high", MaxConfidence: "medium",
+		Escalates:  []string{"Firewall turned off or flushed, a persistence mechanism installed, or an account created (severity to medium)", "Membership of an administrative group, a root-equivalent account, an authorized key, an Image File Execution Options key or a WMI subscription (severity to high)", "The command line of a process that started, rather than a sudo or history line (confidence to medium)"},
+		Basis:      "Administrators run these commands as often as attackers do, so the finding is a lead. Confidence follows what the source proves: a process record shows a start, sudo shows an authorisation, shell history shows typing; none shows the change took effect. Commands that only list state are not matched, and secrets typed on a command line are never copied into a finding. Repeats of the same action by the same account on the same host are one finding with a count.",
+		Techniques: []string{"T1562.004", "T1053.005", "T1053.003", "T1543.003", "T1547.001", "T1098", "T1136.001"},
+	},
 	"memory-process-signals": {
 		Title:        "Corroborated memory process review",
 		Detects:      "One process-level lead for private executable PE memory, independently corroborated executable regions, a successfully compared process-list discrepancy, or writable-image execution with a remote socket in the same acquisition.",

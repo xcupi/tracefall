@@ -33,6 +33,7 @@ const (
 func BuildCredentialChains(caseID string, events []model.Event) []model.Correlation {
 	var out []model.Correlation
 	out = append(out, buildBruteForceChains(caseID, events)...)
+	out = append(out, buildSequenceBruteForceChains(caseID, events)...)
 	out = append(out, buildCredentialAbuseChains(caseID, events)...)
 	return out
 }

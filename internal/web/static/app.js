@@ -879,6 +879,8 @@ const ARTIFACT_TYPE_LABELS = {
   wtmp: "Login records (wtmp)",
   auth_log: "Authentication log (auth.log)",
   syslog: "System log (syslog)",
+  web_access_log: "Web server access log",
+  package_log: "Package log (dpkg)",
   journal: "Systemd journal",
   browser_history: "Browser history (Chromium / Firefox)",
   browser_download: "Browser download",
@@ -1033,6 +1035,14 @@ const EVENT_CATEGORIES = {
   privilege_switch: "authentication",
   // sudo authorised the command; it is execution evidence like shell history.
   sudo_command: "execution",
+  // Server and host logs. An account change is recorded by the system, not
+  // by a person's activity, so it sits with accounts. A web request is what
+  // a server was asked, not what a host did, so it has its own category,
+  // and package and service messages describe the host's configuration.
+  account_change: "account",
+  web_request: "web",
+  package_change: "system",
+  service_message: "system",
   // cron started a scheduled job as an account: execution, and a persistence lead.
   scheduled_job_run: "execution",
   // Generic service log entries: context, not a classified action.
@@ -1073,6 +1083,8 @@ const EVENT_CATEGORY_LABELS = {
   // records a process.
   user_activity: "User Activity",
   account: "Account / Credential",
+  web: "Web Server",
+  system: "System / Service",
   // Metadata carried INSIDE a file, as opposed to anything the machine
   // did. An EXIF timestamp is the writing device's clock, not this
   // host's, and the category keeps that distinction visible in the

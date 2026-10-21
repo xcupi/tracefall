@@ -100,6 +100,8 @@ what the binary can actually parse:
 | `wtmp` | Login records (wtmp) | Log | High | `wtmp@1` |
 | `auth_log` | Authentication log (auth.log) | Log | High | `authlog@1` |
 | `syslog` | System log (syslog) | Log | High | `syslog@1` |
+| `web_access_log` | Web server access log | Log | High | `webaccess@1` |
+| `package_log` | Package log (dpkg) | Log | Medium | `packagelog@1` |
 | `journal` | Systemd journal | Log | Medium | `journal@1` |
 | `prefetch` | Prefetch | Prefetch | High | `prefetch@1`, `pecmd@1` |
 | `registry_run_key` | Registry (RECmd export) | Registry | High | `recmd@1` |
@@ -948,10 +950,33 @@ target `postgres`, invoked by `root`) and 4 `sudo` commands. The `su` target
 is `postgres`; the invoking account is `root`, so this line alone does not
 show which person was behind the session.
 
+**Account and group changes.** `useradd`, `userdel`, `usermod`, `groupadd`,
+`groupdel`, `gpasswd`, `passwd` and `chpasswd` lines become `account_change`
+events. `Extra["action"]` is one of `user_created`, `user_deleted`,
+`user_modified`, `group_created`, `group_deleted`, `group_member_added`,
+`group_member_removed`, `password_changed`, `password_locked` or
+`password_unlocked`; `object_type`, `object_name` and, where the line has
+them, `uid`, `gid`, `home`, `shell` and `member` complete it. The log records
+that the system applied the change, not who asked for it, so the event's
+`User` is empty and `actor_known` says why. The shadow-group twin of a group
+line repeats the line before it and is not emitted. A failed password change
+("new password not accepted") is not a change and is not emitted.
+
+**Relative time.** A year-less stamp still orders the lines of one file and
+measures the distance between them. Each event also carries
+`Extra["partial_ordinal"]` (seconds from 1 January 00:00:00 of an unspecified
+year) and `Extra["partial_calendar"]` (`leap` when the file holds a "Feb 29",
+otherwise `common`). The rules `brute-force-then-success-sequence` and the
+sequence credential chain use only these. They never produce a date, never
+compare two files (rotations may cover different years), and never bridge a
+New Year (a stamp that goes backwards while the line number goes forward).
+
 Limitations, stated rather than hidden:
 
 - A full timestamp is available only from another source, for example the
   correlation of an event with a dated artifact. Nothing here supplies one.
+- `secure` (the Red Hat name for the same log) is not claimed: the name is too
+  common to claim on its own.
 - `auth.log.1` on the Insider image holds only CRON, realmd, systemd, polkit
   and gdm lines, so it correctly produces zero events. The count is verified
   against an independent pass over the raw file.
@@ -982,6 +1007,28 @@ On the Insider image, `syslog` gives 105 jobs (70 + 1 `debian-sa1`, 23
 independent count of the raw files. `installer/syslog`, a BusyBox installer
 log, is also detected by name and correctly yields zero events, since it has
 no cron lines.
+
+**Daemon log and service messages.** `daemon.log` and its rotations are read
+in the same format. A fixed allow-list of MySQL messages becomes
+`service_message` events, from the programs `mysqld`, `mysqld_safe`,
+`mysqlcheck`, `debian-start` and `mysql` only:
+
+| `Extra["category"]` | Matches |
+|---|---|
+| `database_insecure_account` | "root accounts without password" |
+| `database_integrity` | corrupt or crashed tables, "not shut down normally", crash recovery |
+| `database_error` | `[ERROR]` lines and `ERROR:` start-up errors |
+| `database_lifecycle` | start, "ended", shutdown complete, ready for connections |
+
+Each event keeps the message, the program and a `meaning` that says what the
+line does and does not show. The list is short on purpose: a line that is not
+on it proves nothing about what happened. The same words from a different
+program are not claimed. `messages` is not claimed (name too common), and
+`kern.log`, `user.log`, `debug`, `udev` and `dmesg` are not parsed.
+
+mysqld stamps its own messages with a `YYMMDD HH:MM:SS` date. That text is
+kept verbatim in `Extra["embedded_stamp"]`. It is the server's own clock; it is
+not used to date the syslog stamp or any other line.
 
 Not done: systemd unit start and stop, kernel, NetworkManager and DHCP events.
 The journal (`/var/log/journal`) is not on this image, so it cannot be
@@ -1432,3 +1479,49 @@ there at a guessed position.
 Support flips automatically because it is derived from the registry.
 Nothing in the frontend changes: the dashboard renders whatever the
 capability endpoint reports.
+
+
+### Web server access log (`webaccess@1`)
+
+Parses Apache-style access logs in Common and Combined Log Format. It claims
+`access.log`, `access_log`, `*-access.log`, `other_vhosts_access.log` and
+numbered plain rotations by name, and any file whose whole first line has the
+layout (address, bracketed date with an offset, quoted request, status), so a
+renamed log is still found while no other text is mistaken for one.
+Compressed rotations are not claimed.
+
+One `web_request` event per matching line, with the client address as the
+network source, the logged user, and in `Extra`: `method`, `uri` (exactly as
+logged), `protocol`, `request_line`, `status`, `bytes`, `referrer`,
+`user_agent` and `log_utc_offset`. Anything the server appended after the user
+agent (a request id, the time taken) is kept as text in `trailing_fields`.
+The timestamp carries a UTC offset, so the event has a real UTC time.
+
+Limitations:
+
+- A line shows what was asked and what status came back. It does not show what
+  the application did. A request that looks like an attack is an attempt; a
+  200 does not prove it worked and a 404 does not prove it failed.
+- The URL is stored raw. Decoding and classification happen in the rule
+  `web-attack-indicators`, so the evidence is never altered.
+- Lines of another layout are skipped and counted in `unparsed_lines` on the
+  first event. The Apache error log is a different format and is not parsed.
+- The host name is not in the log. It is filled in from the collection like
+  other host-less artifacts, and left empty when that is ambiguous.
+- A rule reads every request of a case, so memory grows with the size of the
+  logs. The parser limit is 256 MiB per file.
+
+### Package log (`packagelog@1`)
+
+Parses `dpkg.log` and its numbered plain rotations. One `package_change` event
+for each `install`, `upgrade`, `remove` and `purge` line, with `package`,
+`architecture` (when the name carries one), `version_before`, `version_after`
+and `action`. The `status`, `configure`, `trigproc` and `startup` lines are the
+steps of a transaction and are not emitted.
+
+dpkg writes local time and does not record the zone. The zone is not assumed,
+so the event's `Timestamp` stays zero and the date is kept as written in
+`Extra["timestamp_local"]`. The date has a year, so it can be compared with
+dated artifacts once the host's zone is established. The event proves the
+package database changed. It does not show that anything in the package ran, or
+who asked. `apt/history.log` and `apt/term.log` are not parsed.

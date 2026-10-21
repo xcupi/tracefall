@@ -44,6 +44,7 @@ import (
 	lnkparser "tracefall/internal/parsers/lnk"
 	"tracefall/internal/parsers/logfile"
 	"tracefall/internal/parsers/mft"
+	"tracefall/internal/parsers/packagelog"
 	"tracefall/internal/parsers/pecmd"
 	"tracefall/internal/parsers/prefetchraw"
 	"tracefall/internal/parsers/pshistory"
@@ -55,6 +56,7 @@ import (
 	"tracefall/internal/parsers/syslog"
 	"tracefall/internal/parsers/usnjrnl"
 	"tracefall/internal/parsers/volatility"
+	"tracefall/internal/parsers/webaccess"
 	"tracefall/internal/parsers/wtmp"
 	"tracefall/internal/regf"
 )
@@ -89,6 +91,12 @@ func Registry() []parsers.ArtifactParser {
 		authlog.New(),
 		syslog.New(),
 		journal.New(),
+		// Package and web server logs. dpkg.log is name-only. The access
+		// log is claimed by name, and also by the layout of its first
+		// line, so a renamed log is still found while no other text file
+		// is mistaken for one.
+		packagelog.New(),
+		webaccess.New(),
 		// Roadmap item 4: the combined Volatility output for a memory
 		// image. Detected by its fixed name and confirmed by its schema
 		// marker, so nothing else can be claimed as one.

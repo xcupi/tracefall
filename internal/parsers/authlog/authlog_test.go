@@ -7,9 +7,11 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"tracefall/internal/model"
 	"tracefall/internal/parsers"
+	"tracefall/internal/partialtime"
 )
 
 func writeLog(t *testing.T, name, body string) string {
@@ -173,6 +175,104 @@ func TestReal_AuthLogSample(t *testing.T) {
 	for _, ev := range res.Events {
 		if ev.EventType == model.EventPrivilegeSwitch && (ev.Extra["target_user"] != "postgres" || ev.Extra["outcome"] != "success" || ev.User != "root" || !strings.HasPrefix(ev.Extra["timestamp_partial"], "Mar 20 11:26:2")) {
 			t.Errorf("su %s: target %q outcome %q user %q at %q", ev.SourceReference, ev.Extra["target_user"], ev.Extra["outcome"], ev.User, ev.Extra["timestamp_partial"])
+		}
+	}
+}
+
+func parseBody(t *testing.T, body string) parsers.ParseResult {
+	t.Helper()
+	res, err := New().Parse(writeLog(t, "auth.log", body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return res
+}
+
+func TestParse_AccountLifecycle(t *testing.T) {
+	body := "" +
+		"Mar 16 08:12:13 host01 groupadd[4691]: new group: name=alice, GID=1001\n" +
+		"Mar 16 08:12:13 host01 useradd[4692]: new user: name=alice, UID=1001, GID=1001, home=/home/alice, shell=/bin/bash\n" +
+		"Mar 16 08:12:17 host01 passwd[4695]: pam_unix(passwd:chauthtok): password changed for alice\n" +
+		"Mar 16 08:12:20 host01 usermod[4696]: add 'alice' to group 'sudo'\n" +
+		"Mar 16 08:12:20 host01 usermod[4696]: add 'alice' to shadow group 'sudo'\n" +
+		"Mar 16 08:12:25 host01 usermod[4697]: lock user 'alice' password\n" +
+		"Mar 16 08:12:31 host01 userdel[4700]: delete user `alice'\n" +
+		"Mar 16 08:12:31 host01 userdel[4700]: removed group `alice' owned by `alice'\n" +
+		"Mar 16 08:12:32 host01 userdel[4700]: removed shadow group `alice' owned by `alice'\n"
+	res := parseBody(t, body)
+	type want struct{ action, object, name string }
+	wants := []want{
+		{"group_created", "group", "alice"},
+		{"user_created", "user", "alice"},
+		{"password_changed", "user", "alice"},
+		{"group_member_added", "group", "sudo"},
+		{"password_locked", "user", "alice"},
+		{"user_deleted", "user", "alice"},
+		{"group_deleted", "group", "alice"},
+	}
+	if len(res.Events) != len(wants) {
+		t.Fatalf("got %d events, want %d (the shadow-group twins repeat a line and are not emitted)", len(res.Events), len(wants))
+	}
+	for i, w := range wants {
+		e := res.Events[i]
+		if e.EventType != model.EventAccountChange {
+			t.Fatalf("event %d type %q", i, e.EventType)
+		}
+		if e.Extra["action"] != w.action || e.Extra["object_type"] != w.object || e.Extra["object_name"] != w.name {
+			t.Errorf("event %d = %v, want %+v", i, e.Extra, w)
+		}
+		if e.User != "" {
+			t.Errorf("event %d: the log does not say who asked for the change, User must stay empty, got %q", i, e.User)
+		}
+		if !e.Timestamp.IsZero() {
+			t.Errorf("event %d: no year in the log, Timestamp must stay zero", i)
+		}
+	}
+	if e := res.Events[1]; e.Extra["uid"] != "1001" || e.Extra["home"] != "/home/alice" || e.Extra["shell"] != "/bin/bash" {
+		t.Errorf("useradd details lost: %v", e.Extra)
+	}
+	if e := res.Events[3]; e.Extra["member"] != "alice" {
+		t.Errorf("member lost: %v", e.Extra)
+	}
+}
+
+func TestParse_RelativePositionIsRecordedWithoutAYear(t *testing.T) {
+	body := "" +
+		"Mar  5 23:59:50 host01 sshd[1]: Failed password for alice from 203.0.113.9 port 1000 ssh2\n" +
+		"Mar  6 00:00:20 host01 sshd[1]: Accepted password for alice from 203.0.113.9 port 1001 ssh2\n"
+	res := parseBody(t, body)
+	if len(res.Events) != 2 {
+		t.Fatalf("got %d events", len(res.Events))
+	}
+	a, b := res.Events[0], res.Events[1]
+	pa, ok := partialtime.PositionOf("f", a.Extra)
+	pb, ok2 := partialtime.PositionOf("f", b.Extra)
+	if !ok || !ok2 {
+		t.Fatalf("no position: %v %v", a.Extra, b.Extra)
+	}
+	if d, ok := partialtime.Delta(pa, pb); !ok || d != 30*time.Second {
+		t.Fatalf("delta %v %v, want 30s across the padded-day boundary", d, ok)
+	}
+	for _, e := range res.Events {
+		if !e.Timestamp.IsZero() {
+			t.Error("a relative position must never become a timestamp")
+		}
+		if e.Extra["timestamp_known"] != "false" {
+			t.Error("timestamp_known must stay false")
+		}
+	}
+}
+
+func TestParse_LeapCalendarComesFromTheWholeFile(t *testing.T) {
+	// The leap day is on the LAST line; the first line must still be read
+	// against the leap calendar, or two lines of one file would disagree.
+	body := "" +
+		"Mar  1 10:00:00 host01 sshd[1]: Failed password for alice from 203.0.113.9 port 1 ssh2\n" +
+		"Feb 29 10:00:00 host01 sshd[1]: Failed password for alice from 203.0.113.9 port 2 ssh2\n"
+	res := parseBody(t, body)
+	for _, e := range res.Events {
+		if e.Extra["partial_calendar"] != "leap" {
+			t.Errorf("calendar %q, want leap on every event of the file", e.Extra["partial_calendar"])
 		}
 	}
 }

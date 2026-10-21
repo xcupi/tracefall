@@ -312,10 +312,21 @@ const (
 	// (/var/log/auth.log). Lines carry no year, so no event from it has a
 	// full timestamp; the month, day and time are kept as written.
 	ArtifactAuthLog = "auth_log"
-	// ArtifactSyslog is the general system log (/var/log/syslog). Only the
-	// scheduled-job lines are read; the rest of the file is desktop and
-	// kernel noise that is not yet interpreted.
+	// ArtifactSyslog is the general system log (/var/log/syslog) and its
+	// daemon.log / messages siblings. Only two kinds of line are read:
+	// scheduled jobs, and a short list of security- or integrity-relevant
+	// service messages. The rest of the file is chatter that is not
+	// interpreted. Lines carry no year.
 	ArtifactSyslog = "syslog"
+	// ArtifactWebAccessLog is a web server access log in Common or
+	// Combined Log Format (Apache httpd, and servers that write the same
+	// format). Each line is one request the server answered, with the
+	// timestamp and UTC offset the server wrote.
+	ArtifactWebAccessLog = "web_access_log"
+	// ArtifactPackageLog is a package manager transaction log
+	// (dpkg.log). It records what the package database changed, with the
+	// local time of the change and no time zone.
+	ArtifactPackageLog = "package_log"
 	// ArtifactJournal is a systemd journal file (.journal, binary, LZ4
 	// compressed). Each entry carries a real UTC timestamp, so unlike the text
 	// logs these events are dated.
@@ -890,6 +901,29 @@ const (
 	// recorded. The position is OBSERVED in the file; any country derived
 	// from it is DERIVED, and the event keeps the two apart.
 	EventImageGPSRecorded = "image_gps_recorded"
+
+	// EventAccountChange is a change to a local account or group that the
+	// system recorded: created, deleted, modified, enabled, disabled, a
+	// password changed or reset, or a member added to or removed from a
+	// group. Extra["action"] names which, Extra["object_type"] is "user" or
+	// "group" and Extra["object_name"] is the account or group changed.
+	// The record says the system applied the change; it does not say who
+	// was entitled to ask for it.
+	EventAccountChange = "account_change"
+	// EventPackageChange is a package the package manager installed,
+	// upgraded, removed or purged. It proves the package database changed,
+	// not that anything in the package ran.
+	EventPackageChange = "package_change"
+	// EventWebRequest is one request a web server logged. It records what
+	// was asked and how the server answered; a request that looks like an
+	// attack is an attempt, and a 2xx answer does not prove it worked.
+	EventWebRequest = "web_request"
+	// EventServiceMessage is a service message a daemon wrote to the system
+	// log and that bears on security or integrity: a database running with
+	// a passwordless administrator account, corrupt tables, a server
+	// restart. Extra["category"] says which kind. Only a short allow-list
+	// of messages is emitted, so the absence of one proves nothing.
+	EventServiceMessage = "service_message"
 )
 
 // Event is Tracefall's normalized evidence record. Every parser emits

@@ -222,6 +222,69 @@ and ATT&CK technique used in the finding text now come from the
 type and (for `registry_persistence`) its `registry_persistence_type`
 Extra field.
 
+## Linux and server log rules
+
+Defined in `internal/detect/rules_hostlogs.go`. Findings from these rules list
+at most 24 supporting events (the first and last of a long run); the title or
+description states the true count.
+
+### `brute-force-then-success-sequence`
+
+The counterpart of rule 6 for logs that carry no year. Failures are grouped by
+`(host, user, source address, source file)`, so one address is never blamed for
+another's failures. A run is three or more failures, each within 10 minutes of
+the one before it in file order, followed in the same file within 30 minutes by
+a success for the same account from the same address. Distances come from
+`partialtime` (see the evidence-triage section on relative time); the finding
+has no first/last-seen date. Severity `high`, confidence `medium`: relative
+time cannot be checked against another source, and a person mistyping a
+password has the same shape. Maps to **T1110**, **T1078**.
+
+### `web-attack-indicators`
+
+Groups `web_request` events by `(host, source address, kind)`. Kinds: SQL
+injection, path traversal/file inclusion, command injection, cross-site
+scripting, web-shell access, scanner user agent, administration-interface
+probe. The URL is decoded (up to three rounds of percent-decoding) before
+matching, and patterns look for constructs that do not occur in ordinary
+browsing (`union select`, `../../`, `php://`), not for single words. An
+administration URL needs three requests from a source; the rest fire on one.
+Severity `medium`/confidence `low` by default; confidence rises to `medium`
+at five requests or when one source shows more than one kind; a web-shell
+request answered 2xx is `high`; scanners and admin probes are `low` severity.
+Every description says a status code is not proof of success or failure.
+
+### `account-change-observed`
+
+A new local account, or an account added to an administrative or remote-access
+group (`Administrators`, `Domain Admins`, `sudo`, `wheel`, ...). Package-created
+service accounts (no login shell, id below 1000) and Windows computer accounts
+(trailing `$`) are skipped. Severity `low`; `high` for a privileged-group add or
+a user id 0 account. Windows events name the actor; Linux log lines do not.
+
+### `database-insecure-account`
+
+One finding per host when the database server's own start-up check logged
+administrator accounts without a password. Severity `medium`, confidence
+`high` (the server reported it); the description states that this shows the
+weakness, not its use.
+
+### `system-change-command`
+
+Reads the command line of process starts, PowerShell script blocks and
+history, shell history, sudo commands and cron jobs, through `internal/cmdsem`.
+It recognises firewall changes (netsh, iptables, ufw, firewalld, nftables, a
+firewall service stopped), persistence (scheduled tasks, services, Run keys,
+cron, `systemctl enable`, shell start-up files, `rc.local`, `authorized_keys`,
+IFEO, WMI subscriptions, Startup folder) and account changes (`net user`,
+`net localgroup`, `useradd`, `usermod -aG`, `gpasswd`, PowerShell local-account
+cmdlets). Commands that only list state are ignored. Repeats of the same
+action by the same account on the same host are one finding with a count.
+Confidence follows what the source proves: `medium` for a process record,
+`low` for sudo, shell history and cron, because none shows the change took
+effect. Secrets on a command line are masked (`cmdsem.Redact`) before the
+command is copied into a finding.
+
 ## Adding a rule
 
 1. Add a new unexported type in `internal/detect/rules.go` implementing

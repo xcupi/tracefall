@@ -409,11 +409,19 @@ var supportedTypeInfo = map[string]typeInfo{
 	},
 	model.ArtifactSyslog: {
 		label: "System log (syslog)", family: FamilyLog, priority: PriorityHigh,
-		why: "Records the scheduled jobs cron started, with their command and account -- a common place for persistence.",
+		why: "Records the scheduled jobs cron started and the service warnings a daemon wrote -- for example a database running with an unprotected administrator account.",
+	},
+	model.ArtifactWebAccessLog: {
+		label: "Web server access log", family: FamilyLog, priority: PriorityHigh,
+		why: "Records every request a web server answered, with the source address, URL, status and client -- the trail of web attacks and web-shell use.",
+	},
+	model.ArtifactPackageLog: {
+		label: "Package log (dpkg)", family: FamilyLog, priority: PriorityMedium,
+		why: "Records which packages were installed, upgraded or removed, which dates a tool or service arriving on a host.",
 	},
 	model.ArtifactAuthLog: {
 		label: "Authentication log (auth.log)", family: FamilyLog, priority: PriorityHigh,
-		why: "Records su and sudo privilege changes, the commands sudo authorised, and SSH logons with their source addresses.",
+		why: "Records su and sudo privilege changes, the commands sudo authorised, SSH logons with their source addresses, and account and group changes.",
 	},
 	model.ArtifactWtmp: {
 		label: "Login records (wtmp)", family: FamilyLog, priority: PriorityHigh,

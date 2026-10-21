@@ -68,6 +68,18 @@ func Normalize(ev *model.Event, in Input) bool {
 		ev.Extra["subject_user_name"] = payload["SubjectUserName"]
 		ev.NetworkSource = payload["IpAddress"]
 		ev.Extra["workstation_name"] = payload["WorkstationName"]
+		// The session identifiers. TargetLogonId names the session this
+		// logon opens: the 4634/4647 that close it, the 4672 that grants it
+		// privileges and every 4688 it starts carry the same value, which
+		// is what ties them to one logon. The domain is kept apart from
+		// the name because the same name in two domains is two accounts.
+		setExtra(ev, "logon_id", payload["TargetLogonId"])
+		setExtra(ev, "target_domain", payload["TargetDomainName"])
+		setExtra(ev, "subject_logon_id", payload["SubjectLogonId"])
+		setExtra(ev, "logon_process", payload["LogonProcessName"])
+		setExtra(ev, "auth_package", payload["AuthenticationPackageName"])
+		setExtra(ev, "source_port", payload["IpPort"])
+		setExtra(ev, "linked_logon_id", payload["LinkedLogonId"])
 		return true
 
 	case channel == "security" && eventID == "4625":
@@ -78,6 +90,10 @@ func Normalize(ev *model.Event, in Input) bool {
 		ev.Extra["sub_status"] = payload["SubStatus"]
 		ev.NetworkSource = payload["IpAddress"]
 		ev.Extra["workstation_name"] = payload["WorkstationName"]
+		setExtra(ev, "target_domain", payload["TargetDomainName"])
+		setExtra(ev, "logon_process", payload["LogonProcessName"])
+		setExtra(ev, "auth_package", payload["AuthenticationPackageName"])
+		setExtra(ev, "source_port", payload["IpPort"])
 		return true
 
 	// 4634 (session logoff) and 4647 (user-initiated logoff) close a
@@ -124,6 +140,10 @@ func Normalize(ev *model.Event, in Input) bool {
 		ev.PID = normalize.Int64(hexOrDec(payload["NewProcessId"]))
 		ev.PPID = normalize.Int64(hexOrDec(payload["ProcessId"]))
 		ev.User = firstNonEmpty(payload["SubjectUserName"], ev.User)
+		// The session this process runs in; equals the logon_id of the
+		// 4624 that opened it.
+		setExtra(ev, "logon_id", payload["SubjectLogonId"])
+		setExtra(ev, "subject_domain", payload["SubjectDomainName"])
 		return true
 
 	// 4648: a logon was attempted using explicit credentials (runas,
@@ -146,6 +166,34 @@ func Normalize(ev *model.Event, in Input) bool {
 		ev.EventType = model.EventPrivilegedLogon
 		ev.User = firstNonEmpty(payload["SubjectUserName"], ev.User)
 		ev.Extra["privilege_list"] = truncateExtra(payload["PrivilegeList"], 500)
+		setExtra(ev, "logon_id", payload["SubjectLogonId"])
+		setExtra(ev, "subject_domain", payload["SubjectDomainName"])
+		return true
+
+	// Account and group management. The Security log records these on the
+	// machine that holds the account: a domain controller for a domain
+	// account, the member machine for a local one. Unlike the Linux logs, the
+	// ACTOR is recorded here (SubjectUserName), so Event.User is the account
+	// that made the change and object_name is the account or group changed.
+	// Meaning: the system applied the change. Nothing here says it was
+	// authorised or unexpected.
+	case channel == "security" && accountAction(eventID) != "":
+		action, objType := accountAction(eventID), accountObject(eventID)
+		ev.EventType = model.EventAccountChange
+		ev.User = firstNonEmpty(payload["SubjectUserName"], ev.User)
+		ev.Extra["action"] = action
+		ev.Extra["object_type"] = objType
+		ev.Extra["object_name"] = payload["TargetUserName"]
+		setExtra(ev, "object_domain", payload["TargetDomainName"])
+		setExtra(ev, "object_sid", payload["TargetSid"])
+		setExtra(ev, "actor_domain", payload["SubjectDomainName"])
+		setExtra(ev, "actor_sid", payload["SubjectUserSid"])
+		setExtra(ev, "logon_id", payload["SubjectLogonId"])
+		if member := firstNonEmpty(dashToEmpty(payload["MemberName"]), payload["MemberSid"]); member != "" {
+			ev.Extra["member"] = member
+			setExtra(ev, "member_sid", payload["MemberSid"])
+		}
+		ev.Extra["actor_known"] = "true: Security records the account that made the change"
 		return true
 
 	// 4768/4769: Kerberos TGT/service-ticket requests -- authentication
@@ -238,6 +286,7 @@ func Normalize(ev *model.Event, in Input) bool {
 		ev.PID = normalize.Int64(payload["ProcessId"])
 		ev.PPID = normalize.Int64(payload["ParentProcessId"])
 		ev.User = firstNonEmpty(payload["User"], ev.User)
+		setExtra(ev, "logon_id", payload["LogonId"])
 		ev.Extra["parent_command_line"] = payload["ParentCommandLine"]
 		ev.Extra["integrity_level"] = payload["IntegrityLevel"]
 		ev.Extra["original_file_name"] = payload["OriginalFileName"]
@@ -365,4 +414,57 @@ func hexOrDec(s string) string {
 		return fmt.Sprint(v)
 	}
 	return s
+}
+
+// setExtra records v under k unless it is empty or the "-" Windows writes for
+// a field that does not apply, so an event carries only what the record said.
+func setExtra(ev *model.Event, k, v string) {
+	if v = dashToEmpty(strings.TrimSpace(v)); v != "" {
+		ev.Extra[k] = v
+	}
+}
+
+func dashToEmpty(v string) string {
+	if v == "-" {
+		return ""
+	}
+	return v
+}
+
+// accountAction maps a Security event id to the action it records, or "" for
+// an id that is not an account or group change.
+func accountAction(id string) string {
+	switch id {
+	case "4720":
+		return "user_created"
+	case "4722":
+		return "user_enabled"
+	case "4725":
+		return "user_disabled"
+	case "4726":
+		return "user_deleted"
+	case "4738":
+		return "user_modified"
+	case "4723":
+		return "password_change_attempted"
+	case "4724":
+		return "password_reset"
+	case "4727", "4731", "4754":
+		return "group_created"
+	case "4730", "4734", "4758":
+		return "group_deleted"
+	case "4728", "4732", "4756":
+		return "group_member_added"
+	case "4729", "4733", "4757":
+		return "group_member_removed"
+	}
+	return ""
+}
+
+func accountObject(id string) string {
+	switch accountAction(id) {
+	case "group_created", "group_deleted", "group_member_added", "group_member_removed":
+		return "group"
+	}
+	return "user"
 }
