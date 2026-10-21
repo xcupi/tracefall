@@ -59,7 +59,7 @@ func buildPersistenceCollectionZip(t *testing.T) []byte {
 	taskXML := `<?xml version="1.0" encoding="UTF-8"?>
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <RegistrationInfo>
-    <Date>2026-01-15T09:17:30.0000000</Date>
+    <Date>2026-01-15T09:17:30.0000000Z</Date>
     <Author>CORP\jdoe</Author>
   </RegistrationInfo>
   <Actions Context="Author">
@@ -72,7 +72,12 @@ func buildPersistenceCollectionZip(t *testing.T) []byte {
 
 	return buildZipBytes(t, map[string]string{
 		"RECmd/collection2_RECmd_Batch_RunKeys_Output.csv": recmdCSV,
-		"Tasks/UpdateTask.xml":                             taskXML,
+		// This acquisition names its own host explicitly; a case is not a
+		// machine identity, so the host is never inherited from collection 1.
+		"EvtxECmd/collection2_EvtxECmd_Output.csv": evtxHeader +
+			evtxRow("2026-01-15T09:20:00.0000000Z", "4634", "Security", "WKSTN-042", "jdoe",
+				"TargetUserName: jdoe; LogonType: 2", "1"),
+		"Tasks/UpdateTask.xml": taskXML,
 	})
 }
 
@@ -116,11 +121,11 @@ func TestMultiCollection_EndToEnd(t *testing.T) {
 
 	// -- Upload + import collection #2 --
 	_, res2 := uploadAndImportAll(t, mux, c.ID, buildPersistenceCollectionZip(t))
-	if res2.EventCount != 2 {
-		t.Fatalf("collection #2 parsed %d events, want 2 (registry key + scheduled task)", res2.EventCount)
+	if res2.EventCount != 3 {
+		t.Fatalf("collection #2 parsed %d events, want 3 (registry key + scheduled task + host-naming logoff)", res2.EventCount)
 	}
-	if res2.NewEventCount != 2 {
-		t.Errorf("collection #2 NewEventCount = %d, want 2 (no overlap with collection #1's artifact types)", res2.NewEventCount)
+	if res2.NewEventCount != 3 {
+		t.Errorf("collection #2 NewEventCount = %d, want 3 (no overlap with collection #1's artifact types)", res2.NewEventCount)
 	}
 
 	// -- Re-analyze / recalculate across the complete case --
@@ -133,8 +138,8 @@ func TestMultiCollection_EndToEnd(t *testing.T) {
 	// -- Verify unified timeline: both collections, chronological --
 	var timeline []model.Event
 	doJSON(t, mux, "GET", "/api/cases/"+c.ID+"/timeline", nil, &timeline)
-	if len(timeline) != 7 {
-		t.Fatalf("unified timeline has %d events, want 7 (5 + 2)", len(timeline))
+	if len(timeline) != 8 {
+		t.Fatalf("unified timeline has %d events, want 8 (5 + 3)", len(timeline))
 	}
 	seenCollections := map[string]bool{}
 	for i, e := range timeline {

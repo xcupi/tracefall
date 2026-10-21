@@ -124,10 +124,17 @@ func TestInvestigations_CrossCollectionAndDeletionRecalculates(t *testing.T) {
 	); err != nil {
 		t.Fatal(err)
 	}
+	// A case is not a machine identity: this acquisition names its own host
+	// explicitly instead of inheriting it from collection 1.
+	if err := writeFile(t, filepath.Join(dir, "EvtxECmd"), "20260205_093600_EvtxECmd_Output.csv",
+		evtxHeader+evtxRow("2026-02-05T09:36:00.0000000Z", "4634", "Security", "WKSTN-SIM-F", "jdoe",
+			"TargetUserName: jdoe; LogonType: 2", "1")); err != nil {
+		t.Fatal(err)
+	}
 	disc2 := ingestLocalPath(t, mux, c.ID, dir)
 	_, imp2 := importAll(t, mux, c.ID, disc2)
-	if imp2.EventCount != 1 {
-		t.Fatalf("collection 2 import produced %d events, want 1", imp2.EventCount)
+	if imp2.EventCount != 2 {
+		t.Fatalf("collection 2 import produced %d events, want 2 (run key + host-naming logoff)", imp2.EventCount)
 	}
 
 	analyze(t, mux, c.ID)
