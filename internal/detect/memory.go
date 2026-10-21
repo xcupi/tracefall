@@ -155,7 +155,11 @@ func (r memoryProcessSignals) Evaluate(events []model.Event) []model.Finding {
 		if len(socketDetails) > 5 {
 			socketDetails = socketDetails[:5]
 		}
-		desc += fmt.Sprintf(" Observed executable regions: %d. Command line: %q. Remote sockets (up to five): %s. Region observations describe snapshot state, not when injection occurred.", len(regions), truncate(p.CommandLine, 300), strings.Join(socketDetails, ", "))
+		socketText := "none observed for this process in the memory snapshot"
+		if len(socketDetails) > 0 {
+			socketText = strings.Join(socketDetails, ", ")
+		}
+		desc += fmt.Sprintf(" Observed executable regions: %d. Command line: %q. Remote sockets (up to five): %s. Region observations describe snapshot state, not when injection occurred.", len(regions), truncate(p.CommandLine, 300), socketText)
 		findings = append(findings, newFinding(p.CaseID, r.ID(), fmt.Sprintf("Memory process review: %s (PID %d)", p.ProcessName, p.PID), severity, confidence, desc, nil, supporting))
 	}
 	return findings
