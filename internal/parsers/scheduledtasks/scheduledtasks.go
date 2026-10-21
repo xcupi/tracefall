@@ -8,7 +8,6 @@ package scheduledtasks
 
 import (
 	"bytes"
-	"encoding/json"
 	"encoding/xml"
 	"io"
 	"os"
@@ -30,12 +29,12 @@ func New() *Parser { return &Parser{} }
 func (Parser) Name() string         { return parserName }
 func (Parser) ArtifactType() string { return model.ArtifactScheduledTask }
 
-// Detect matches raw Task Scheduler XML files collected under a "Tasks"
+// Detect matches XML exports and native extensionless task files under a "Tasks"
 // directory, mirroring KAPE's collection layout for
 // C:\Windows\System32\Tasks.
 func (Parser) Detect(relPath string) bool {
-	lower := strings.ToLower(filepath.ToSlash(relPath))
-	if !strings.HasSuffix(lower, ".xml") {
+	lower := strings.ToLower(strings.ReplaceAll(filepath.ToSlash(relPath), `\`, "/"))
+	if ext := filepath.Ext(lower); ext != "" && ext != ".xml" {
 		return false
 	}
 	return strings.HasPrefix(lower, "tasks/") || strings.Contains(lower, "/tasks/")
@@ -44,17 +43,20 @@ func (Parser) Detect(relPath string) bool {
 // taskXML mirrors the subset of the Task Scheduler XML schema
 // (http://schemas.microsoft.com/windows/2004/02/mit/task) Tracefall needs.
 type taskXML struct {
+	XMLName          xml.Name `xml:"Task"`
 	RegistrationInfo struct {
 		Date   string `xml:"Date"`
 		Author string `xml:"Author"`
 	} `xml:"RegistrationInfo"`
 	Principals struct {
+		XML       string `xml:",innerxml"`
 		Principal []struct {
 			UserId   string `xml:"UserId"`
 			RunLevel string `xml:"RunLevel"`
 		} `xml:"Principal"`
 	} `xml:"Principals"`
 	Actions struct {
+		XML  string `xml:",innerxml"`
 		Exec []struct {
 			Command   string `xml:"Command"`
 			Arguments string `xml:"Arguments"`
@@ -80,12 +82,12 @@ func (p Parser) Parse(absPath string) (parsers.ParseResult, error) {
 		return parsers.ParseResult{}, err
 	}
 
-	taskName := strings.TrimSuffix(filepath.Base(absPath), filepath.Ext(absPath))
-
-	ts, ok := normalize.Timestamp(t.RegistrationInfo.Date)
-	if !ok {
-		return parsers.ParseResult{}, nil
+	taskName := filepath.Base(absPath)
+	if strings.EqualFold(filepath.Ext(taskName), ".xml") {
+		taskName = strings.TrimSuffix(taskName, filepath.Ext(taskName))
 	}
+
+	ts, local, dateOK := normalize.XMLTimestamp(t.RegistrationInfo.Date)
 
 	// Prefer the human-readable Author (e.g. "CORP\jdoe"); Task Scheduler
 	// XML's Principal/UserId is frequently a raw SID, which is only
@@ -108,15 +110,32 @@ func (p Parser) Parse(absPath string) (parsers.ParseResult, error) {
 	commandLine := strings.TrimSpace(command + " " + args)
 
 	extra := map[string]string{
-		"task_name":         taskName,
-		"author":            t.RegistrationInfo.Author,
-		"principal_user_id": principalUserId,
+		"task_name":           taskName,
+		"task_actions_xml":    t.Actions.XML,
+		"task_principals_xml": t.Principals.XML,
+		"evidence_kind":       "task_configuration",
+		"evidence_meaning":    "Task definition/configuration, not execution evidence. RegistrationInfo/Date is the author-supplied registration date, not a verified execution or creation time.",
+		"author":              t.RegistrationInfo.Author,
+		"principal_user_id":   principalUserId,
 		// RunLevel is "HighestAvailable" or "LeastPrivilege" per the Task
 		// Scheduler XML schema -- "HighestAvailable" is a genuine
-		// triage-relevant signal (the task runs elevated), so it's kept
+		// configuration signal (requests elevation), so it's kept
 		// distinct rather than folded into a generic field.
 		"run_level": runLevel,
 		"task_path": taskPathFrom(absPath, taskName),
+	}
+
+	extra["timestamp_original"] = t.RegistrationInfo.Date
+	switch {
+	case local != "":
+		extra["timestamp_local"] = local
+		extra["timestamp_basis"] = "task_registration_local_zone_unknown"
+	case dateOK:
+		extra["timestamp_basis"] = "task_registration_explicit_zone"
+	case strings.TrimSpace(t.RegistrationInfo.Date) == "":
+		extra["timestamp_basis"] = "task_registration_date_absent"
+	default:
+		extra["timestamp_basis"] = "task_registration_date_invalid"
 	}
 
 	ev := model.Event{
@@ -133,12 +152,11 @@ func (p Parser) Parse(absPath string) (parsers.ParseResult, error) {
 		Extra:           extra,
 	}
 
-	rawJSON, _ := json.Marshal(t)
 	return parsers.ParseResult{
 		Events: []model.Event{ev},
 		Raw: []model.RawEvidence{{
 			SourceReference: ev.SourceReference,
-			Raw:             string(rawJSON),
+			Raw:             string(data),
 		}},
 	}, nil
 }

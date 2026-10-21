@@ -20,23 +20,13 @@ const unitSep = "\x1f"
 // and network destination. Two normalized events with the same hash are
 // treated as the same real-world observation.
 //
-// Deliberately excluded: CommandLine/script text. Host+process+PID+an
-// exact timestamp already pin down a specific execution as precisely as
-// anything short of a cryptographic content hash could; a legitimate
-// re-collection of the same event (e.g. a second KAPE triage recollecting
-// unrolled Windows Event Log records) reproduces the same CommandLine
-// byte-for-byte anyway, so including it buys no extra precision for that
-// case, while excluding it keeps the hash cheap to reason about and
-// insensitive to a parser field that can be arbitrarily large (an
-// encoded PowerShell command). CaseID and CollectionID are also excluded
-// on purpose: identity is about the event itself, and hashing in
-// CollectionID would defeat cross-collection deduplication entirely,
-// which is the whole point of this function existing.
-//
-// Provider, Confidence and most Extra metadata are excluded: widening the
-// identity key risks failing to match recollections because of incidental
-// parser differences. Explicit memory object attributes are the exception
-// below: snapshot time plus PID alone cannot distinguish regions or sockets.
+// CaseID, CollectionID, source file identity, Parser and Confidence do not
+// identify what happened and are excluded. Most Extra metadata is excluded
+// too: renderer/recovery notes must not split recollections. Artifact-scoped
+// exceptions below retain Windows record/session/object/script identity,
+// task namespace/local registration readings, and memory object attributes.
+// CommandLine is retained for Windows events and undated artifacts; unrelated
+// timestamped artifacts preserve their historical identity unchanged.
 func (e Event) ComputeDedupHash() string {
 	parts := []string{
 		e.EventType,
@@ -56,21 +46,15 @@ func (e Event) ComputeDedupHash() string {
 	}
 	// Timestamp-less artifacts (Phase 10A).
 	//
-	// The exclusion of CommandLine above rests on one assumption, stated
-	// in that paragraph: that "host + process + PID + an EXACT TIMESTAMP
-	// already pin down a specific execution". For an artifact that
+	// A timestamp can help distinguish executions. For an artifact that
 	// records no timestamp at all, that assumption does not hold -- every
 	// command in a PowerShell ConsoleHost_history file shares the same
 	// (zero) time, the same host, the same user and the same event type,
 	// so without the command text they would all collapse into a single
 	// event and the rest of the history would be silently lost.
 	//
-	// CommandLine is therefore included ONLY when there is no timestamp
-	// to identify the event by. This cannot change the hash of any event
-	// that has a real timestamp -- which is every event produced by every
-	// other artifact -- so existing evidence keeps its identity exactly.
-	// TestDedupHash_TimestampedEventsAreUnaffectedByTheZeroTimeRule pins
-	// that down.
+	// This historical zero-time rule does not affect timestamped hashes.
+	// Windows Event Logs separately require command/script content below.
 	//
 	// The source reference (the line or record number) is included too.
 	// Without it a command typed twice in one history file -- "ls" eleven
@@ -81,6 +65,30 @@ func (e Event) ComputeDedupHash() string {
 	// that happen to read the same stay two events.
 	if e.Timestamp.IsZero() {
 		parts = append(parts, e.CommandLine, e.SourceReference)
+	}
+	// Windows records can tie on time, user and host. Keep the recorded
+	// channel/record number and semantic object/session/fragment identity,
+	// never CSV row position, source path or collection identity. Explicit
+	// metadata keys avoid hashing renderer/recovery notes or native-only
+	// System metadata. Unrelated artifact hashes remain unchanged.
+	if e.ArtifactType == ArtifactWindowsEventLog {
+		parts = append(parts, strings.ToLower(strings.TrimSpace(e.Provider)), e.NetworkSource, e.CommandLine)
+		for _, key := range []string{
+			"evtx_record_id", "target_domain", "subject_domain", "logon_id", "subject_logon_id",
+			"target_user_sid", "target_user_name", "linked_logon_id", "logon_type",
+			"object_type", "object_name", "object_domain", "object_sid", "member", "member_sid",
+			"actor_domain", "actor_sid", "script_block_id", "message_number",
+		} {
+			parts = append(parts, e.Extra[key])
+		}
+	}
+	// A task namespace path identifies the configured object, not an import
+	// path. Equal commands in distinct tasks are distinct configurations.
+	if e.ArtifactType == ArtifactScheduledTask {
+		parts = append(parts, e.Extra["task_path"], e.Extra["timestamp_local"])
+		if e.Timestamp.IsZero() && e.Extra["timestamp_local"] == "" {
+			parts = append(parts, e.Extra["timestamp_original"])
+		}
 	}
 	// Journal entries are timestamped at microsecond resolution, so two
 	// entries from the same process in the same microsecond would collapse

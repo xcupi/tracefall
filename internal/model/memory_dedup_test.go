@@ -68,8 +68,9 @@ func TestDedupHash_MemoryDuplicateIgnoresProvenanceAndRendererDetails(t *testing
 }
 
 func TestDedupHash_MemoryFixPreservesHistoricalNonMemoryIdentity(t *testing.T) {
-	const beforeFix = "c43a32e7f45bf590f77d17eaa88479b1e67103800d309e86a1f93308dcd4e066"
+	const beforeFix = "aac8e6520194e4192bdcd20aabe36a6bfbcd9d02a6f9bff86a159d67bd3adda1"
 	a := sampleEvent()
+	a.ArtifactType = ArtifactPrefetch // Windows Event Log hashes intentionally change.
 	a.Extra = map[string]string{"start_vpn": "0x1000", "end_vpn": "0x1fff", "service_name": "BITS", "protocol": "TCPv4", "state": "CLOSED"}
 	if got := a.ComputeDedupHash(); got != beforeFix {
 		t.Fatalf("non-memory event hash changed: %s, want historical %s", got, beforeFix)
@@ -81,13 +82,14 @@ func TestDedupHash_MemoryFixPreservesHistoricalNonMemoryIdentity(t *testing.T) {
 		t.Fatal("memory-only attributes now affect non-memory evidence identity")
 	}
 
-	// NetworkConnection is reused by Windows logs and memory analysis.
-	// Pin its historical log identity too, to protect the artifact guard.
+	// NetworkConnection is also reused by packet captures. Pin that
+	// historical non-Windows identity to protect both artifact guards.
 	network := sampleEvent()
+	network.ArtifactType = ArtifactNetworkCapture
 	network.EventType, network.NetworkDest, network.NetworkDestPort = EventNetworkConnection, "203.0.113.77", 443
 	network.NetworkSource = "10.0.0.5"
 	network.Extra = map[string]string{"local_port": "51000", "protocol": "TCPv4", "state": "ESTABLISHED"}
-	const historicalNetwork = "8bf5ee24b4c3c963ff1461cc06341e190dd296054cef6866111b4ca60765cede"
+	const historicalNetwork = "11a2b7a6b15bf24194d18eaaa52659e985141d8b99fc53f2da1ddacd88f7f305"
 	if got := network.ComputeDedupHash(); got != historicalNetwork {
 		t.Fatalf("non-memory network event changed identity: %s", got)
 	}

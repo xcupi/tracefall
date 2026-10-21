@@ -449,7 +449,7 @@ func TestNative_DeleteEvtxKeepsRegistryEvidence(t *testing.T) {
 func TestNative_CrossSourceDoesNotDoubleCount(t *testing.T) {
 	const csv = "TimeCreated,EventId,Provider,Channel,ComputerName,UserName,RemoteHost,MapDescription,PayloadData1,PayloadData2,PayloadData3,PayloadData4,PayloadData5,PayloadData6,RecordNumber\n" +
 		"2026-03-01T09:05:00.0000000Z,4624,Microsoft-Windows-Security-Auditing,Security,WKSTN-042,,-,Logon," +
-		"\"TargetUserName: jdoe; LogonType: 3; IpAddress: 10.9.9.9\",,,,,,1\n"
+		"\"TargetUserName: jdoe; LogonType: 3; IpAddress: 10.9.9.9\",,,,,,5\n" // attackEvtx's 4624 is Windows record 5, not CSV row 1.
 
 	// Native only.
 	muxA := newTestRouter(t)

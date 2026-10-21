@@ -24,6 +24,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"tracefall/internal/model"
@@ -147,7 +148,7 @@ func (p Parser) Parse(absPath string) (parsers.ParseResult, error) {
 			Provider:    rw.Provider,
 			EventID:     normalize.Int(rw.EventId),
 			Data:        payload,
-			RemoteHost:  rw.RemoteHost,
+			RemoteHost:  normalize.User(rw.RemoteHost),
 			Description: rw.MapDescription,
 		}) {
 			// Channel/EventId combination we don't have a mapping for
@@ -155,6 +156,11 @@ func (p Parser) Parse(absPath string) (parsers.ParseResult, error) {
 			continue
 		}
 
+		// RecordNumber is Windows' EventRecordID, not the CSV row position.
+		// Missing/invalid values remain unknown; never substitute rowNum.
+		if id, err := strconv.ParseUint(rw.RecordNumber, 10, 64); err == nil {
+			ev.Extra["evtx_record_id"] = strconv.FormatUint(id, 10)
+		}
 		rawJSON, _ := json.Marshal(rec)
 		out.Events = append(out.Events, ev)
 		out.Raw = append(out.Raw, model.RawEvidence{

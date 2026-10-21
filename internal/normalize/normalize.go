@@ -12,7 +12,7 @@ import (
 	"time"
 )
 
-// Timestamp layouts accepted from KAPE/EZ Tools CSV output and raw XML.
+// Timestamp layouts accepted from UTC-by-contract KAPE/EZ Tools exports.
 // EZ Tools consistently emit "2006-01-02T15:04:05.0000000Z" (round-trip
 // UTC); we also accept a plain space-separated form defensively since
 // some tool versions/locales differ.
@@ -21,12 +21,14 @@ var timeLayouts = []string{
 	time.RFC3339Nano,
 	time.RFC3339,
 	"2006-01-02 15:04:05",
-	"2006-01-02T15:04:05.999999999", // Task Scheduler RegistrationInfo/Date (no offset)
+	"2006-01-02T15:04:05.999999999", // zone-less UTC export variant
 	"2006-01-02T15:04:05",
 }
 
 // Timestamp parses a KAPE/EZ-Tools-style timestamp string and normalizes
-// it to UTC. Returns the zero time and false if none of the known layouts
+// it to UTC. Zone-less values are accepted ONLY because these exports
+// specify UTC by contract. Native XML/local clocks must use XMLTimestamp.
+// Returns the zero time and false if none of the known layouts
 // match, so callers can decide how to handle an unparseable timestamp
 // (skip the record, flag low confidence, etc.) rather than silently
 // inventing a time.
@@ -41,6 +43,22 @@ func Timestamp(s string) (time.Time, bool) {
 		}
 	}
 	return time.Time{}, false
+}
+
+// XMLTimestamp parses a dateTime with source-defined clock semantics. A
+// zone-less XML dateTime is a local reading, NOT a UTC instant. The second
+// result preserves that reading; false means absent or invalid. Callers keep
+// the original value and decide how to represent missing/invalid dates.
+// EZ Tools UTC exports must continue using Timestamp instead.
+func XMLTimestamp(s string) (time.Time, string, bool) {
+	v := strings.TrimSpace(s)
+	if t, err := time.Parse(time.RFC3339Nano, v); err == nil {
+		return t.UTC(), "", true
+	}
+	if _, err := time.Parse("2006-01-02T15:04:05.999999999", v); err == nil {
+		return time.Time{}, s, true
+	}
+	return time.Time{}, "", false
 }
 
 // User canonicalizes a username string. KAPE/EZ Tools sometimes render
