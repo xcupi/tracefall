@@ -266,15 +266,17 @@ type CoverageRow struct {
 
 // Coverage states what was and was not analyzed.
 type Coverage struct {
-	Discovered    int
-	Supported     int
-	Unsupported   int
-	Duplicates    int
-	Imported      int
-	ParseFailed   int
-	ByType        []CoverageRow
-	Failed        []string
-	FailedOmitted int
+	ParserDiagnostics  []KV
+	DiagnosticsOmitted int
+	Discovered         int
+	Supported          int
+	Unsupported        int
+	Duplicates         int
+	Imported           int
+	ParseFailed        int
+	ByType             []CoverageRow
+	Failed             []string
+	FailedOmitted      int
 }
 
 // Attachment is a file delivered with the report and hashed in the

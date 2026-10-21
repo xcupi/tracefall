@@ -105,7 +105,8 @@ CREATE TABLE IF NOT EXISTS source_files (
 	event_count       INTEGER NOT NULL DEFAULT 0,
 	discovered_at     TEXT NOT NULL,
 	imported_at       TEXT NOT NULL DEFAULT '',
-	deleted_at        TEXT NOT NULL DEFAULT ''
+	deleted_at        TEXT NOT NULL DEFAULT '',
+ parse_coverage_json TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_source_files_case ON source_files(case_id);
 -- idx_source_files_collection and idx_source_files_collection_sha256_active

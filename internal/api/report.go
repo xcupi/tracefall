@@ -595,6 +595,23 @@ func reportCoverage(files []model.SourceFile) report.Coverage {
 		failed = failed[:maxFailedListed]
 	}
 	out.Failed = failed
+	for _, sf := range files {
+		if c := sf.ParseCoverage; c != nil {
+			summary := fmt.Sprintf("read=%d mapped=%d unmapped=%d undated=%d records_failed=%d chunks_failed=%d capped=%t", c.RecordsRead, c.Mapped, c.Unmapped, c.Undated, c.RecordsFailed, c.ChunksFailed, c.LimitReached)
+			for _, v := range c.ByEvent {
+				summary += fmt.Sprintf("; %s/%s %d: %d read, %d mapped", v.Channel, v.Provider, v.EventID, v.Records, v.Mapped)
+			}
+			if c.UnlistedRecords > 0 {
+				summary += fmt.Sprintf("; %d records beyond the per-ID census limit", c.UnlistedRecords)
+			}
+			out.ParserDiagnostics = append(out.ParserDiagnostics, report.KV{Key: sf.Path, Value: summary})
+		}
+	}
+	sort.Slice(out.ParserDiagnostics, func(i, j int) bool { return out.ParserDiagnostics[i].Key < out.ParserDiagnostics[j].Key })
+	if len(out.ParserDiagnostics) > maxFailedListed {
+		out.DiagnosticsOmitted = len(out.ParserDiagnostics) - maxFailedListed
+		out.ParserDiagnostics = out.ParserDiagnostics[:maxFailedListed]
+	}
 	return out
 }
 
@@ -698,6 +715,11 @@ func reportLimitations(d report.Data, in reportInputs) []string {
 			strings.Join(names, "; ")+". They need to be examined by other means.")
 	}
 	pending := 0
+	for _, sf := range in.sourceFiles {
+		if sf.ParseCoverage.Incomplete() {
+			lim = append(lim, fmt.Sprintf("%s: parser coverage is incomplete or undated; unmapped=%d records_failed=%d chunks_failed=%d undated=%d capped=%t. See source-level parser coverage before drawing conclusions.", sf.Path, sf.ParseCoverage.Unmapped, sf.ParseCoverage.RecordsFailed, sf.ParseCoverage.ChunksFailed, sf.ParseCoverage.Undated, sf.ParseCoverage.LimitReached))
+		}
+	}
 	for _, sf := range in.sourceFiles {
 		if sf.ImportStatus == model.SourceFileDiscovered && sf.Supported {
 			pending++

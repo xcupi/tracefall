@@ -381,8 +381,9 @@ func isCacheStateName(base string) bool {
 // file -- the events/raw records it produced, ready for deduplication
 // and storage.
 type ParsedFile struct {
-	Events []model.Event
-	Raw    []model.RawEvidence
+	Coverage *model.ParseCoverage
+	Events   []model.Event
+	Raw      []model.RawEvidence
 }
 
 // MatchParser decides which parser, if any, owns a file. It is the
@@ -519,7 +520,7 @@ func ParseFileWithContext(caseID, collectionID, sourceFileID, root, relPath stri
 		r.SourceFileID = sourceFileID
 		raw = append(raw, r)
 	}
-	return ParsedFile{Events: events, Raw: raw}, nil
+	return ParsedFile{Events: events, Raw: raw, Coverage: parsed.Coverage}, nil
 }
 
 func sha256File(path string) string {

@@ -80,6 +80,23 @@ The cost is real and worth stating: two hand-written binary parsers are
 code Tracefall now owns and must maintain, and they implement a subset,
 not the whole format. See "Known limitations".
 
+## EVTX: source-level coverage
+
+Raw EVTX imports persist `SourceFile.parse_coverage` independently of events:
+records read, mapped/unmapped, undated, failed records/chunks and a reached
+record cap. A bounded provider/channel/Event-ID census records the first 512
+distinct kinds and discloses records beyond that bound. This survives parser
+worker serialization and imports producing zero timeline events. Source details,
+provenance and the report expose it; imported does not mean every record was
+analyzed. Older imports and parsers without diagnostics retain an unknown
+coverage state, not a fabricated complete result. Reimport into a fresh case to
+obtain diagnostics for historical evidence.
+
+Mapped observations without a usable timestamp remain undated, with the missing
+basis recorded; they are not silently discarded or dated from file metadata.
+Unmapped records remain available in the original hashed evidence file, but are
+not synthesized into semantically unsupported events.
+
 ## EVTX: what is parsed
 
 `internal/evtx` reads the file header, iterates 65536-byte chunks, and

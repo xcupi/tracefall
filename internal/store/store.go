@@ -438,7 +438,7 @@ func (s *Store) SaveSourceFiles(files []model.SourceFile) error {
 }
 
 func insertSourceFile(db execer, f model.SourceFile) error {
-	_, err := db.Exec(`INSERT INTO source_files (`+sourceFileCols+`)
+	_, err := db.Exec(`INSERT INTO source_files (id, case_id, collection_id, original_filename, path, artifact_type, parser, supported, size_bytes, sha256, embedded_hash, import_status, event_count, discovered_at, imported_at, deleted_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		f.ID, f.CaseID, f.CollectionID, f.OriginalFilename, f.Path, f.ArtifactType, f.Parser,
 		boolToInt(f.Supported), f.SizeBytes, f.SHA256, f.EmbeddedHash, f.ImportStatus, f.EventCount, fmtTime(f.DiscoveredAt),
@@ -446,7 +446,7 @@ func insertSourceFile(db execer, f model.SourceFile) error {
 	return err
 }
 
-const sourceFileCols = `id, case_id, collection_id, original_filename, path, artifact_type, parser, supported, size_bytes, sha256, embedded_hash, import_status, event_count, discovered_at, imported_at, deleted_at`
+const sourceFileCols = `id, case_id, collection_id, original_filename, path, artifact_type, parser, supported, size_bytes, sha256, embedded_hash, import_status, event_count, discovered_at, imported_at, deleted_at, parse_coverage_json`
 
 func boolToInt(b bool) int {
 	if b {
@@ -469,11 +469,16 @@ func fmtOptionalTime(t *time.Time) string {
 func scanSourceFile(row interface{ Scan(...any) error }) (model.SourceFile, error) {
 	var f model.SourceFile
 	var supported int
-	var discovered, imported, deleted string
+	var discovered, imported, deleted, coverage string
 	err := row.Scan(&f.ID, &f.CaseID, &f.CollectionID, &f.OriginalFilename, &f.Path, &f.ArtifactType, &f.Parser,
-		&supported, &f.SizeBytes, &f.SHA256, &f.EmbeddedHash, &f.ImportStatus, &f.EventCount, &discovered, &imported, &deleted)
+		&supported, &f.SizeBytes, &f.SHA256, &f.EmbeddedHash, &f.ImportStatus, &f.EventCount, &discovered, &imported, &deleted, &coverage)
 	if err != nil {
 		return model.SourceFile{}, err
+	}
+	if coverage != "" {
+		if err := json.Unmarshal([]byte(coverage), &f.ParseCoverage); err != nil {
+			return model.SourceFile{}, fmt.Errorf("decoding parse coverage: %w", err)
+		}
 	}
 	f.Supported = supported != 0
 	f.DiscoveredAt = parseTime(discovered)
@@ -587,10 +592,18 @@ func (s *Store) SetSourceFileSHA256(id, sha256 string) error {
 	return err
 }
 
-func (s *Store) MarkSourceFileImported(id string, eventCount int, importedAt time.Time) (applied bool, err error) {
-	res, err := s.db.Exec(`UPDATE source_files SET import_status = ?, event_count = ?, imported_at = ?
-		WHERE id = ? AND import_status = ?`,
-		model.SourceFileImported, eventCount, fmtTime(importedAt), id, model.SourceFileDiscovered)
+func (s *Store) MarkSourceFileImported(id string, eventCount int, importedAt time.Time, coverage ...*model.ParseCoverage) (applied bool, err error) {
+	diagnostic := ""
+	if len(coverage) > 0 && coverage[0] != nil {
+		b, e := json.Marshal(coverage[0])
+		if e != nil {
+			return false, e
+		}
+		diagnostic = string(b)
+	}
+	res, err := s.db.Exec(`UPDATE source_files SET import_status = ?, event_count = ?, imported_at = ?, parse_coverage_json = ?
+ WHERE id = ? AND import_status = ?`,
+		model.SourceFileImported, eventCount, fmtTime(importedAt), diagnostic, id, model.SourceFileDiscovered)
 	if isUniqueConstraintViolation(err) {
 		return false, ErrDuplicateSourceFile
 	}

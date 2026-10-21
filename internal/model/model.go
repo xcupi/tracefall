@@ -264,12 +264,13 @@ type SourceFile struct {
 	// independently verified -- kept in its own field, never merged into
 	// SHA256, so the UI can show both side by side and an investigator
 	// can tell which is which. See docs/ad1-ingestion.md.
-	EmbeddedHash string     `json:"embedded_hash,omitempty"`
-	ImportStatus string     `json:"import_status"`
-	EventCount   int        `json:"event_count"` // 0 until imported
-	DiscoveredAt time.Time  `json:"discovered_at"`
-	ImportedAt   *time.Time `json:"imported_at,omitempty"`
-	DeletedAt    *time.Time `json:"deleted_at,omitempty"` // soft-delete marker; nil while the file is active evidence
+	EmbeddedHash  string         `json:"embedded_hash,omitempty"`
+	ImportStatus  string         `json:"import_status"`
+	EventCount    int            `json:"event_count"` // 0 until imported
+	ParseCoverage *ParseCoverage `json:"parse_coverage,omitempty"`
+	DiscoveredAt  time.Time      `json:"discovered_at"`
+	ImportedAt    *time.Time     `json:"imported_at,omitempty"`
+	DeletedAt     *time.Time     `json:"deleted_at,omitempty"` // soft-delete marker; nil while the file is active evidence
 }
 
 // SourceFile import status values -- see SourceFile's doc comment for

@@ -25,6 +25,9 @@ import (
 // one migration would be pure speculation. If a second one is ever
 // needed, that's the signal to build one; see docs/data-model.md.
 func migrate(db *sql.DB) error {
+	if err := addColumnIfMissing(db, "source_files", "parse_coverage_json", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return fmt.Errorf("migrating parse coverage: %w", err)
+	}
 	if err := addColumnIfMissing(db, "source_files", "collection_id", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return fmt.Errorf("migrating source_files: %w", err)
 	}
@@ -263,7 +266,8 @@ func retireLegacySourceFileColumns(db *sql.DB) error {
 	event_count       INTEGER NOT NULL DEFAULT 0,
 	discovered_at     TEXT NOT NULL,
 	imported_at       TEXT NOT NULL DEFAULT '',
-	deleted_at        TEXT NOT NULL DEFAULT ''
+	deleted_at        TEXT NOT NULL DEFAULT '',
+ parse_coverage_json TEXT NOT NULL DEFAULT ''
 )`
 
 	tx, err := db.Begin()
@@ -284,7 +288,7 @@ func retireLegacySourceFileColumns(db *sql.DB) error {
 	if _, err := tx.Exec(`INSERT INTO source_files_rebuilt (` + sourceFileCols + `)
 		SELECT id, case_id, collection_id, original_filename, path, artifact_type, parser,
 		       supported, size_bytes, sha256, embedded_hash, import_status, event_count,
-		       IFNULL(discovered_at, ''), IFNULL(imported_at, ''), IFNULL(deleted_at, '')
+		       IFNULL(discovered_at, ''), IFNULL(imported_at, ''), IFNULL(deleted_at, ''), parse_coverage_json
 		FROM source_files`); err != nil {
 		return fmt.Errorf("copying source files: %w", err)
 	}

@@ -1430,6 +1430,7 @@ func (s *Service) importEvidence(caseID, collectionID string, sourceFileIDs []st
 			prog.fileParsed(0, true)
 			continue
 		}
+		sf.ParseCoverage = parsed.Coverage
 		pending = append(pending, pendingImport{sourceFile: sf, events: parsed.Events, raw: parsed.Raw})
 		prog.fileParsed(len(parsed.Events), false)
 	}
@@ -1480,7 +1481,7 @@ func (s *Service) importEvidence(caseID, collectionID string, sourceFileIDs []st
 			return ImportResult{}, fmt.Errorf("saving event observations: %w", err)
 		}
 
-		applied, err := s.store.MarkSourceFileImported(id, len(pf.events), time.Now().UTC())
+		applied, err := s.store.MarkSourceFileImported(id, len(pf.events), time.Now().UTC(), sf.ParseCoverage)
 		if errors.Is(err, store.ErrDuplicateSourceFile) {
 			// This file's content is byte-identical to another file
 			// already imported into this same collection -- the events

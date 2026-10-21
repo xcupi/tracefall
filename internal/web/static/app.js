@@ -5988,6 +5988,7 @@ function evidenceDetails(f) {
       ${row("Embedded hash (from container)", f.embedded_hash)}
       ${row("Source collection", collectionLabel(f.collection_id))}
       ${row("Events imported", f.event_count ? String(f.event_count) : "")}
+      ${row("Parser coverage", parseCoverageText(f.parse_coverage))}
     </div>
     ${renderCapabilityBoundary(f)}`;
 }
@@ -8200,6 +8201,7 @@ function renderSourceFileProvenance(p) {
     ${row("Artifact type", esc(artifactLabel(sf.artifact_type)))}
     ${row("Parser", sf.parser ? `<span class="mono small">${esc(sf.parser)}</span>` : `<span class="muted small">${esc(LEGACY_UNAVAILABLE)}</span>`)}
     ${row("Status", esc(SOURCE_FILE_STATUS_LABELS[sf.import_status] || sf.import_status))}
+    ${row("Parser coverage", esc(parseCoverageText(sf.parse_coverage)))}
     ${row("Imported", sf.imported_at ? esc(fmtTime(sf.imported_at)) : `<span class="muted small">Not recorded</span>`)}
     ${sf.deleted ? row("Deleted", esc(fmtTime(sf.deleted_at))) : ""}
     ${row("File hash (SHA-256)", sf.sha256 ? `<span class="mono small">${esc(sf.sha256)}</span>` : `<span class="muted small">Not recorded</span>`)}
@@ -8218,10 +8220,15 @@ function renderSourceFileProvenance(p) {
 // Chromium Simple Cache entry, whose format holds no timestamp). The
 // evidence itself is still stored and still hashed; what it lacks is a
 // point on a clock.
+function parseCoverageText(c) {
+ if (!c) return "Coverage not recorded";
+ return `read=${c.records_read} mapped=${c.mapped} unmapped=${c.unmapped} undated=${c.undated} records_failed=${c.records_failed} chunks_failed=${c.chunks_failed} capped=${!!c.limit_reached}`;
+}
+
 function noEventNote(sf, eventCount) {
   if (eventCount !== 0 || sf.import_status !== "imported") return "";
-  return `<div class="muted small" style="margin-top:4px">Parsed successfully. This artifact recorded no
-    timestamped events, so it contributes structured evidence rather than timeline rows.</div>`;
+  if (sf.parse_coverage) return `<div class="muted small">Parsed successfully; ${esc(parseCoverageText(sf.parse_coverage))}. Unmapped records were not analyzed; zero mapped events is not evidence of no activity.</div>`;
+  return `<div class="muted small" style="margin-top:4px">Parsed successfully. No normalized events were produced. Coverage was not recorded; inspect the source and any structured records before concluding that no activity occurred.</div>`;
 }
 
 // renderSourceFileRecords shows what a file parsed to when it produced

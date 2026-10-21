@@ -69,9 +69,10 @@ func provenanceCollection(c model.Collection) ProvenanceCollection {
 
 // ProvenanceSourceFile is a source file as a provenance view sees it.
 type ProvenanceSourceFile struct {
-	SourceFileID     string `json:"source_file_id"`
-	CollectionID     string `json:"collection_id"`
-	OriginalFilename string `json:"original_filename"`
+	ParseCoverage    *model.ParseCoverage `json:"parse_coverage,omitempty"`
+	SourceFileID     string               `json:"source_file_id"`
+	CollectionID     string               `json:"collection_id"`
+	OriginalFilename string               `json:"original_filename"`
 	// Path is the evidence-relative path INSIDE the collection, which is
 	// forensically meaningful. It is never a server filesystem path.
 	Path         string `json:"path"`
@@ -90,6 +91,7 @@ type ProvenanceSourceFile struct {
 
 func provenanceSourceFile(sf model.SourceFile) ProvenanceSourceFile {
 	out := ProvenanceSourceFile{
+		ParseCoverage:    sf.ParseCoverage,
 		SourceFileID:     sf.ID,
 		CollectionID:     sf.CollectionID,
 		OriginalFilename: sf.OriginalFilename,

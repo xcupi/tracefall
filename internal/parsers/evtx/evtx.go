@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -65,15 +66,38 @@ func (p Parser) Parse(absPath string) (parsers.ParseResult, error) {
 	}
 	defer f.Close()
 
-	var out parsers.ParseResult
-	var unmapped int
-
+	out := parsers.ParseResult{Coverage: &model.ParseCoverage{}}
+	type kind struct {
+		provider, channel string
+		id                int
+	}
+	kinds := map[kind]*model.CoverageEvent{}
+	const maxKinds = 512
 	stats, err := f.Walk(func(rec evtx.Record) error {
+		c := out.Coverage
 		ev, ok := toEvent(rec)
+		if rec.System.TimeCreated.IsZero() {
+			c.Undated++
+		}
+		k := kind{rec.System.Provider, rec.System.Channel, rec.System.EventID}
+		row := kinds[k]
+		if row == nil && len(kinds) < maxKinds {
+			row = &model.CoverageEvent{Provider: k.provider, Channel: k.channel, EventID: k.id}
+			kinds[k] = row
+		}
+		if row != nil {
+			row.Records++
+			if ok {
+				row.Mapped++
+			}
+		} else {
+			c.UnlistedRecords++
+		}
 		if !ok {
-			unmapped++
+			c.Unmapped++
 			return nil
 		}
+		c.Mapped++
 		out.Events = append(out.Events, ev)
 
 		// The raw record is preserved as the resolved System + EventData
@@ -108,6 +132,21 @@ func (p Parser) Parse(absPath string) (parsers.ParseResult, error) {
 			out.Events[i].Confidence = 0.9
 		}
 	}
+	c := out.Coverage
+	c.RecordsRead, c.RecordsFailed, c.ChunksRead, c.ChunksFailed, c.LimitReached = stats.RecordsRead, stats.RecordsFailed, stats.ChunksRead, stats.ChunksFailed, stats.LimitReached
+	for _, v := range kinds {
+		c.ByEvent = append(c.ByEvent, *v)
+	}
+	sort.Slice(c.ByEvent, func(i, j int) bool {
+		a, b := c.ByEvent[i], c.ByEvent[j]
+		if a.Channel != b.Channel {
+			return a.Channel < b.Channel
+		}
+		if a.Provider != b.Provider {
+			return a.Provider < b.Provider
+		}
+		return a.EventID < b.EventID
+	})
 	return out, nil
 }
 
@@ -115,11 +154,6 @@ func (p Parser) Parse(absPath string) (parsers.ParseResult, error) {
 // that Tracefall has no mapping for it.
 func toEvent(rec evtx.Record) (model.Event, bool) {
 	sys := rec.System
-	if sys.TimeCreated.IsZero() {
-		// No usable timestamp: the record cannot be placed on a timeline,
-		// and inventing one would corrupt correlation.
-		return model.Event{}, false
-	}
 
 	ev := model.Event{
 		Timestamp: sys.TimeCreated.UTC(),
@@ -151,6 +185,10 @@ func toEvent(rec evtx.Record) (model.Event, bool) {
 		return model.Event{}, false
 	}
 
+	if sys.TimeCreated.IsZero() {
+		ev.Extra["timestamp_basis"] = "not_recorded"
+		ev.Extra["timestamp_note"] = "record contains no usable timestamp; observation retained undated"
+	}
 	addSystemExtras(&ev, sys)
 	return ev, true
 }

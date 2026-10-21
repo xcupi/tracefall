@@ -342,6 +342,16 @@ func writeResult(out io.Writer, res parsers.ParseResult) error {
 	if err := list("Raw", res.Raw == nil, len(res.Raw), func(i int) ([]byte, error) { return json.Marshal(res.Raw[i]) }); err != nil {
 		return err
 	}
+	if res.Coverage != nil {
+		b, err := json.Marshal(res.Coverage)
+		if err != nil {
+			return err
+		}
+		bw.WriteString(`,"Coverage":`)
+		if _, err := bw.Write(b); err != nil {
+			return err
+		}
+	}
 	bw.WriteString("}}\n")
 	return bw.Flush()
 }

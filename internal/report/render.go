@@ -343,6 +343,10 @@ const reportHTML = `{{define "observation"}}
 {{if .Coverage.FailedOmitted}}<p class="small muted">and {{.Coverage.FailedOmitted}} more not shown.</p>{{end}}
 {{end}}
 
+<h3>Source-level parser coverage</h3>
+<p class="small">A file being imported does not mean every record was mapped. Missing diagnostics mean coverage was not recorded, not that it was complete. Undated observations are retained without inventing a time.</p>
+{{if .Coverage.ParserDiagnostics}}<table><tr><th>Source</th><th>Read / mapped / unavailable coverage</th></tr>{{range .Coverage.ParserDiagnostics}}<tr><td class="mono">{{.Key}}</td><td class="wrap">{{.Value}}</td></tr>{{end}}</table>{{else}}<p>No source-level parser diagnostics were recorded.</p>{{end}}
+{{if .Coverage.DiagnosticsOmitted}}<p>{{.Coverage.DiagnosticsOmitted}} source diagnostics omitted here; see the case's source-file details.</p>{{end}}
 <h3>Case-specific caveats</h3>
 {{if .Limitations}}<ul>{{range .Limitations}}<li>{{.}}</li>{{end}}</ul>{{else}}<p>None beyond those below.</p>{{end}}
 

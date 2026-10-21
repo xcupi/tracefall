@@ -12,8 +12,9 @@ import "tracefall/internal/model"
 // ID fields are intentionally left blank -- ingestion assigns them, since
 // a parser doesn't know what case it's running in.
 type ParseResult struct {
-	Events []model.Event
-	Raw    []model.RawEvidence // Raw[i] is the untouched source record for Events[i]
+	Coverage *model.ParseCoverage `json:",omitempty"`
+	Events   []model.Event
+	Raw      []model.RawEvidence // Raw[i] is the untouched source record for Events[i]
 }
 
 // ArtifactParser turns one artifact source file into normalized events.
