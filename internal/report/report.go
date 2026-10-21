@@ -184,6 +184,7 @@ type EventRef struct {
 	Summary  string
 	Source   string
 	Ref      string
+	Details  []KV
 }
 
 // Finding is one detection result and the evidence it stands on.
@@ -206,6 +207,17 @@ type Finding struct {
 	EventCount    int
 	Events        []EventRef
 	EventsOmitted int
+	MissingEvents int
+}
+
+// Correlation is a deterministic relationship, not a finding or proof of causation.
+// Events retain the relationship's declared order, not an invented time order.
+type Correlation struct {
+	Number, ID, Type, Title, Description, FirstSeen, LastSeen string
+	EventCount                                                int
+	Events                                                    []EventRef
+	EventsOmitted                                             int
+	MissingEvents                                             int
 }
 
 // Investigation is a grouped, scored story built from findings.
@@ -303,6 +315,7 @@ type Data struct {
 	Evidence       []Evidence
 	Investigations []Investigation
 	Findings       []Finding
+	Correlations   []Correlation
 	Timeline       Timeline
 	Coverage       Coverage
 	Attachments    []Attachment

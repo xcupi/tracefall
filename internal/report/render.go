@@ -30,7 +30,15 @@ var reportTmpl = template.Must(template.New("report").Funcs(template.FuncMap{
 	},
 }).Parse(reportHTML))
 
-const reportHTML = `<!DOCTYPE html>
+const reportHTML = `{{define "observation"}}
+<article class="observation">
+<p class="small"><strong>{{.Type}}</strong> &middot; {{.Artifact}} &middot; {{.Time}}</p>
+<p class="small mono"><strong>Event:</strong> {{.ID}}</p>
+<p class="small mono"><strong>Source:</strong> {{.Source}}{{if .Ref}} &middot; {{.Ref}}{{end}}</p>
+<p class="wrap">{{.Summary}}</p>
+{{if .Details}}<dl class="event-details small">{{range .Details}}<div><dt>{{.Key}}</dt><dd class="mono">{{.Value}}</dd></div>{{end}}</dl>{{end}}
+</article>
+{{end}}<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -54,6 +62,12 @@ const reportHTML = `<!DOCTYPE html>
   th, td { border: 1px solid var(--line); padding: 5px 8px; text-align: left; vertical-align: top; }
   td.wrap, p, li, h3 { overflow-wrap: anywhere; }
   .badge { white-space: nowrap; }
+  .event-details { margin: 6px 0 0; }
+  .event-details > div { display: grid; grid-template-columns: 155px minmax(0, 1fr); gap: 8px; break-inside: avoid; }
+  .observation { border-left: 3px solid var(--line); padding: 6px 10px; margin: 8px 0; }
+  .observation > p { break-inside: avoid; }
+  .event-details dt { font-weight: 600; color: var(--muted); }
+  .event-details dd { margin: 0 0 4px; overflow-wrap: anywhere; }
   .nowrap { white-space: nowrap; word-break: normal; overflow-wrap: normal; }
   th { background: var(--soft); font-weight: 600; }
   td.num, th.num { text-align: right; white-space: nowrap; }
@@ -65,7 +79,7 @@ const reportHTML = `<!DOCTYPE html>
   .sev-low { background: #e6f4ea; border-color: #1a7f37; color: #0f4a22; }
   .sev-none { background: var(--soft); color: var(--muted); border-color: var(--line); }
   .warn { border: 2px solid #9a6700; background: #fff8e1; padding: 10px 14px; margin: 14px 0; }
-  .finding { border: 1px solid var(--line); padding: 4px 16px 10px; margin: 16px 0; page-break-inside: avoid; }
+  .finding { border: 1px solid var(--line); padding: 4px 16px 10px; margin: 16px 0; }
   .finding h3 { margin-top: 12px; }
   ul { margin: 4px 0 8px 20px; padding: 0; }
   nav ol { margin: 6px 0 0 20px; padding: 0; }
@@ -73,10 +87,12 @@ const reportHTML = `<!DOCTYPE html>
   @media print {
     main { max-width: none; padding: 0; }
     h2 { page-break-after: avoid; }
-    tr, .finding { page-break-inside: avoid; }
+    tr { page-break-inside: avoid; }
+    .finding h3 { break-after: avoid; }
+    h3, h4 { break-after: avoid; }
     .warn, .sev-critical, .sev-high, .sev-medium, .sev-low { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
   }
-  @page { margin: 16mm 14mm; }
+  @page { size: A4; margin: 16mm 14mm; }
 </style>
 </head>
 <body>
@@ -99,7 +115,7 @@ const reportHTML = `<!DOCTYPE html>
   <h4>Contents</h4>
   <ol class="small">
     <li>Executive summary</li><li>Evidence inventory</li><li>Methodology</li><li>Investigations</li>
-    <li>Findings</li><li>Timeline</li><li>Coverage and limitations</li><li>Appendices</li>
+    <li>Findings</li><li>Correlated activity</li><li>Timeline</li><li>Coverage and limitations</li><li>Appendices</li>
   </ol>
 </nav>
 
@@ -133,7 +149,7 @@ const reportHTML = `<!DOCTYPE html>
   {{end}}
 </table>
 {{else}}
-<p>No investigations were produced. This is an observation about the analyzed evidence, not a statement that nothing occurred; see section 7 for what was not analyzed.</p>
+<p>No investigations were produced. This is an observation about the analyzed evidence, not a statement that nothing occurred; see section 8 for what was not analyzed.</p>
 {{end}}
 
 <h2>2. Evidence inventory</h2>
@@ -223,12 +239,14 @@ const reportHTML = `<!DOCTYPE html>
 </p>
 <h4>Analysis runs</h4>
 {{if .Analysis.Runs}}
+{{range .Analysis.Runs}}
 <table>
-  <tr><th>Run</th><th>Started (UTC)</th><th>Completed (UTC)</th><th>Status</th><th>Tool version</th><th class="num">Events</th><th class="num">Findings</th><th class="num">Correlations</th></tr>
-  {{range .Analysis.Runs}}
-  <tr><td class="mono">{{.ID}}</td><td class="mono nowrap">{{.Started}}</td><td class="mono nowrap">{{.Completed}}</td><td>{{.Status}}{{if .Invalidated}} (invalidated {{.Invalidated}}){{end}}</td><td>{{.ToolVersion}}</td><td class="num">{{.Events}}</td><td class="num">{{.Findings}}</td><td class="num">{{.Correlations}}</td></tr>
-  {{end}}
+<tr><th colspan="4">Analysis run <span class="mono">{{.ID}}</span></th></tr>
+<tr><th>Started (UTC)</th><td class="mono">{{.Started}}</td><th>Completed (UTC)</th><td class="mono">{{.Completed}}</td></tr>
+<tr><th>Status</th><td>{{.Status}}{{if .Invalidated}} (invalidated {{.Invalidated}}){{end}}</td><th>Tool version</th><td>{{.ToolVersion}}</td></tr>
+<tr><th>Results</th><td colspan="3">{{.Events}} events; {{.Findings}} findings; {{.Correlations}} correlations</td></tr>
 </table>
+{{end}}
 {{else}}
 <p>No analysis run is recorded for this case.</p>
 {{end}}
@@ -256,19 +274,30 @@ const reportHTML = `<!DOCTYPE html>
   {{if .ReviewNote}}<p class="small"><strong>Analyst review note:</strong> {{.ReviewNote}}</p>{{end}}
   {{if .Notes}}<h4>Analyst notes</h4><ul class="small">{{range .Notes}}<li>{{.}}</li>{{end}}</ul>{{end}}
   <h4>Supporting evidence (observed) &mdash; {{.EventCount}} event(s)</h4>
-  <table>
-    <tr><th>Time (UTC)</th><th>Type</th><th>Artifact</th><th>Detail</th><th>Source</th></tr>
-    {{range .Events}}
-    <tr><td class="mono nowrap">{{.Time}}</td><td>{{.Type}}</td><td>{{.Artifact}}</td><td class="wrap">{{.Summary}}</td><td class="mono">{{.Source}}{{if .Ref}}<br>{{.Ref}}{{end}}</td></tr>
-    {{end}}
-  </table>
-  {{if .EventsOmitted}}<p class="small muted">and {{.EventsOmitted}} more events not shown here; they are in timeline.csv.</p>{{end}}
+  {{range .Events}}{{template "observation" .}}{{end}}
+  {{if .EventsOmitted}}<p class="small muted">and {{.EventsOmitted}} more events not shown here; their complete normalized fields and record references are in cited-events.json.</p>{{end}}
+ {{if .MissingEvents}}<p class="warn">Evidence incomplete: {{.MissingEvents}} reference(s) could not be resolved in this case. This finding cannot be fully verified from the available events.</p>{{end}}
 </div>
 {{else}}
 <p>No findings were produced.</p>
 {{end}}
 
-<h2>6. Timeline</h2>
+<h2>6. Correlated activity</h2>
+<p>These relationships are deterministic interpretations of the cited observations, not independent evidence or proof of causation. Events follow the correlation's declared order; equal or unknown timestamps do not establish a sequence.</p>
+{{range .Correlations}}
+<div class="finding">
+<h3>{{.Number}} &mdash; {{.Title}}</h3>
+<p class="small muted">Type: {{.Type}} &middot; ID: <span class="mono">{{.ID}}</span></p>
+<p class="small">Period (UTC): {{if .FirstSeen}}{{.FirstSeen}}{{else}}not recorded{{end}} &ndash; {{if .LastSeen}}{{.LastSeen}}{{else}}not recorded{{end}}</p>
+<p>{{.Description}}</p>
+<h4>Supporting observations &mdash; {{.EventCount}} reference(s)</h4>
+{{range .Events}}{{template "observation" .}}{{end}}
+{{if .EventsOmitted}}<p class="small">{{.EventsOmitted}} resolved observation(s) omitted here; see cited-events.json for complete normalized fields and record references. The complete reference list is in correlations.json.</p>{{end}}
+{{if .MissingEvents}}<p class="warn">Evidence incomplete: {{.MissingEvents}} reference(s) could not be resolved in this case. This relationship cannot be fully verified from the available events.</p>{{end}}
+</div>
+{{else}}<p>No correlations were produced. This is not proof that no related activity occurred.</p>{{end}}
+
+<h2>7. Timeline</h2>
 <p>
   <strong>{{.Timeline.Total}}</strong> event(s) in total; <strong>{{.Timeline.Dated}}</strong> carry a timestamp and
   <strong>{{.Timeline.Undated}}</strong> record none (they are not placed on the timeline and no time is invented for them).
@@ -284,20 +313,15 @@ const reportHTML = `<!DOCTYPE html>
 <table><tr><th>{{.Timeline.PeriodUnit}} (UTC)</th><th class="num">Events</th></tr>
 {{range .Timeline.ByPeriod}}<tr><td class="mono">{{.Name}}</td><td class="num">{{.N}}</td></tr>{{end}}</table>
 {{end}}
-<h4>Key events: events cited by findings, in time order</h4>
+<h4>Key events: events cited by findings and correlations, in time order</h4>
 {{if .Timeline.Key}}
-<table>
-  <tr><th>Time (UTC)</th><th>Type</th><th>Artifact</th><th>Detail</th><th>Source</th></tr>
-  {{range .Timeline.Key}}
-  <tr><td class="mono nowrap">{{.Time}}</td><td>{{.Type}}</td><td>{{.Artifact}}</td><td class="wrap">{{.Summary}}</td><td class="mono">{{.Source}}{{if .Ref}}<br>{{.Ref}}{{end}}</td></tr>
-  {{end}}
-</table>
+{{range .Timeline.Key}}{{template "observation" .}}{{end}}
 {{else}}
-<p>No event is cited by a finding.</p>
+<p>No event is cited by a finding or correlation.</p>
 {{end}}
-{{if .Timeline.KeyOmitted}}<p class="small muted">{{.Timeline.KeyOmitted}} further key events are not shown here. The complete timeline is the attachment timeline.csv.</p>{{end}}
+{{if .Timeline.KeyOmitted}}<p class="small muted">{{.Timeline.KeyOmitted}} further key events are not shown here. Complete cited event fields are in cited-events.json; the whole case's core timeline columns are in timeline.csv.</p>{{end}}
 
-<h2>7. Coverage and limitations</h2>
+<h2>8. Coverage and limitations</h2>
 <h3>What was and was not analyzed</h3>
 <p>
   {{.Coverage.Discovered}} file(s) cataloged: {{.Coverage.Supported}} supported, {{.Coverage.Unsupported}} unsupported,
@@ -327,12 +351,12 @@ const reportHTML = `<!DOCTYPE html>
   <li>This report is not a legal chain of custody record. It documents technical provenance between stored objects; it does not establish who handled the evidence, under what authority, or the continuity of possession.</li>
   <li>The account shown as having generated this report is a system account name. It has not been verified as an examiner identity.</li>
   <li>A recorded digest shows that two reads of the evidence agree. It is not a third-party timestamp or a signature, and it says nothing about the evidence before ingestion.</li>
-  <li>Timestamps without an explicit zone in the source were interpreted as UTC. The time zone of the source system is not separately established by this report.</li>
+  <li>A timestamp is meaningful only with its recorded clock basis. Local readings with an unknown zone and partial dates are preserved without an invented UTC instant. Recorded host time zones and capture-clock estimates are stated separately; original timestamps are not silently corrected.</li>
   <li>Findings are indications produced by fixed rules. A finding may be a false positive, and the absence of a finding is not proof of absence.</li>
   <li>No artificial intelligence or large language model was used to produce any part of this report. Every statement is either fixed text or a value taken from the case data.</li>
 </ul>
 
-<h2>8. Appendices</h2>
+<h2>9. Appendices</h2>
 <h3>Appendix A &mdash; Attachments and hashes</h3>
 <table>
   <tr><th>File</th><th>Description</th><th class="num">Rows</th><th class="num">Bytes</th><th>SHA-256</th></tr>

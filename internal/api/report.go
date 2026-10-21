@@ -3,6 +3,7 @@ package api
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"regexp"
@@ -12,6 +13,7 @@ import (
 	"unicode/utf8"
 
 	"tracefall/internal/attck"
+	"tracefall/internal/cmdsem"
 	"tracefall/internal/detect"
 	"tracefall/internal/model"
 	"tracefall/internal/report"
@@ -130,7 +132,11 @@ func (s *Service) assembleAndRender(caseID string, now time.Time, spool *string)
 	if err != nil {
 		return reportBuild{}, fmt.Errorf("counting events: %w", err)
 	}
-	cited, err := s.store.EventsByIDs(findingEventIDs(findings))
+	citedIDs := findingEventIDs(findings)
+	for _, c := range correlations {
+		citedIDs = append(citedIDs, c.EventIDs...)
+	}
+	cited, err := s.store.EventsByIDs(citedIDs)
 	if err != nil {
 		return reportBuild{}, fmt.Errorf("loading cited events: %w", err)
 	}
@@ -151,9 +157,30 @@ func (s *Service) assembleAndRender(caseID string, now time.Time, spool *string)
 	if err := writeFindingsCSV(findings, statuses, &fl); err != nil {
 		return reportBuild{}, fmt.Errorf("building findings.csv: %w", err)
 	}
+	// Keep every correlation reference in the bundle, even when its evidence
+	// table is capped. Sort a copy; never mutate stored data for presentation.
+	fullCorrelations := append([]model.Correlation{}, correlations...)
+	sort.Slice(fullCorrelations, func(i, j int) bool { return fullCorrelations[i].ID < fullCorrelations[j].ID })
+	cj, err := json.MarshalIndent(fullCorrelations, "", "  ")
+	if err != nil {
+		return reportBuild{}, fmt.Errorf("building correlations.json: %w", err)
+	}
+	resolved := make([]model.Event, 0, len(cited))
+	for _, e := range cited {
+		if e.CaseID == caseID {
+			resolved = append(resolved, e)
+		}
+	}
+	sort.Slice(resolved, func(i, j int) bool { return resolved[i].ID < resolved[j].ID })
+	ej, err := json.MarshalIndent(resolved, "", "  ")
+	if err != nil {
+		return reportBuild{}, fmt.Errorf("building cited-events.json: %w", err)
+	}
 	files := []report.File{
 		report.SpooledFile("timeline.csv", tlPath, tlSHA, tlSize),
 		report.NewFile("findings.csv", fl.Bytes()),
+		report.NewFile("correlations.json", cj),
+		report.NewFile("cited-events.json", ej),
 	}
 
 	d := s.assembleReportData(reportInputs{
@@ -164,6 +191,8 @@ func (s *Service) assembleAndRender(caseID string, now time.Time, spool *string)
 		timelineCSV: files[0], findingsCSV: files[1],
 	})
 
+	d.Attachments = append(d.Attachments, report.Attachment{Name: files[2].Name, Description: "All correlations and their complete ordered event-reference lists.", SHA256: files[2].SHA256, Bytes: files[2].Size, Rows: len(correlations)})
+	d.Attachments = append(d.Attachments, report.Attachment{Name: files[3].Name, Description: "All resolved cited events, with complete normalized fields and record references (sensitive evidence, not redacted).", SHA256: files[3].SHA256, Bytes: files[3].Size, Rows: len(resolved)})
 	html, err := report.Render(d)
 	if err != nil {
 		return reportBuild{}, err
@@ -207,6 +236,9 @@ func (s *Service) assembleReportData(in reportInputs) report.Data {
 	}
 	evByID := make(map[string]model.Event, len(in.events))
 	for _, e := range in.events {
+		if e.CaseID != c.ID {
+			continue
+		}
 		evByID[e.ID] = e
 	}
 
@@ -216,7 +248,7 @@ func (s *Service) assembleReportData(in reportInputs) report.Data {
 		CaseStatus: c.CaseStatus, Priority: c.Priority, CreatedAt: reportTime(c.CreatedAt),
 		GeneratedAt: reportTime(in.now), GeneratedBy: s.auditActor(),
 		ToolName: version.Name, ToolVersion: version.Version,
-		TimeBasis: "All timestamps are shown in UTC. Source timestamps without an explicit zone were interpreted as UTC (see section 7).",
+		TimeBasis: "Known instants are displayed in UTC; local readings with an unknown zone and partial dates remain as recorded, without an invented UTC timestamp (see section 8).",
 	}
 	if c.AnalyzedAt != nil {
 		d.Meta.AnalyzedAt = reportTime(*c.AnalyzedAt)
@@ -252,8 +284,36 @@ func (s *Service) assembleReportData(in reportInputs) report.Data {
 		}
 	}
 
+	cs := append([]model.Correlation(nil), in.correlations...)
+	sort.Slice(cs, func(i, j int) bool {
+		if !cs[i].FirstSeen.Equal(cs[j].FirstSeen) {
+			return cs[i].FirstSeen.Before(cs[j].FirstSeen)
+		}
+		return cs[i].ID < cs[j].ID
+	})
+	for i, c := range cs {
+		out := report.Correlation{Number: fmt.Sprintf("C-%03d", i+1), ID: c.ID, Type: c.Type, Title: c.Title, Description: c.Description, FirstSeen: reportTime(c.FirstSeen), LastSeen: reportTime(c.LastSeen), EventCount: len(c.EventIDs)}
+		for _, id := range c.EventIDs {
+			cited[id] = true
+			e, ok := evByID[id]
+			if !ok {
+				out.MissingEvents++
+				continue
+			}
+			if len(out.Events) < maxFindingEvents {
+				out.Events = append(out.Events, eventRef(e, srcByID))
+			} else {
+				out.EventsOmitted++
+			}
+		}
+		d.Correlations = append(d.Correlations, out)
+	}
 	d.Investigations = reportInvestigations(in, &d)
-	d.Timeline = reportTimeline(in.timeline, in.events, cited, srcByID)
+	caseEvents := make([]model.Event, 0, len(evByID))
+	for _, e := range evByID {
+		caseEvents = append(caseEvents, e)
+	}
+	d.Timeline = reportTimeline(in.timeline, caseEvents, cited, srcByID)
 	d.Coverage = reportCoverage(in.sourceFiles)
 	d.Rules = reportRules(fs, ruleFired)
 
@@ -453,11 +513,8 @@ func reportFinding(n int, f model.Finding, evByID map[string]model.Event, srcByI
 	for _, e := range shown {
 		out.Events = append(out.Events, eventRef(e, srcByID))
 	}
-	// Counted against the finding's own list, not the resolved events:
-	// an id that no longer resolves is still part of what it stood on.
-	if omitted := len(f.SupportingEvents) - len(out.Events); omitted > 0 {
-		out.EventsOmitted = omitted
-	}
+	out.MissingEvents = len(f.SupportingEvents) - len(supporting)
+	out.EventsOmitted = len(supporting) - len(out.Events)
 	return out
 }
 
@@ -603,6 +660,22 @@ func redactLocalPath(summary string) string {
 // The fixed ones are in the template.
 func reportLimitations(d report.Data, in reportInputs) []string {
 	lim := append([]string(nil), d.Limitations...)
+	hasCapture, hasMemory := false, false
+	for _, sf := range in.sourceFiles {
+		hasCapture = hasCapture || sf.ArtifactType == model.ArtifactNetworkCapture
+		hasMemory = hasMemory || sf.ArtifactType == model.ArtifactMemoryAnalysis
+	}
+	if hasCapture {
+		lim = append(lim, "Network timestamps use the capture clock, not necessarily a participating host's clock. Clock-offset estimates are separate interpretations with uncertainty; they do not rewrite original event timestamps. An HTTP response or RDP connection is not proof of execution or successful authentication.")
+	}
+	if hasMemory {
+		lim = append(lim, "Memory console text is retained history, not proof of command execution. Untimed memory objects are observations at the snapshot clock (when recorded), not creation times. Recovered bytes may be mapped or incomplete; zero pages can be genuine or missing resident pages, and their hashes need not match a file on disk. Static payload indicators are leads, not a malware verdict.")
+	}
+	for _, c := range d.Correlations {
+		if c.MissingEvents > 0 {
+			lim = append(lim, fmt.Sprintf("Correlation %s has %d unresolved event reference(s); its evidence is incomplete.", c.ID, c.MissingEvents))
+		}
+	}
 	if !d.Analysis.Current {
 		lim = append(lim, "The analysis does not necessarily describe the current evidence: "+strings.TrimSpace(d.Analysis.Note))
 	}
@@ -682,7 +755,7 @@ func eventRef(e model.Event, srcByID map[string]model.SourceFile) report.EventRe
 	}
 	return report.EventRef{
 		ID: e.ID, Time: ts, Type: e.EventType, Artifact: artifactTypeLabel(e.ArtifactType),
-		Summary: eventDetail(e), Source: src, Ref: e.SourceReference,
+		Summary: eventDetail(e), Source: src, Ref: e.SourceReference, Details: reportEventDetails(e),
 	}
 }
 
@@ -691,7 +764,7 @@ func eventDetail(e model.Event) string {
 	var parts []string
 	switch {
 	case e.CommandLine != "":
-		parts = append(parts, e.CommandLine)
+		parts = append(parts, cmdsem.Redact(e.CommandLine))
 	case e.ProcessPath != "":
 		parts = append(parts, e.ProcessPath)
 	case e.ProcessName != "":
