@@ -31,6 +31,13 @@ const (
 // case, the value name) and reports which persistence location it is, if
 // any. keyPath is matched case-insensitively, as Windows registry paths
 // are.
+// winlogonLaunchValues are the Winlogon values Windows uses to start a
+// program for the logon session.
+var winlogonLaunchValues = map[string]bool{
+	"shell": true, "userinit": true, "taskman": true, "appsetup": true,
+	"vmapplet": true, "uihost": true, "ginadll": true,
+}
+
 func Classify(keyPath, valueName string) Kind {
 	lower := strings.ToLower(keyPath)
 
@@ -41,18 +48,44 @@ func Classify(keyPath, valueName string) Kind {
 		return KindRunKey
 
 	case strings.Contains(lower, `\microsoft\windows nt\currentversion\winlogon`):
-		return KindWinlogon
+		// Only the Winlogon key itself, and only the values that start a
+		// program at logon. Its subkeys (GPExtensions, Notify, ...) hold
+		// ordinary configuration, and so do its other values.
+		if strings.HasSuffix(strings.TrimRight(lower, `\`), `\winlogon`) && winlogonLaunchValues[strings.ToLower(valueName)] {
+			return KindWinlogon
+		}
+		return KindNone
 
 	case strings.Contains(lower, `\microsoft\windows nt\currentversion\image file execution options`):
-		return KindIFEO
+		// Only a Debugger value directly under a per-executable subkey
+		// redirects execution. Mitigation flags such as GlobalFlag or
+		// DisableExceptionChainValidation, and the DllNXOptions list, do not.
+		rest := lower[strings.Index(lower, `image file execution options`)+len(`image file execution options`):]
+		rest = strings.Trim(rest, `\`)
+		if rest != "" && !strings.Contains(rest, `\`) && rest != "dllnxoptions" && strings.EqualFold(valueName, "Debugger") {
+			return KindIFEO
+		}
+		return KindNone
 
 	case strings.Contains(lower, `\microsoft\windows nt\currentversion\windows`) && strings.EqualFold(valueName, "AppInit_DLLs"):
 		return KindAppInitDLLs
 
-	case strings.Contains(lower, `\services\`) && strings.EqualFold(valueName, "ImagePath"):
+	case strings.EqualFold(valueName, "ImagePath") && isServiceKey(lower):
 		return KindServiceImagePath
 
 	default:
 		return KindNone
 	}
+}
+
+// isServiceKey reports whether lower is a service's own key,
+// ...\Services\<name>, not one of its subkeys (Parameters, Enum, ...),
+// which can also carry an ImagePath-named value.
+func isServiceKey(lower string) bool {
+	i := strings.LastIndex(lower, `\services\`)
+	if i < 0 {
+		return false
+	}
+	name := strings.Trim(lower[i+len(`\services\`):], `\`)
+	return name != "" && !strings.Contains(name, `\`)
 }

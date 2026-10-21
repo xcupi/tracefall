@@ -31,6 +31,7 @@ import (
 	"tracefall/internal/normalize"
 	"tracefall/internal/parsers"
 	"tracefall/internal/parsers/regpersist"
+	"tracefall/internal/procclass"
 	"tracefall/internal/regf"
 )
 
@@ -207,6 +208,13 @@ func (p Parser) ParseWithContext(absPath string, ctx parsers.ParseContext) (pars
 			// evidence of persistence.
 			data := v.String()
 			if strings.TrimSpace(data) == "" {
+				continue
+			}
+			// Every service in a hive snapshot has an ImagePath; that is
+			// configuration, not a modification. Keep it as persistence
+			// evidence only when the binary sits in a user-writable or
+			// non-standard location or runs a script interpreter.
+			if kind == regpersist.KindServiceImagePath && !procclass.HasSuspiciousPath(data) && !runsInterpreter(data) {
 				continue
 			}
 			ev, raw := persistenceEvent(k, v, kind, hiveType, host, user)
@@ -467,4 +475,11 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return s[:n] + "..."
+}
+
+// runsInterpreter reports whether a service image path starts a command or
+// script interpreter, which a driver or service binary does not.
+func runsInterpreter(imagePath string) bool {
+	exe := strings.ToLower(normalize.ExecutableFromCommandLine(imagePath))
+	return procclass.IsPowerShell(exe) || procclass.IsScriptHost(exe) || exe == "cmd.exe"
 }

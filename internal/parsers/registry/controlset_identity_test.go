@@ -16,7 +16,7 @@ func identityControlSet(name, host, domain, ip, role string) *regfgen.Key {
 			regfgen.NewKey("ProductOptions").WithValues(regfgen.StringValue("ProductType", role))),
 		regfgen.NewKey("Services",
 			regfgen.NewKey("Tcpip", regfgen.NewKey("Parameters", regfgen.NewKey("Interfaces", regfgen.NewKey("{AAAA}").WithValues(regfgen.MultiStringValue("IPAddress", []string{ip})))).WithValues(regfgen.StringValue("Domain", domain))),
-			regfgen.NewKey("ExampleService").WithValues(regfgen.StringValue("ImagePath", `C:\Windows\example.exe`))))
+			regfgen.NewKey("ExampleService").WithValues(regfgen.StringValue("ImagePath", `C:\Users\alice\AppData\Local\Temp\example.exe`))))
 }
 
 func selectedIdentityHive(selectKey *regfgen.Key) []byte {

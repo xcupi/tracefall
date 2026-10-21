@@ -667,6 +667,12 @@ func (r registryPersistenceExtended) Inputs() model.EventFilter {
 func (r registryPersistenceExtended) Evaluate(events []model.Event) []model.Finding {
 	var findings []model.Finding
 	for _, e := range byType(events, model.EventRegistryPersistence) {
+		// The stock Winlogon Shell and Userinit values are the operating
+		// system's own configuration; they stay in the timeline but are
+		// not a lead. Any other value there is.
+		if e.Extra["registry_persistence_type"] == "winlogon" && isDefaultWinlogonValue(e.RegistryPath, e.FilePath) {
+			continue
+		}
 		mechanism, techniques := persistenceMechanism(e)
 		suspicious := procclass.HasSuspiciousPath(e.FilePath)
 		severity, confidence := model.SeverityMedium, model.ConfidenceLow
@@ -875,4 +881,25 @@ func (r remoteLogonObserved) Evaluate(events []model.Event) []model.Finding {
 			desc, []string{"T1021.001"}, []model.Event{e}))
 	}
 	return findings
+}
+
+// isDefaultWinlogonValue reports whether a Winlogon launch value holds the
+// stock Windows setting: Shell is explorer.exe and Userinit is userinit.exe
+// in the system directory (Windows writes a trailing comma).
+func isDefaultWinlogonValue(registryPath, data string) bool {
+	i := strings.LastIndex(registryPath, `\`)
+	if i < 0 {
+		return false
+	}
+	name := strings.ToLower(registryPath[i+1:])
+	v := strings.ToLower(strings.TrimRight(strings.TrimSpace(data), ", "))
+	switch name {
+	case "shell":
+		return v == "explorer.exe"
+	case "userinit":
+		return v == "userinit.exe" || v == `c:\windows\system32\userinit.exe` || v == `%systemroot%\system32\userinit.exe`
+	case "vmapplet":
+		return v == "systempropertiesperformance.exe /pagefile"
+	}
+	return false
 }
