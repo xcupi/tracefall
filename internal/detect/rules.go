@@ -691,6 +691,13 @@ func (r registryPersistenceExtended) Evaluate(events []model.Event) []model.Find
 		if e.Extra["registry_persistence_type"] == "winlogon" && isDefaultWinlogonValue(e.RegistryPath, e.FilePath) {
 			continue
 		}
+		// A snapshot service ImagePath outside any suspicious location is
+		// configuration: it stays in the timeline but is not a lead. (A
+		// service dropped into a system directory therefore cannot be told
+		// from a stock one without a baseline; that is a stated limit.)
+		if e.Extra["persistence_lead"] == "false" {
+			continue
+		}
 		mechanism, techniques := persistenceMechanism(e)
 		suspicious := procclass.HasSuspiciousPath(e.FilePath)
 		severity, confidence := model.SeverityMedium, model.ConfidenceLow

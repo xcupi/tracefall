@@ -11,6 +11,16 @@ import (
 
 // BeforeSuccess ends a failure run at each success, including successes in a
 // continuing stream of failures. A sequence contains only failures before it.
+//
+// Failures and successes are tied by case, host and account. The logon type,
+// authentication package, logon process and workstation are NOT part of the
+// tie: a guessing attempt over NTLM followed by an RDP or Kerberos logon is
+// the usual shape of a successful guess, and splitting on them hides it. The
+// source address and account domain narrow the tie only when BOTH sides record
+// one and they differ (a different address or domain is a different actor or
+// account); an unrecorded value never separates. Failures that record their
+// subject session stay in separate streams. The collection is not part of the
+// tie either: one host is often acquired more than once.
 func BeforeSuccess(events []model.Event, threshold int, gap, window time.Duration) [][]model.Event {
 	groups := map[string][]model.Event{}
 	for _, e := range events {
@@ -20,15 +30,9 @@ func BeforeSuccess(events []model.Event, threshold int, gap, window time.Duratio
 		if e.Timestamp.IsZero() || e.Host == "" || e.User == "" || e.ArtifactType == model.ArtifactMemoryAnalysis || e.Extra["timestamp_basis"] == "memory_snapshot" {
 			continue
 		}
-		// Target logon_id is deliberately NOT a grouping field: a 4625
-		// does not open a session. Source ports are also per-attempt, not identity.
-		k := strings.Join([]string{e.CaseID, e.CollectionID, e.Host, e.User, e.NetworkSource, e.Extra["target_domain"], e.Extra["logon_type"], e.Extra["workstation_name"], e.Extra["auth_package"], e.Extra["logon_process"]}, "\x00")
+		k := strings.Join([]string{e.CaseID, strings.ToLower(e.Host), strings.ToLower(e.User)}, "\x00")
 		groups[k] = append(groups[k], e)
 	}
-	// Some Windows failure sources omit SubjectLogonId entirely. In that
-	// case the success's subject session cannot be used as a target-session
-	// binding. Where failures DO record subjects, keep those streams apart;
-	// missing subjects never bridge two known sessions.
 	subject := func(e model.Event) string {
 		s := e.Extra["subject_logon_id"]
 		if s == "0x0" || s == "0" || s == "-" {
@@ -36,24 +40,24 @@ func BeforeSuccess(events []model.Event, threshold int, gap, window time.Duratio
 		}
 		return s
 	}
-	streams := map[string][]model.Event{}
-	for k, es := range groups {
-		known := false
-		for _, e := range es {
-			if e.EventType == model.EventLogonFailure && subject(e) != "" {
-				known = true
-				break
-			}
+	domain := func(e model.Event) string { return strings.ToLower(e.Extra["target_domain"]) }
+	compatible := func(f, s model.Event) bool {
+		if f.NetworkSource != "" && s.NetworkSource != "" && f.NetworkSource != s.NetworkSource {
+			return false
 		}
-		for _, e := range es {
-			key := k
-			if known {
-				key += "\x00" + subject(e)
-			}
-			streams[key] = append(streams[key], e)
+		if domain(f) != "" && domain(s) != "" && domain(f) != domain(s) {
+			return false
 		}
+		if subject(f) != "" && subject(s) != "" && subject(f) != subject(s) {
+			return false
+		}
+		return true
 	}
-	groups = streams
+
+	type stream struct {
+		burst   []model.Event
+		pending [][]model.Event
+	}
 	keys := make([]string, 0, len(groups))
 	for k := range groups {
 		keys = append(keys, k)
@@ -68,42 +72,59 @@ func BeforeSuccess(events []model.Event, threshold int, gap, window time.Duratio
 			}
 			return es[i].ID < es[j].ID
 		})
-		var burst []model.Event
-		var pending [][]model.Event
+		// One stream per failure context (source, domain, subject session).
+		streams := map[string]*stream{}
+		ctxOf := func(e model.Event) string {
+			return strings.Join([]string{e.NetworkSource, domain(e), subject(e)}, "\x00")
+		}
 		for _, e := range es {
-			// Retain only completed bursts still eligible for a future success.
-			kept := pending[:0]
-			for _, run := range pending {
-				if e.Timestamp.Sub(run[len(run)-1].Timestamp) <= window {
-					kept = append(kept, run)
-				}
-			}
-			for i := len(kept); i < len(pending); i++ {
-				pending[i] = nil
-			}
-			pending = kept
 			if e.EventType == model.EventLogonFailure {
-				if len(burst) > 0 && e.Timestamp.Sub(burst[len(burst)-1].Timestamp) > gap {
-					if len(burst) >= threshold {
-						pending = append(pending, burst)
-					}
-					burst = nil
+				st := streams[ctxOf(e)]
+				if st == nil {
+					st = &stream{}
+					streams[ctxOf(e)] = st
 				}
-				burst = append(burst, e)
+				if len(st.burst) > 0 && e.Timestamp.Sub(st.burst[len(st.burst)-1].Timestamp) > gap {
+					if len(st.burst) >= threshold {
+						st.pending = append(st.pending, st.burst)
+					}
+					st.burst = nil
+				}
+				st.burst = append(st.burst, e)
 				continue
 			}
-			runs := pending
-			if len(burst) >= threshold {
-				runs = append(runs, burst)
+			// A success: tie it to every compatible stream's eligible runs.
+			ctxs := make([]string, 0, len(streams))
+			for c := range streams {
+				ctxs = append(ctxs, c)
 			}
-			for _, run := range runs {
-				last := run[len(run)-1]
-				if e.Timestamp.After(last.Timestamp) && e.Timestamp.Sub(last.Timestamp) <= window {
-					out = append(out, append(append([]model.Event{}, run...), e))
+			sort.Strings(ctxs)
+			for _, c := range ctxs {
+				st := streams[c]
+				var probe model.Event
+				switch {
+				case len(st.burst) > 0:
+					probe = st.burst[0]
+				case len(st.pending) > 0:
+					probe = st.pending[0][0]
+				default:
+					continue
 				}
+				if !compatible(probe, e) {
+					continue
+				}
+				runs := st.pending
+				if len(st.burst) >= threshold {
+					runs = append(runs, st.burst)
+				}
+				for _, run := range runs {
+					last := run[len(run)-1]
+					if e.Timestamp.After(last.Timestamp) && e.Timestamp.Sub(last.Timestamp) <= window {
+						out = append(out, append(append([]model.Event{}, run...), e))
+					}
+				}
+				st.burst, st.pending = nil, nil
 			}
-			burst = nil
-			pending = nil
 		}
 	}
 	return out

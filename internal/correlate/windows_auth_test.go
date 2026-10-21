@@ -30,7 +30,7 @@ func TestWindowsAuthSuccessDuringFailures(t *testing.T) {
 }
 
 func TestWindowsAuthContextIsolation(t *testing.T) {
-	for _, dimension := range []string{"source", "domain", "type", "case", "collection", "user", "subject_session", "zero", "tied", "memory"} {
+	for _, dimension := range []string{"source", "domain", "case", "user", "subject_session", "zero", "tied", "memory"} {
 		t.Run(dimension, func(t *testing.T) {
 			base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 			var events []model.Event

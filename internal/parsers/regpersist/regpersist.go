@@ -67,6 +67,11 @@ func Classify(keyPath, valueName string) Kind {
 		}
 		return KindNone
 
+	case strings.Contains(lower, `\microsoft\windows nt\currentversion\silentprocessexit\`) && strings.EqualFold(valueName, "MonitorProcess"):
+		// A program started when the named process exits: the same
+		// redirection as an IFEO debugger.
+		return KindIFEO
+
 	case strings.Contains(lower, `\microsoft\windows nt\currentversion\windows`) && strings.EqualFold(valueName, "AppInit_DLLs"):
 		return KindAppInitDLLs
 

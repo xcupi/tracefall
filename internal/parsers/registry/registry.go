@@ -210,14 +210,20 @@ func (p Parser) ParseWithContext(absPath string, ctx parsers.ParseContext) (pars
 			if strings.TrimSpace(data) == "" {
 				continue
 			}
-			// Every service in a hive snapshot has an ImagePath; that is
-			// configuration, not a modification. Keep it as persistence
-			// evidence only when the binary sits in a user-writable or
-			// non-standard location or runs a script interpreter.
-			if kind == regpersist.KindServiceImagePath && !procclass.HasSuspiciousPath(data) && !runsInterpreter(data) {
-				continue
-			}
 			ev, raw := persistenceEvent(k, v, kind, hiveType, host, user)
+			// Every service in a hive snapshot has an ImagePath; that is
+			// configuration, not a modification. The event stays in the
+			// timeline as evidence (a hive-only acquisition has nothing
+			// else), and is marked so the detection rule raises a lead only
+			// for a user-writable or non-standard location or an interpreter.
+			if kind == regpersist.KindServiceImagePath {
+				if ev.Extra == nil {
+					ev.Extra = map[string]string{}
+				}
+				if !procclass.HasSuspiciousPath(data) && !runsInterpreter(data) {
+					ev.Extra["persistence_lead"] = "false"
+				}
+			}
 			out.Events = append(out.Events, ev)
 			out.Raw = append(out.Raw, raw)
 		}

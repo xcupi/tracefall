@@ -21,6 +21,8 @@ func TestClassify_OnlyLaunchLocationsArePersistence(t *testing.T) {
 		{`HKLM\SYSTEM\ControlSet001\Services\svc01`, "ImagePath", KindServiceImagePath},
 		{`HKLM\SYSTEM\ControlSet001\Services\svc01\Parameters`, "ImagePath", KindNone},
 		{`HKLM\SYSTEM\ControlSet001\Services\svc01`, "Start", KindNone},
+		{`HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\SilentProcessExit\tool.exe`, "MonitorProcess", KindIFEO},
+		{`HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\SilentProcessExit\tool.exe`, "ReportingMode", KindNone},
 	}
 	for _, c := range cases {
 		if got := Classify(c.key, c.val); got != c.want {
