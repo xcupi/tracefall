@@ -779,7 +779,13 @@ func (r privilegedLogonObserved) Evaluate(events []model.Event) []model.Finding 
 	type key struct{ caseID, host, user string }
 	groups := map[key][]model.Event{}
 	for _, e := range byType(events, model.EventPrivilegedLogon) {
-		k := key{e.CaseID, strings.ToLower(e.Host), strings.ToLower(e.User)}
+		// Events whose host is not recorded cannot be merged across
+		// acquisitions: each collection keeps its own unknown host.
+		h := strings.ToLower(e.Host)
+		if h == "" {
+			h = "\x00" + e.CollectionID
+		}
+		k := key{e.CaseID, h, strings.ToLower(e.User)}
 		groups[k] = append(groups[k], e)
 	}
 	keys := make([]key, 0, len(groups))
@@ -995,8 +1001,9 @@ func isDefaultWinlogonValue(registryPath, data string) bool {
 // an encoded command, a hidden window, no-profile PowerShell, a remote
 // URL, or in-memory download-and-run. None of them is stock task usage.
 func hasHostileInvocation(cmd string) bool {
-	l := strings.ToLower(cmd)
-	for _, m := range []string{" -enc", " -e ", "-encodedcommand", " -nop", "-noprofile", " -w hidden", "-windowstyle hidden", "http://", "https://", "downloadstring", "frombase64string", " iex", "invoke-expression"} {
+	// A trailing space lets an option that ends the line match like the rest.
+	l := strings.ToLower(cmd) + " "
+	for _, m := range []string{" -enc", " -ec ", " -e ", "-encodedcommand", " -nop", "-noprofile", " -w hidden", " -w 1 ", "-windowstyle hidden", " -ep bypass", " -exec bypass", "executionpolicy bypass", "http://", "https://", "downloadstring", "frombase64string", " iex", "invoke-expression"} {
 		if strings.Contains(l, m) {
 			return true
 		}

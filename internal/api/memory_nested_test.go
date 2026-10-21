@@ -90,3 +90,36 @@ func TestMemory_PipelineAnalysesAnImageFoundInsideAFolder(t *testing.T) {
 	}
 	t.Fatal("no memory-analysis event was imported")
 }
+
+func TestMemory_NestedDumpsNeedMemoryMagicAndSize(t *testing.T) {
+	dir := t.TempDir()
+	small := filepath.Join(dir, "Mini010124.dmp")
+	if err := os.WriteFile(small, append([]byte("PAGEDU64"), make([]byte, 4096)...), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if nestedMemoryCandidate(small, "Mini010124.dmp") {
+		t.Fatal("a small kernel minidump must not be taken for a memory image")
+	}
+	named := filepath.Join(dir, "host.lime")
+	if err := os.WriteFile(named, []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if !nestedMemoryCandidate(named, "host.lime") {
+		t.Fatal("a memory-specific name is a candidate")
+	}
+}
+
+func TestMemory_ResumedPipelineFindsTheNestedImageFromTheCase(t *testing.T) {
+	svc, c, _ := memFixture(t, memDoc(), "unused.vmem")
+	dir, name := nestedMemoryDir(t)
+	if _, err := svc.DiscoverEvidenceFromPath(c.ID, dir); err != nil {
+		t.Fatal(err)
+	}
+	got := svc.nestedMemoryCollections(c.ID, dir)
+	if len(got) != 1 || got[0].Path != name || got[0].CollectionID == "" {
+		t.Fatalf("nested collections from the case = %+v", got)
+	}
+	if other := svc.nestedMemoryCollections(c.ID, t.TempDir()); len(other) != 0 {
+		t.Fatalf("an unrelated folder must find nothing: %+v", other)
+	}
+}

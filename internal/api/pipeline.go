@@ -345,7 +345,6 @@ func (s *Service) executeIngest(job model.PipelineJob, res *PipelineResult) *pip
 	}
 
 	// ---- discover
-	var related []RelatedCollection
 	if collectionID == "" {
 		if st := cancelled(); st != nil {
 			return st
@@ -362,7 +361,6 @@ func (s *Service) executeIngest(job model.PipelineJob, res *PipelineResult) *pip
 		switch {
 		case err == nil:
 			collectionID = disc.Collection.ID
-			related = disc.RelatedCollections
 		case errors.As(err, &dup) && job.Attempts > 1:
 			collectionID = dup.CollectionID // committed before the crash
 		default:
@@ -392,25 +390,27 @@ func (s *Service) executeIngest(job model.PipelineJob, res *PipelineResult) *pip
 		res.FilesFailed = len(imp.ParseFailures)
 	}
 	// A memory image found inside the folder is its own collection; import it
-	// like the folder so an unattended run does not leave it unanalysed.
-	for _, rc := range related {
-		if rc.Status != "discovered" || rc.CollectionID == "" {
-			continue
-		}
+	// like the folder so an unattended run does not leave it unanalysed. The
+	// images are derived from the case, not from this attempt's discovery, so a
+	// resumed job finds them too. One image that fails to import is a warning on
+	// that image: it must not stop the analysis of the rest of the evidence.
+	for _, rc := range svc.nestedMemoryCollections(job.CaseID, p.LocalPath) {
 		if st := cancelled(); st != nil {
 			return st
 		}
 		rids, err := svc.EvidenceFileIDs(job.CaseID, rc.CollectionID, EvidenceFilter{})
-		if err != nil {
-			return fail(err)
-		}
-		if len(rids) == 0 {
+		if err != nil || len(rids) == 0 {
+			if err != nil {
+				slog.Warn("pipeline: nested memory image not listed", "job", job.ID, "path", rc.Path, "error", err)
+				res.FilesFailed++
+			}
 			continue
 		}
 		imp, err := svc.ImportEvidence(job.CaseID, rc.CollectionID, rids)
 		if err != nil {
 			slog.Warn("pipeline: nested memory image import failed", "job", job.ID, "path", rc.Path, "error", err)
-			return fail(err)
+			res.FilesFailed++
+			continue
 		}
 		res.FilesImported += len(imp.Imported)
 		res.FilesSkipped += len(imp.Skipped)
