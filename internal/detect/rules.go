@@ -3,6 +3,7 @@ package detect
 import (
 	"fmt"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -747,17 +748,76 @@ func (r privilegedLogonObserved) Inputs() model.EventFilter {
 }
 
 func (r privilegedLogonObserved) Evaluate(events []model.Event) []model.Finding {
-	var findings []model.Finding
+	// One finding per (case, host, account). A domain controller records a
+	// 4672 for every service and machine-account logon, so one finding per
+	// event buries the few that matter; the count, window and privileges
+	// state the whole run, and the cited events are its two ends.
+	type key struct{ caseID, host, user string }
+	groups := map[key][]model.Event{}
 	for _, e := range byType(events, model.EventPrivilegedLogon) {
-		title := fmt.Sprintf("Privileged logon: %s", orDash(e.User))
+		k := key{e.CaseID, strings.ToLower(e.Host), strings.ToLower(e.User)}
+		groups[k] = append(groups[k], e)
+	}
+	keys := make([]key, 0, len(groups))
+	for k := range groups {
+		keys = append(keys, k)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		a, b := keys[i], keys[j]
+		if a.caseID != b.caseID {
+			return a.caseID < b.caseID
+		}
+		if a.host != b.host {
+			return a.host < b.host
+		}
+		return a.user < b.user
+	})
+
+	var findings []model.Finding
+	for _, k := range keys {
+		evs := groups[k]
+		sort.SliceStable(evs, func(i, j int) bool {
+			if !evs[i].Timestamp.Equal(evs[j].Timestamp) {
+				return evs[i].Timestamp.Before(evs[j].Timestamp)
+			}
+			return evs[i].ID < evs[j].ID
+		})
+		first := evs[0]
+		logons := map[string]bool{}
+		privs := map[string]bool{}
+		for _, e := range evs {
+			if id := e.Extra["logon_id"]; id != "" {
+				logons[id] = true
+			}
+			for _, p := range strings.Fields(e.Extra["privilege_list"]) {
+				privs[p] = true
+			}
+		}
+		names := make([]string, 0, len(privs))
+		for p := range privs {
+			names = append(names, p)
+		}
+		sort.Strings(names)
+		if len(names) > 12 {
+			names = append(names[:12], fmt.Sprintf("(+%d more)", len(names)-12))
+		}
+		title := fmt.Sprintf("Privileged logon: %s on %s", orDash(first.User), orDash(first.Host))
+		if len(evs) > 1 {
+			title += fmt.Sprintf(" (%d logons)", len(evs))
+		}
 		desc := fmt.Sprintf(
-			"User %q was assigned special/administrative privileges at logon on host %s at %s. Administrator-"+
-				"equivalent logons are routine for legitimate administrative activity -- reported as an "+
-				"observation; see brute-force/credential-abuse correlations for cases where this follows "+
-				"suspicious authentication activity.",
-			orDash(e.User), e.Host, e.Timestamp.Format(time.RFC3339))
-		findings = append(findings, newFinding(e.CaseID, r.ID(), title, model.SeverityLow, model.ConfidenceLow,
-			desc, []string{"T1078"}, []model.Event{e}))
+			"User %q was assigned special/administrative privileges at logon on host %s: %d privileged logon(s) across %d logon session(s), first at %s, last at %s.",
+			orDash(first.User), orDash(first.Host), len(evs), len(logons),
+			first.Timestamp.Format(time.RFC3339), evs[len(evs)-1].Timestamp.Format(time.RFC3339))
+		if len(names) > 0 {
+			desc += " Privileges recorded: " + strings.Join(names, ", ") + "."
+		}
+		if len(evs) > supportingCap {
+			desc += fmt.Sprintf(" Only the first and last %d events are cited here; all %d are in the timeline under event ID 4672 for this account.", supportingCap/2, len(evs))
+		}
+		desc += " Administrator-equivalent logons are routine for legitimate administrative and service activity -- reported as an observation; see brute-force/credential-abuse correlations for cases where this follows suspicious authentication activity."
+		findings = append(findings, newFinding(first.CaseID, r.ID(), title, model.SeverityLow, model.ConfidenceLow,
+			desc, []string{"T1078"}, capEvents(evs)))
 	}
 	return findings
 }
