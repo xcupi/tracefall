@@ -84,16 +84,17 @@ type pendingImport struct {
 //     case. This is the scope that resolves the common real shape: an
 //     EvtxECmd CSV naming the host, alongside Prefetch/registry files
 //     that structurally cannot.
-//  3. this case -- covers a follow-up collection made up entirely of
-//     host-less artifact types, whose host an earlier collection already
-//     established.
+//
+// A case is an investigation boundary, not a machine identity. An anonymous
+// new collection must not inherit a host from earlier acquisitions. Repeated
+// acquisitions still resolve identically when their own files name the host.
 //
 // If no scope names exactly one host, the events stay blank: Tracefall
 // does not invent a hostname (see unambiguousHost on why a majority vote
 // would be inventing one).
 //
-// Every scope is computed from the complete batch plus everything already
-// persisted for the case, before any of the batch is written -- which is
+// Every scope is computed from the complete batch plus observations already
+// persisted for this collection, before any of the batch is written -- which is
 // what makes the outcome independent of the order files are processed in.
 // The previous implementation resolved each file against only what was
 // already in the database at that moment, so a Prefetch file processed
@@ -123,9 +124,33 @@ func (s *Service) enrichBatchHosts(caseID, collectionID string, batch []pendingI
 		return err
 	}
 	var persistedThisCollection []model.Event
+	byID := make(map[string]model.Event, len(persisted))
 	for _, e := range persisted {
+		byID[e.ID] = e
 		if e.CollectionID == collectionID {
 			persistedThisCollection = append(persistedThisCollection, e)
+		}
+	}
+	// A recollected event is deduplicated against its first sighting, so it
+	// is not persisted under this collection. Its host is part of its
+	// identity hash, so an observation in THIS collection pointing at it is
+	// a strong, explicit statement of this collection's host.
+	sfs, err := s.store.ListSourceFilesByCollection(collectionID)
+	if err != nil {
+		return err
+	}
+	for _, sf := range sfs {
+		obs, err := s.store.ListEventObservationsBySourceFile(sf.ID)
+		if err != nil {
+			return err
+		}
+		for _, o := range obs {
+			if o.CollectionID != collectionID {
+				continue
+			}
+			if e, ok := byID[o.EventID]; ok && e.CollectionID != collectionID {
+				persistedThisCollection = append(persistedThisCollection, e)
+			}
 		}
 	}
 	batchEvents := make([]model.Event, 0, len(batch))
@@ -134,16 +159,12 @@ func (s *Service) enrichBatchHosts(caseID, collectionID string, batch []pendingI
 	}
 
 	collectionHost := unambiguousHost(batchEvents, persistedThisCollection)
-	caseHost := unambiguousHost(batchEvents, persisted)
 
 	for i := range batch {
 		events := batch[i].events
 		host := unambiguousHost(events)
 		if host == "" {
 			host = collectionHost
-		}
-		if host == "" {
-			host = caseHost
 		}
 		if host == "" {
 			continue // genuinely unknown -- never fabricated

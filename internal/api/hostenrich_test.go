@@ -553,14 +553,11 @@ func TestEnrichBatchHosts_NeverInventsAHost(t *testing.T) {
 	}
 }
 
-// TestEnrichBatchHosts_CaseScopeFallback covers the third rung: a
-// follow-up collection made up entirely of host-less artifact types
-// inherits the host an earlier collection already established for the
-// case. This is the one scope that reaches across collections, and it
-// only applies when the case names exactly one host.
-func TestEnrichBatchHosts_CaseScopeFallback(t *testing.T) {
+// A new acquisition without host facts must not inherit a prior acquisition's
+// host merely because it is the only host currently in the case.
+func TestEnrichBatchHosts_NewAnonymousCollectionStaysUnknown(t *testing.T) {
 	mux := newTestRouter(t)
-	c := mustCreateCase(t, mux, "case-scope fallback")
+	c := mustCreateCase(t, mux, "anonymous acquisition after known host")
 
 	// Collection 1: the Event Log alone, establishing the case's host.
 	disc1 := discoverZip(t, mux, c.ID, map[string]string{pathEvtx: hostEvtxCSV})
@@ -572,6 +569,6 @@ func TestEnrichBatchHosts_CaseScopeFallback(t *testing.T) {
 	importInPathOrder(t, mux, c.ID, disc2, pathPecmd, pathRecmd)
 
 	timeline := timelineOf(t, mux, c.ID)
-	assertAllHosts(t, timeline, model.ArtifactPrefetch, "WKSTN-042")
-	assertAllHosts(t, timeline, model.ArtifactRegistryRunKey, "WKSTN-042")
+	assertAllHosts(t, timeline, model.ArtifactPrefetch, "")
+	assertAllHosts(t, timeline, model.ArtifactRegistryRunKey, "")
 }

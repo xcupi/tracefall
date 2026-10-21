@@ -218,6 +218,23 @@ func (p Parser) ParseWithContext(absPath string, ctx parsers.ParseContext) (pars
 	if walkErr != nil {
 		return parsers.ParseResult{}, fmt.Errorf("registry: walking hive: %w", walkErr)
 	}
+	if hiveType == HiveSystem {
+		cs, reason := selectedControlSet(h)
+		for i := range out.Events {
+			if out.Events[i].Extra == nil {
+				out.Events[i].Extra = map[string]string{}
+			}
+			extra := out.Events[i].Extra
+			if cs == "" {
+				extra["control_set_status"] = "unknown"
+				extra["control_set_reason"] = reason
+			} else {
+				extra["control_set_status"] = "selected"
+				extra["control_set"] = cs
+				extra["control_set_basis"] = `SYSTEM\Select\Current`
+			}
+		}
+	}
 	return out, nil
 }
 
@@ -323,7 +340,8 @@ func persistenceEvent(k regf.Key, v regf.Value, kind regpersist.Kind, hiveType H
 // action: the hive says when ComputerName was last written and what it
 // says, nothing more.
 func hostnameEvent(h *regf.Hive, host string, hiveType HiveType) (model.Event, model.RawEvidence) {
-	const relKey = `ControlSet001\Control\ComputerName\ComputerName`
+	cs, _ := selectedControlSet(h)
+	relKey := cs + `\Control\ComputerName\ComputerName`
 	keyPath := rootedPath(hiveType, relKey)
 
 	ts := h.LastModified()
@@ -341,6 +359,8 @@ func hostnameEvent(h *regf.Hive, host string, hiveType HiveType) (model.Event, m
 		Confidence:      1.0,
 		SourceReference: "key:" + keyPath,
 		Extra: map[string]string{
+			"control_set":         cs,
+			"control_set_basis":   `SYSTEM\Select\Current`,
 			"registry_hive":       string(hiveType),
 			"registry_hive_type":  string(hiveType),
 			"registry_key":        keyPath,
@@ -365,41 +385,27 @@ func hostnameEvent(h *regf.Hive, host string, hiveType HiveType) (model.Event, m
 	return ev, model.RawEvidence{SourceReference: ev.SourceReference, Raw: string(rawJSON)}
 }
 
-// systemHostname reads the machine name from a SYSTEM hive. Windows
-// keeps several ControlSets and a CurrentControlSet symlink; this reads
-// whichever control sets exist and accepts the name only when every one
-// of them agrees, so a hive mid-rename never yields a guess. Returns ""
-// when the name cannot be established -- never a fabricated host.
+// systemHostname reads only the hostname in Select\Current's control set.
+// An unavailable selector is unknown, not permission to choose a stale set.
 func systemHostname(h *regf.Hive) string {
-	subkeys, err := h.Subkeys("")
+	cs, _ := selectedControlSet(h)
+	if cs == "" {
+		return ""
+	}
+	k, err := h.OpenKey(cs + `\Control\ComputerName\ComputerName`)
 	if err != nil {
 		return ""
 	}
 	var found string
-	for _, sk := range subkeys {
-		if !strings.HasPrefix(strings.ToLower(sk), "controlset") {
+	for _, v := range k.Values {
+		if !strings.EqualFold(v.Name, "ComputerName") {
 			continue
 		}
-		k, err := h.OpenKey(sk + `\Control\ComputerName\ComputerName`)
-		if err != nil {
-			continue
+		name := strings.TrimSpace(v.String())
+		if found != "" && !strings.EqualFold(found, name) {
+			return ""
 		}
-		for _, v := range k.Values {
-			if !strings.EqualFold(v.Name, "ComputerName") {
-				continue
-			}
-			name := strings.TrimSpace(v.String())
-			if name == "" {
-				continue
-			}
-			if found != "" && !strings.EqualFold(found, name) {
-				// Two control sets disagree. Picking one would be a
-				// guess, and a wrong host silently corrupts correlation
-				// and deduplication for the whole collection.
-				return ""
-			}
-			found = name
-		}
+		found = name
 	}
 	return normalize.Host(found)
 }

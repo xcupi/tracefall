@@ -28,7 +28,7 @@ func identityHive(productType string) []byte {
 	opts := regfgen.NewKey("ProductOptions").WithValues(regfgen.StringValue("ProductType", productType))
 	control := regfgen.NewKey("Control", computerNameParent, opts)
 	cs1 := regfgen.NewKey("ControlSet001", control, services)
-	root := regfgen.NewKey("CMI-CreateHive{SYSTEM}", cs1).WithLastWrite(lastWrite)
+	root := regfgen.NewKey("CMI-CreateHive{SYSTEM}", cs1, regfgen.NewKey("Select").WithValues(regfgen.DWordValue("Current", 1))).WithLastWrite(lastWrite)
 	return regfgen.Build(`\??\C:\Windows\System32\config\SYSTEM`, root)
 }
 

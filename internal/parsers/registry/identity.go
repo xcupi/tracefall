@@ -14,8 +14,8 @@ import (
 
 // systemIdentity reads what a SYSTEM hive says about WHO this machine is on
 // the network: its domain, the addresses it was configured with or leased, and
-// what kind of machine Windows was installed as. It reads ControlSet001 only
-// and returns nothing it did not find.
+// what kind of machine Windows was installed as. It reads only the selected
+// active control set and returns nothing it did not find.
 //
 // Every address is labelled with where it came from. A DHCP lease is the last
 // address the machine was given, which is not proof it held that address on
@@ -23,7 +23,11 @@ import (
 // into Extra["ip_origin"] so a reader can weigh them.
 func systemIdentity(h *regf.Hive) map[string]string {
 	out := map[string]string{}
-	const tcpip = `ControlSet001\Services\Tcpip\Parameters`
+	cs, _ := selectedControlSet(h)
+	if cs == "" {
+		return out
+	}
+	tcpip := cs + `\Services\Tcpip\Parameters`
 	if k, err := h.OpenKey(tcpip); err == nil {
 		for _, v := range k.Values {
 			switch strings.ToLower(v.Name) {
@@ -83,7 +87,7 @@ func systemIdentity(h *regf.Hive) map[string]string {
 		sort.Strings(s)
 		out["dhcp_servers"] = strings.Join(s, ",")
 	}
-	if k, err := h.OpenKey(`ControlSet001\Control\ProductOptions`); err == nil {
+	if k, err := h.OpenKey(cs + `\Control\ProductOptions`); err == nil {
 		for _, v := range k.Values {
 			if strings.EqualFold(v.Name, "ProductType") {
 				pt := strings.TrimSpace(v.String())

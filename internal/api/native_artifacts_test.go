@@ -88,7 +88,8 @@ func systemHiveWithHostname(name string) []byte {
 	cnParent := regfgen.NewKey("ComputerName", cn)
 	control := regfgen.NewKey("Control", cnParent)
 	cs := regfgen.NewKey("ControlSet001", control)
-	root := regfgen.NewKey("CMI-CreateHive{SYSTEM}", cs).WithLastWrite(nativeBase)
+	sel := regfgen.NewKey("Select").WithValues(regfgen.DWordValue("Current", 1))
+	root := regfgen.NewKey("CMI-CreateHive{SYSTEM}", cs, sel).WithLastWrite(nativeBase)
 	return regfgen.Build(`\??\C:\Windows\System32\config\SYSTEM`, root)
 }
 
