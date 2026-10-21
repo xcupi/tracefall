@@ -34,7 +34,10 @@ func (Parser) ArtifactType() string { return model.ArtifactScheduledTask }
 // C:\Windows\System32\Tasks.
 func (Parser) Detect(relPath string) bool {
 	lower := strings.ToLower(strings.ReplaceAll(filepath.ToSlash(relPath), `\`, "/"))
-	if ext := filepath.Ext(lower); ext != "" && ext != ".xml" {
+	// A task's name is its file name, so dots and spaces are part of the
+	// name, not an extension (".30319" in a version number, ".exe task").
+	// Only a short alphabetic suffix is a real file extension.
+	if ext := filepath.Ext(lower); ext != "" && ext != ".xml" && isFileExtension(ext) {
 		return false
 	}
 	return strings.HasPrefix(lower, "tasks/") || strings.Contains(lower, "/tasks/")
@@ -98,6 +101,12 @@ func (p Parser) Parse(absPath string) (parsers.ParseResult, error) {
 		runLevel = t.Principals.Principal[0].RunLevel
 	}
 	user := t.RegistrationInfo.Author
+	// Built-in tasks store a localized-resource reference ("$(@%SystemRoot%\
+	// system32\x.dll,-101)") instead of a name. It names no account, so it is
+	// kept in the author extra and never used as the user.
+	if strings.HasPrefix(strings.TrimSpace(user), "$(@") {
+		user = ""
+	}
 	if user == "" {
 		user = principalUserId
 	}
@@ -206,4 +215,19 @@ func decodeUTF16(data []byte) []byte {
 		}
 	}
 	return []byte(string(utf16.Decode(units)))
+}
+
+// isFileExtension reports whether ext (with its dot) looks like a real file
+// extension: one to five letters.
+func isFileExtension(ext string) bool {
+	e := strings.TrimPrefix(ext, ".")
+	if len(e) == 0 || len(e) > 5 {
+		return false
+	}
+	for _, c := range e {
+		if c < 'a' || c > 'z' {
+			return false
+		}
+	}
+	return true
 }

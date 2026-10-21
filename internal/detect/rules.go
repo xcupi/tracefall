@@ -206,15 +206,28 @@ func (r newScheduledTask) Evaluate(events []model.Event) []model.Finding {
 	for _, e := range byType(events, model.EventScheduledTaskCreate) {
 		lolbin := procclass.IsScriptHost(e.ProcessName) || procclass.IsPowerShell(e.ProcessName)
 		suspiciousPath := procclass.HasSuspiciousPath(e.ProcessPath) || procclass.HasSuspiciousPath(e.CommandLine)
+		hostile := hasHostileInvocation(e.CommandLine)
 		severity, confidence := model.SeverityLow, model.ConfidenceLow
-		if lolbin || suspiciousPath {
+		switch {
+		case suspiciousPath || hostile:
 			severity, confidence = model.SeverityHigh, model.ConfidenceMedium
+		case lolbin:
+			// An interpreter or rundll32 alone describes most stock Windows
+			// tasks too; without an encoded, hidden or remote invocation it is
+			// a lead to read, not a high-severity one.
+			severity, confidence = model.SeverityMedium, model.ConfidenceLow
 		}
 		title := fmt.Sprintf("Scheduled Task persistence: %s", orDash(e.Extra["task_name"]))
+		when := "registration date is not recorded in the task file"
+		if !e.Timestamp.IsZero() {
+			when = "registered at " + e.Timestamp.Format(time.RFC3339)
+		} else if local := e.Extra["timestamp_local"]; local != "" {
+			when = "registration date " + local + " (local time, zone not recorded)"
+		}
 		desc := fmt.Sprintf(
-			"Scheduled Task %q was registered by %s at %s on host %s, action: %q. A single scheduled task "+
+			"Scheduled Task %q (author/principal %s; %s) on host %s, action: %q. A single scheduled task "+
 				"is a weak indicator on its own -- reported as an observed persistence mechanism.",
-			orDash(e.Extra["task_name"]), orDash(e.User), e.Timestamp.Format(time.RFC3339), e.Host, truncate(e.CommandLine, 200))
+			orDash(e.Extra["task_name"]), orDash(e.User), when, orDash(e.Host), truncate(cmdsem.Redact(e.CommandLine), 200))
 		if lolbin {
 			desc += fmt.Sprintf(" The task action invokes %s, a common execution/persistence living-off-the-land binary.", e.ProcessName)
 		}
@@ -960,6 +973,19 @@ func isDefaultWinlogonValue(registryPath, data string) bool {
 		return v == "userinit.exe" || v == `c:\windows\system32\userinit.exe` || v == `%systemroot%\system32\userinit.exe`
 	case "vmapplet":
 		return v == "systempropertiesperformance.exe /pagefile"
+	}
+	return false
+}
+
+// hasHostileInvocation reports command-line forms that hide or fetch code:
+// an encoded command, a hidden window, no-profile PowerShell, a remote
+// URL, or in-memory download-and-run. None of them is stock task usage.
+func hasHostileInvocation(cmd string) bool {
+	l := strings.ToLower(cmd)
+	for _, m := range []string{" -enc", " -e ", "-encodedcommand", " -nop", "-noprofile", " -w hidden", "-windowstyle hidden", "http://", "https://", "downloadstring", "frombase64string", " iex", "invoke-expression"} {
+		if strings.Contains(l, m) {
+			return true
+		}
 	}
 	return false
 }
