@@ -27,6 +27,10 @@ func reportEventDetails(e model.Event) []report.KV {
 		keys = append(keys, "screen_lines", "screen_text_truncated", "observation")
 	case model.EventMemoryConsole:
 		keys = append(keys, "observation", "meaning")
+	case model.EventSQLMessage, model.EventSQLAgentMessage, model.EventSQLLoginFailed, model.EventSQLLoginSuccess:
+		keys = append(keys, "sql_source", "login", "client", "outcome", "error_number", "severity", "state", "agent_message_id", "sqlstate", "message")
+	case model.EventMSSQLAudit, model.EventMSSQLXE:
+		keys = append(keys, "sql_evidence_form", "sql_instance", "sql_action", "sql_outcome", "sql_outcome_basis", "sql_principal", "sql_client_ip", "sql_client_hostname", "sql_client_application", "sql_database", "sql_object", "sql_session_id", "sql_statement", "sql_fragment_note", "sql_record_sha256")
 	}
 	var out []report.KV
 	for _, k := range keys {
