@@ -73,6 +73,9 @@ var typedInputTypes = []string{
 	// (its hostname, addresses and operating system).
 	model.EventClockObservation,
 	model.EventRegistryKeyLastWrite,
+	sqlXEEvent,
+	sqlAuditEvent,
+	sqlClientDiagnostic,
 }
 
 // RunFrom builds every correlation from src. The typed builders get only the
@@ -94,6 +97,7 @@ func RunFrom(caseID string, src model.EventSource) ([]model.Correlation, error) 
 	out = append(out, BuildActivityChains(caseID, typed)...)
 	out = append(out, BuildCredentialChains(caseID, typed)...)
 	out = append(out, BuildServiceChains(caseID, typed)...)
+	out = append(out, buildSQLWindows(caseID, typed)...)
 	out = append(out, BuildWebResourceCorrelations(caseID, typed)...)
 	reg := hostid.Build(typed)
 	out = append(out, BuildClockSkew(caseID, typed, reg)...)
