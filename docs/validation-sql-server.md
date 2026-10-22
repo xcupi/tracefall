@@ -33,6 +33,37 @@ test) and the default trace `log.trc`.
 | Agent job | `sp_start_job` reported "started successfully"; the Agent log records the request (message 177) and then `Status: Failed` (message 208). A start request is not a success |
 | `xp_cmdshell` | not supported by the Linux engine; the engine log records `blocked access to procedure` for each attempt. The enabled-and-executed path was therefore **not** exercised |
 
+## Native binary files (offline reader configured)
+
+The reader was run inside its mandatory sandbox against files copied unchanged
+from the engine, and each result was compared with the engine's own reading of
+the **same file**:
+
+| File | Tracefall (binary) | Engine reading |
+|---|---|---|
+| Server Audit `.sqlaudit` | 25 events | 25 rows from `sys.fn_get_audit_file` |
+| Extended Events session `.xel` | 123 events | 123 |
+| `system_health` `.xel` (complete file) | 124 events | 124 |
+| in-memory-OLTP engine `.xel` | 0 events | 0 |
+
+For the audit file the comparison was field by field, 25 rows x 11 fields (time,
+succeeded, action, principal, client address, application, database, object,
+session, instance, statement): identical. Statement text differs only in line
+endings (`\r\n` in the binary; the export path normalises to `\n`).
+These checks are pinned by SHA-256 in `internal/parsers/mssqlxe/real_engine_test.go`
+and skip unless their `TRACEFALL_REAL_MSSQL_*` variables are set.
+
+Observations worth knowing:
+
+- A **partial copy** of a live `.xel` (taken while the engine was still writing:
+  127 KB of what became a 479 KB file) read as `complete` with **0 events**. The
+  reader cannot know the file is a prefix. Collect XE files after the session is
+  stopped or rolled over, and treat a zero-event `.xel` as "nothing in what was
+  collected", not "nothing happened".
+- Native audit stays labelled `experimental`: this is one engine version, one
+  platform, one file, 25 rows. It is verified for that, not for every audit
+  action, SQL Server version or Windows.
+
 ## Defects this found (all fixed, each with a regression test)
 
 1. **No SQL detection existed.** Twelve failed logins from one client produced no
@@ -61,11 +92,9 @@ test) and the default trace `log.trc`.
   (the Linux `errorlog` was ASCII with CRLF while `sqlagent.out` was UTF-16LE with a
   BOM), `MSSQL$instance` providers writing to the Application log, Windows
   authentication and `xp_cmdshell` effects are covered by synthetic tests only.
-- **Native binary `.xel` / `.sqlaudit` decoding.** The offline reader needs a
-  separately licensed Microsoft package and was not configured in this validation.
-  The binary files above were checked only through the exports a running engine
-  produces from them, which also means the *absence of a reader* was the thing
-  observed for the binaries. Native `.sqlaudit` decoding remains unverified.
+- **Licensing of the offline reader.** It uses a proprietary Microsoft package
+  that Tracefall does not redistribute; licence clearance remains a deployment
+  decision (see `tools/mssql-xe-reader/README.md`).
 - **Default trace (`.trc`), `.mdf`/`.ldf`, transaction reconstruction.** Not read.
 - **Time basis of `errorlog`.** The text log has no zone, so its events stay
   undated (local reading preserved). The engine writes its own `UTC adjustment`

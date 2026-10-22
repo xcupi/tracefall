@@ -58,9 +58,11 @@ from summaries; the original binary file remains the primary source.
 - Native `.xel`: offline Linux x64 fixture decode and persisted service-path test,
   gated by `TRACEFALL_REAL_MSSQL_XEL`; SHA-256 pinned in tests. Microsoft fixture
   count reference is 149, **not an independent field-by-field oracle**.
-- Native `.sqlaudit`: **experimental / NOT-VERIFIED**. Default refusal; explicit
-  `TRACEFALL_MSSQL_AUDIT_EXPERIMENTAL=1` enables the same configured reader for
-  controlled validation only. No genuine binary audit fixture has been verified.
+- Native `.sqlaudit`: **experimental**. Default refusal; explicit
+  `TRACEFALL_MSSQL_AUDIT_EXPERIMENTAL=1` enables the same configured reader.
+  One genuine engine-written audit file (SQL Server 2022, Linux, 25 rows) was
+  compared field by field with `sys.fn_get_audit_file` and matched; see
+  `docs/validation-sql-server.md`. That is not a version or platform matrix.
   Renaming a XEL fixture is not audit validation and is never used as proof.
 - Licensing, real audit fidelity, platform portability, hard memory isolation:
   **NOT VERIFIED**. No SQL Server/container is started by these tests.
