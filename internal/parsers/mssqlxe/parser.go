@@ -144,6 +144,11 @@ func (p Parser) append(r *parsers.ParseResult, c parsers.ParseContext, f map[str
 			e.Extra["sql_action"] = strings.TrimRight(string(code[:]), " ")
 		}
 	}
+	// A varchar(4) action code is space padded ("AL  "); the padding is not part
+	// of the code.
+	if a := strings.TrimRight(e.Extra["sql_action"], " "); a != e.Extra["sql_action"] {
+		e.Extra["sql_action"] = a
+	}
 	if v := f["attach_activity_id"]; v != "" {
 		if i := strings.LastIndexByte(v, ':'); i > 0 {
 			if _, err := uuid.Parse(v[:i]); err == nil {
@@ -195,7 +200,7 @@ func (p Parser) append(r *parsers.ParseResult, c parsers.ParseContext, f map[str
 			// A user-defined audit event is written by a caller through
 			// sp_audit_write, which supplies the flag itself. It records what
 			// the caller reported, not a permission check SQL Server made.
-			if e.Extra["sql_action"] == "UDAU" || f["user_defined_event_id"] != "" {
+			if e.Extra["sql_action"] == "UDAU" {
 				e.Extra["sql_outcome"] = "user_defined_reported_failure"
 				if allowed {
 					e.Extra["sql_outcome"] = "user_defined_reported_success"
