@@ -43,6 +43,7 @@ var ruleFacets = map[string]facet{
 	"privileged-logon-observed":        facetCredential,
 	"network-after-execution":          facetExecution | facetNetwork,
 	"remote-logon-observed":            facetCredential,
+	"sql-login-failure-burst":          facetCredential,
 }
 
 // facetsFor unions the facets of every rule ID present in ruleIDs.
