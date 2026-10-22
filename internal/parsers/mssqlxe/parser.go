@@ -192,6 +192,16 @@ func (p Parser) append(r *parsers.ParseResult, c parsers.ParseContext, f map[str
 				}
 				e.Extra["sql_outcome_basis"] = "audit succeeded; documented login action"
 			}
+			// A user-defined audit event is written by a caller through
+			// sp_audit_write, which supplies the flag itself. It records what
+			// the caller reported, not a permission check SQL Server made.
+			if e.Extra["sql_action"] == "UDAU" || f["user_defined_event_id"] != "" {
+				e.Extra["sql_outcome"] = "user_defined_reported_failure"
+				if allowed {
+					e.Extra["sql_outcome"] = "user_defined_reported_success"
+				}
+				e.Extra["sql_outcome_basis"] = "caller-supplied flag of a user-defined audit event; not a permission check"
+			}
 		}
 		if f["sequence_number"] != "" {
 			e.Extra["sql_fragment_note"] = "sequence row retained separately; completeness unknown; not reconstructed"
