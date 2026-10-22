@@ -155,3 +155,32 @@ func TestSQLLoginBurst_ServerAuditAndXEAreOrderIndependent(t *testing.T) {
 	}
 	sameFindings(t, sqlBurstRule, ev)
 }
+
+// The engine reports one failed login to Extended Events twice: the full
+// message with the client address, and the generic text sent back to the client,
+// which names no address. Counting both would double every attempt. Only the
+// record that names a client is an attempt this rule can attribute.
+// (Characterization test: the behaviour came with the implementation.)
+func TestSQLLoginBurst_ExtendedEventsClientFacingTwinIsNotCountedAsAnAttempt(t *testing.T) {
+	base := time.Date(2026, 3, 1, 9, 0, 0, 0, time.UTC)
+	var ev []model.Event
+	for i := 0; i < 3; i++ {
+		at := base.Add(time.Duration(i) * time.Second)
+		ev = append(ev,
+			xeError(fmt.Sprintf("full%d", i), at, "18456", failMsg("user01", reasonNoLogin, "203.0.113.5")),
+			xeError(fmt.Sprintf("twin%d", i), at.Add(time.Microsecond), "18456", "Login failed for user 'user01'."))
+	}
+	if got := sqlFindings(sqlBurstRule, ev); len(got) != 0 {
+		t.Fatalf("3 attempts recorded twice made %d findings (counted as 6)", len(got))
+	}
+	for i := 3; i < 5; i++ {
+		at := base.Add(time.Duration(i) * time.Second)
+		ev = append(ev,
+			xeError(fmt.Sprintf("full%d", i), at, "18456", failMsg("user01", reasonNoLogin, "203.0.113.5")),
+			xeError(fmt.Sprintf("twin%d", i), at.Add(time.Microsecond), "18456", "Login failed for user 'user01'."))
+	}
+	got := sqlFindings(sqlBurstRule, ev)
+	if len(got) != 1 || !strings.Contains(got[0].Title, "5 failed") {
+		t.Fatalf("5 attempts: want one finding naming 5, got %+v", got)
+	}
+}

@@ -338,7 +338,17 @@ log) are scoped by case, host and instance.
 | `sql-disabled-component-attempt` | low / medium | A use of a disabled component was attempted and blocked. Blocked means it did not run. |
 | `sql-audit-stopped-while-running` | low / low | An audit stopped and the log continues afterwards. A normal shutdown also stops audits, so shutdown messages do not count. |
 
-Not covered: events typed `mssql_audit_event` / `mssql_xe_event` are not read by
-these rules yet, so a successful login that exists only in an Audit export does
-not raise the burst rule. Validation against engine-produced evidence is in
+`sql-login-failure-burst` reads three source forms: the text log and Application
+log (typed login events), Server Audit rows (`LGIF` failure, `LGIS` success) and
+Extended Events `error_reported` 18456. Each source is counted in its own scope
+and never added to another, because they can record the same attempt: a second
+finding for the same client can describe the same attempts, and the finding
+says so. On engine-written evidence the engine reported each failed login to
+Extended Events twice (the full message with the client, and the generic text
+sent to the client, which names no address), so only records that name a client
+are counted as attempts. Audit and Extended Events agreed with each other: 3
+attempts each.
+
+The other three rules still read only the text log and Application log. Validation
+against engine-produced evidence is in
 [validation-sql-server.md](validation-sql-server.md).
