@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -16,6 +17,12 @@ import (
 	"tracefall/internal/model"
 	"tracefall/internal/parsers"
 )
+
+// ErrReaderUnavailable marks a binary SQL file that was not read because the
+// optional offline reader (or its sandbox, or the explicit audit opt-in) is not
+// available. The file is intact; this is a configuration state, never a finding
+// about the evidence.
+var ErrReaderUnavailable = errors.New("mssqlxe: optional binary reader unavailable")
 
 // Binary files bypass the generic Go parse-worker: that worker's inherited
 // RLIMIT_AS is unsuitable for CoreCLR. This path always starts its own mandatory
@@ -47,15 +54,15 @@ func cleanPath(path string, dir bool) (string, error) {
 func (p Parser) binary(path string, c parsers.ParseContext) (parsers.ParseResult, error) {
 	var zero parsers.ParseResult
 	if p.Audit && os.Getenv("TRACEFALL_MSSQL_AUDIT_EXPERIMENTAL") != "1" {
-		return zero, fmt.Errorf("mssqlxe: native binary SQL Audit NOT-VERIFIED; explicit TRACEFALL_MSSQL_AUDIT_EXPERIMENTAL=1 required")
+		return zero, fmt.Errorf("%w: native binary SQL Audit NOT-VERIFIED; explicit TRACEFALL_MSSQL_AUDIT_EXPERIMENTAL=1 required", ErrReaderUnavailable)
 	}
 	reader, err := cleanPath(os.Getenv("TRACEFALL_MSSQL_READER"), false)
 	if err != nil {
-		return zero, fmt.Errorf("mssqlxe: reader unavailable: configure TRACEFALL_MSSQL_READER")
+		return zero, fmt.Errorf("%w: configure TRACEFALL_MSSQL_READER", ErrReaderUnavailable)
 	}
 	runtime, err := cleanPath(os.Getenv("TRACEFALL_MSSQL_DOTNET_ROOT"), true)
 	if err != nil {
-		return zero, fmt.Errorf("mssqlxe: reader unavailable: configure TRACEFALL_MSSQL_DOTNET_ROOT")
+		return zero, fmt.Errorf("%w: configure TRACEFALL_MSSQL_DOTNET_ROOT", ErrReaderUnavailable)
 	}
 	path, err = cleanPath(path, false)
 	if err != nil {
@@ -80,7 +87,7 @@ func (p Parser) binary(path string, c parsers.ParseContext) (parsers.ParseResult
 	sourceHash := fmt.Sprintf("%x", h.Sum(nil))
 	sandbox, err := exec.LookPath("bwrap")
 	if err != nil {
-		return zero, fmt.Errorf("mssqlxe: reader unavailable: mandatory bubblewrap sandbox")
+		return zero, fmt.Errorf("%w: the mandatory bubblewrap sandbox is not available", ErrReaderUnavailable)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
 	defer cancel()
@@ -99,7 +106,7 @@ func (p Parser) binary(path string, c parsers.ParseContext) (parsers.ParseResult
 		return zero, err
 	}
 	if err = cmd.Start(); err != nil {
-		return zero, fmt.Errorf("reader sandbox unavailable: %w", err)
+		return zero, fmt.Errorf("%w: reader sandbox could not start: %v", ErrReaderUnavailable, err)
 	}
 	r, decodeErr := p.decode(stdout, st.Size(), sourceHash, c)
 	if decodeErr != nil {

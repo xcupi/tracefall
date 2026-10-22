@@ -53,6 +53,7 @@ import (
 	"tracefall/internal/ntfs"
 	"tracefall/internal/parsers"
 	"tracefall/internal/parsers/browserhistory"
+	"tracefall/internal/parsers/mssqlxe"
 	"tracefall/internal/parsers/pshistory"
 	"tracefall/internal/prefetch"
 	"tracefall/internal/regf"
@@ -1095,6 +1096,12 @@ const (
 	// capability gap: a triage collection routinely contains zero-length
 	// entries, and calling one corrupt overstates what is known.
 	ParseFailureEmpty = "empty"
+
+	// ParseFailureOptionalReader is a supported artifact whose optional
+	// external reader is not configured here. The file is intact; nothing in it
+	// was analyzed. Distinct from internal_error, which would read as a Tracefall
+	// fault, and from corrupt_or_truncated, which would read as damaged evidence.
+	ParseFailureOptionalReader = "optional_reader_unavailable"
 )
 
 // Parse stages, matching where in the import a failure actually happened.
@@ -3139,6 +3146,13 @@ func classifyParseError(err error) (category, message string) {
 	case errors.As(err, &classified):
 		// Classified by the parser worker, where the sentinel errors exist.
 		return classified.Category, classified.Message
+	case errors.Is(err, mssqlxe.ErrReaderUnavailable):
+		// An optional external reader is not set up here. The file is intact and
+		// was not analyzed; saying so (and what to set) is the whole message.
+		return ParseFailureOptionalReader,
+			"This SQL Server binary file (Extended Events or Audit) is intact but was not analyzed: the optional offline reader is not available on this server. " +
+				"Set TRACEFALL_MSSQL_READER and TRACEFALL_MSSQL_DOTNET_ROOT (and TRACEFALL_MSSQL_AUDIT_EXPERIMENTAL=1 for .sqlaudit) as described in docs/sql-server-forensics.md, then import the file again. " +
+				"Until then, treat SQL Audit and Extended Events as not examined, not as empty."
 	case errors.As(err, &failed):
 		// The parser process was stopped or crashed. That is a limit of the
 		// parser meeting this file, not a finding about the evidence.

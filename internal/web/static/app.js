@@ -6738,6 +6738,7 @@ const PARSE_CATEGORY_LABELS = {
   empty: "Empty file",
   limit_exceeded: "Safety limit reached",
   unreadable: "Could not be read",
+  optional_reader_unavailable: "Optional reader not available",
   internal_error: "Internal error",
 };
 
@@ -6751,6 +6752,7 @@ const PARSE_CATEGORY_NOTE = {
   empty: "The file has no content. Nothing to parse, and nothing is wrong with it.",
   limit_exceeded: "The file exceeded a safety ceiling and was not parsed.",
   unreadable: "The file could not be read from storage.",
+  optional_reader_unavailable: "The file is intact but was NOT analyzed: an optional reader is not set up on this server. Treat it as not examined, not as empty.",
   internal_error: "Tracefall failed unexpectedly on this file.",
 };
 
