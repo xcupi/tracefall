@@ -14,7 +14,7 @@ func TestParseCoverage_ZeroMappedImportPersistsAndWarnsInReport(t *testing.T) {
 	c := mustCreateCase(t, routerFor(svc), "Unmapped source")
 	dir := t.TempDir()
 	f := filepath.Join(dir, "Application.evtx")
-	if err := os.WriteFile(f, evtxgen.Build([]evtxgen.Event{{RecordID: 1, Timestamp: time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC), Provider: "MSSQLSERVER", Channel: "Application", Computer: "SERVER01", EventID: 18456}}), 0600); err != nil {
+	if err := os.WriteFile(f, evtxgen.Build([]evtxgen.Event{{RecordID: 1, Timestamp: time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC), Provider: "OtherApplication", Channel: "Application", Computer: "SERVER01", EventID: 18456}}), 0600); err != nil {
 		t.Fatal(err)
 	}
 	d, err := svc.DiscoverEvidenceFromPath(c.ID, dir)
