@@ -156,7 +156,7 @@ func sqlWhen(p sqlPlaced) string {
 
 // sqlText is the message text of an event, from whichever form carries it.
 func sqlText(e model.Event) string {
-	for _, k := range []string{"message", "sql_data.Message", "rendered_description"} {
+	for _, k := range []string{"message", "sql_data.Message", "rendered_description", "sql_field_message"} {
 		if s := e.Extra[k]; s != "" {
 			return s
 		}
@@ -179,6 +179,57 @@ func sqlPlaceAll(events []model.Event, types ...string) map[string][]sqlPlaced {
 	for _, l := range out {
 		l := l
 		sort.Slice(l, func(i, j int) bool { return sqlLess(l[i], l[j]) })
+	}
+	return out
+}
+
+// sqlIsMessage reports whether an event carries an engine message: a text-log or
+// Application-log message, or an Extended Events error_reported record, which
+// carries the same message text in sql_field_message. Other XE events (a batch,
+// say) can contain the same words without being a recorded engine message.
+func sqlIsMessage(e model.Event) bool {
+	switch e.EventType {
+	case model.EventSQLMessage:
+		return true
+	case model.EventMSSQLXE:
+		return e.Extra["sql_field_event_name"] == "error_reported"
+	}
+	return false
+}
+
+// sqlPlaceMessages places every engine message by scope. The engine reports one
+// event to Extended Events more than once at the same instant (a copy for the
+// log, a copy for the client), so dated records with the same text at the same
+// instant are one occurrence; the first by the common order is kept. Undated
+// records are never collapsed: two lines are two lines.
+func sqlPlaceMessages(events []model.Event, extra ...func(model.Event) bool) map[string][]sqlPlaced {
+	out := map[string][]sqlPlaced{}
+	for _, e := range events {
+		ok := sqlIsMessage(e)
+		for _, x := range extra {
+			ok = ok || x(e)
+		}
+		if ok {
+			k := sqlScope(e)
+			out[k] = append(out[k], sqlPlace(e))
+		}
+	}
+	for k, l := range out {
+		l := l
+		sort.Slice(l, func(i, j int) bool { return sqlLess(l[i], l[j]) })
+		seen := map[string]bool{}
+		kept := l[:0:0]
+		for _, p := range l {
+			if p.dated() {
+				key := p.ev.Timestamp.UTC().Format(time.RFC3339Nano) + "|" + sqlText(p.ev)
+				if seen[key] {
+					continue
+				}
+				seen[key] = true
+			}
+			kept = append(kept, p)
+		}
+		out[k] = kept
 	}
 	return out
 }
@@ -462,7 +513,7 @@ type sqlRiskyConfigEnabled struct{}
 func (sqlRiskyConfigEnabled) ID() string { return "sql-risky-config-enabled" }
 
 func (sqlRiskyConfigEnabled) Inputs() model.EventFilter {
-	return model.EventFilter{Types: []string{model.EventSQLMessage}}
+	return model.EventFilter{Types: []string{model.EventSQLMessage, model.EventMSSQLXE}}
 }
 
 var sqlConfigRe = regexp.MustCompile(`(?i)Configuration option '([^']+)' changed from (\d+) to (\d+)`)
@@ -483,7 +534,7 @@ var sqlRiskyOptions = map[string]string{
 }
 
 func (r sqlRiskyConfigEnabled) Evaluate(events []model.Event) []model.Finding {
-	groups := sqlPlaceAll(events, model.EventSQLMessage)
+	groups := sqlPlaceMessages(events)
 	var out []model.Finding
 	for _, scope := range sqlSortedKeys(groups) {
 		for _, p := range groups[scope] {
@@ -510,11 +561,11 @@ func (r sqlRiskyConfigEnabled) Evaluate(events []model.Event) []model.Finding {
 			}
 			title := fmt.Sprintf("SQL Server option %s changed from %d to %d", m[1], from, to)
 			desc := fmt.Sprintf(
-				"On host %s, SQL Server recorded that %s (at %s); the message says a RECONFIGURE statement installs it. "+
+				"On host %s, SQL Server recorded (%s) that %s (at %s); the message says a RECONFIGURE statement installs it. "+
 					"The log records that the change was applied. It does not show who made the change or from where, or whether the "+
 					"feature was used afterwards; absence of later records is not evidence it went unused. Administrators change these "+
 					"options for legitimate work too, so this is a lead to check against change records.",
-				orDash(p.ev.Host), what, sqlWhen(p))
+				orDash(p.ev.Host), sqlSourceName(p.ev), what, sqlWhen(p))
 			out = append(out, newFinding(p.ev.CaseID, r.ID(), title, sev, model.ConfidenceHigh, desc, ttp, []model.Event{p.ev}))
 		}
 	}
@@ -528,13 +579,13 @@ type sqlDisabledComponentAttempt struct{}
 func (sqlDisabledComponentAttempt) ID() string { return "sql-disabled-component-attempt" }
 
 func (sqlDisabledComponentAttempt) Inputs() model.EventFilter {
-	return model.EventFilter{Types: []string{model.EventSQLMessage}}
+	return model.EventFilter{Types: []string{model.EventSQLMessage, model.EventMSSQLXE}}
 }
 
 var sqlBlockedRe = regexp.MustCompile(`(?i)SQL Server blocked access to procedure '([^']+)' of component '([^']+)'`)
 
 func (r sqlDisabledComponentAttempt) Evaluate(events []model.Event) []model.Finding {
-	groups := sqlPlaceAll(events, model.EventSQLMessage)
+	groups := sqlPlaceMessages(events)
 	var out []model.Finding
 	for _, scope := range sqlSortedKeys(groups) {
 		byProc := map[string][]sqlPlaced{}
@@ -556,12 +607,12 @@ func (r sqlDisabledComponentAttempt) Evaluate(events []model.Event) []model.Find
 			first, last := list[0], list[len(list)-1]
 			title := fmt.Sprintf("SQL Server blocked %d %s to use %s", len(list), sqlPlural(len(list), "attempt", "attempts"), cmdsem.Redact(procName[k]))
 			desc := fmt.Sprintf(
-				"On host %s, SQL Server recorded %d %s that access to procedure '%s' of component '%s' was blocked because the component "+
+				"On host %s, SQL Server recorded (%s) %d %s that access to procedure '%s' of component '%s' was blocked because the component "+
 					"is turned off (first at %s, last at %s). An attempt to use a disabled component was recorded and blocked. "+
 					"Blocked means it did not run on this instance at that time. The message says nothing about who or what made "+
 					"the call, or which statement; routine tools can trigger it too. It does not show whether the component was "+
 					"enabled and used before or after.",
-				orDash(first.ev.Host), len(list), sqlPlural(len(list), "time", "times"),
+				orDash(first.ev.Host), sqlSourceName(first.ev), len(list), sqlPlural(len(list), "time", "times"),
 				cmdsem.Redact(procName[k]), cmdsem.Redact(component[k]), sqlWhen(first), sqlWhen(last))
 			out = append(out, newFinding(first.ev.CaseID, r.ID(), title, model.SeverityLow, model.ConfidenceMedium, desc,
 				[]string{"T1059"}, capEvents(sqlEvents(list))))
@@ -577,10 +628,14 @@ type sqlAuditStoppedWhileRunning struct{}
 func (sqlAuditStoppedWhileRunning) ID() string { return "sql-audit-stopped-while-running" }
 
 func (sqlAuditStoppedWhileRunning) Inputs() model.EventFilter {
-	return model.EventFilter{Types: []string{model.EventSQLMessage, model.EventSQLLoginFailed, model.EventSQLLoginSuccess}}
+	return model.EventFilter{Types: []string{model.EventSQLMessage, model.EventSQLLoginFailed, model.EventSQLLoginSuccess, model.EventMSSQLXE, model.EventMSSQLAudit}}
 }
 
 var (
+	// A statement that turns a server or database audit (or its specification)
+	// off, or removes the audit. It is matched on the statement a Server Audit
+	// row recorded, as a whole word sequence, never on a substring of other text.
+	sqlAuditOffRe  = regexp.MustCompile(`(?is)^\s*(?:alter\s+(?:server|database)\s+audit(?:\s+specification)?\s+\S+\s+with\s*\(\s*state\s*=\s*off\s*\)|drop\s+(?:server|database)\s+audit(?:\s+specification)?\s+\S+)\s*;?\s*$`)
 	sqlAuditStopRe = regexp.MustCompile(`(?i)Audit: Server Audit: (\d+),\s*State changed from: STARTED to: (SHUTTING_DOWN|STOPPED)`)
 	// Messages that belong to an instance shutting down; they continue after
 	// the audits stop on a normal stop.
@@ -593,12 +648,15 @@ func sqlIsAuditText(s string) bool {
 }
 
 func (r sqlAuditStoppedWhileRunning) Evaluate(events []model.Event) []model.Finding {
-	groups := sqlPlaceAll(events, model.EventSQLMessage, model.EventSQLLoginFailed, model.EventSQLLoginSuccess)
+	isLogin := func(e model.Event) bool {
+		return e.EventType == model.EventSQLLoginFailed || e.EventType == model.EventSQLLoginSuccess
+	}
+	groups := sqlPlaceMessages(events, isLogin)
 	var out []model.Finding
 	for _, scope := range sqlSortedKeys(groups) {
 		list := groups[scope]
 		for _, stop := range list {
-			if stop.ev.EventType != model.EventSQLMessage {
+			if !sqlIsMessage(stop.ev) {
 				continue
 			}
 			m := sqlAuditStopRe.FindStringSubmatch(sqlText(stop.ev))
@@ -623,16 +681,65 @@ func (r sqlAuditStoppedWhileRunning) Evaluate(events []model.Event) []model.Find
 			}
 			title := fmt.Sprintf("SQL Server audit %s stopped while the log continues", m[1])
 			desc := fmt.Sprintf(
-				"On host %s, a Server Audit (id %s) state change from STARTED to %s was recorded at %s, and %d later engine %s "+
+				"On host %s, a Server Audit (id %s) state change from STARTED to %s was recorded (%s) at %s, and %d later engine %s "+
 					"that %s not shutdown messages follow in the same log (first at %s, last at %s). A normal instance shutdown also "+
 					"stops audits, which is why this only fires when the log continues afterwards. The record does not show who stopped "+
 					"the audit or why, nor whether auditing was restarted by another route; maintenance can stop an audit too. "+
 					"Order is taken from this one log's own readings and line order. This is a low-confidence lead.",
-				orDash(stop.ev.Host), m[1], strings.ToUpper(m[2]), sqlWhen(stop), len(later), sqlPlural(len(later), "record", "records"),
+				orDash(stop.ev.Host), m[1], strings.ToUpper(m[2]), sqlSourceName(stop.ev), sqlWhen(stop), len(later), sqlPlural(len(later), "record", "records"),
 				sqlPlural(len(later), "is", "are"), sqlWhen(firstLater), sqlWhen(lastLater))
 			out = append(out, newFinding(stop.ev.CaseID, r.ID(), title, model.SeverityLow, model.ConfidenceLow, desc,
 				[]string{"T1562"}, supporting))
 		}
+	}
+	return append(out, r.commands(events)...)
+}
+
+// commands reports Server Audit rows that record a statement turning an audit
+// off or dropping it. Unlike a stop line, a statement is a deliberate act with a
+// named principal, so it needs no activity after it to be told apart from a
+// shutdown.
+func (r sqlAuditStoppedWhileRunning) commands(events []model.Event) []model.Finding {
+	var rows []sqlPlaced
+	for _, e := range events {
+		if e.EventType == model.EventMSSQLAudit && sqlAuditOffRe.MatchString(e.Extra["sql_statement"]) {
+			rows = append(rows, sqlPlace(e))
+		}
+	}
+	sort.Slice(rows, func(i, j int) bool {
+		if a, b := sqlScope(rows[i].ev), sqlScope(rows[j].ev); a != b {
+			return a < b
+		}
+		return sqlLess(rows[i], rows[j])
+	})
+	var out []model.Finding
+	for _, p := range rows {
+		x := p.ev.Extra
+		who := "an unrecorded principal"
+		if v := strings.TrimSpace(x["sql_principal"]); v != "" {
+			who = "principal '" + cmdsem.Redact(v) + "'"
+		}
+		from := ""
+		if v := strings.TrimSpace(x["sql_client_ip"]); v != "" {
+			from = " from client " + cmdsem.Redact(v)
+		}
+		if v := strings.TrimSpace(x["sql_client_application"]); v != "" {
+			from += " using application '" + cmdsem.Redact(v) + "'"
+		}
+		verb := "turn an audit off"
+		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(x["sql_statement"])), "drop") {
+			verb = "remove an audit"
+		}
+		title := "SQL Server audit turned off or removed by a recorded statement"
+		desc := fmt.Sprintf(
+			"On host %s, a Server Audit row (%s) at %s records a statement to %s, issued by %s%s. "+
+				"Auditing that was recording until then stops recording what follows. The statement is a deliberate act, so unlike a "+
+				"shutdown message it does not need later activity to stand out. The record does not show why: audits are also "+
+				"turned off for maintenance, and another audit may still be running. It does not show whether auditing was started "+
+				"again, and the statement text stays in the raw evidence. Treat it as a lead to check against change records.",
+			orDash(p.ev.Host), sqlSourceName(p.ev), sqlWhen(p), verb, who, from)
+		out = append(out, newFinding(p.ev.CaseID, r.ID(), title, model.SeverityMedium, model.ConfidenceMedium, desc,
+			[]string{"T1562"}, []model.Event{p.ev}))
 	}
 	return out
 }

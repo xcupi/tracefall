@@ -681,6 +681,15 @@ func TestSQLRules_InputsAreASupersetOfWhatTheyRead(t *testing.T) {
 	for i := 0; i < 5; i++ {
 		ev = append(ev, xeError(fmt.Sprintf("sx%d", i), auditBase.Add(time.Duration(i)*time.Second), "18456", failMsg("user03", reasonBadPass, "203.0.113.8")))
 	}
+	// The other three rules, fed only by Extended Events / Server Audit records.
+	xb := time.Date(2026, 4, 1, 9, 0, 0, 0, time.UTC)
+	ev = append(ev,
+		xeMsg("xc", xb, "15457", "0", configMsg("Ole Automation Procedures", 0, 1)),
+		xeMsg("xb", xb.Add(time.Second), "15281", "10", blockedMsg("sys.xp_cmdshell", "xp_cmdshell")),
+		xeMsg("xs", xb.Add(2*time.Second), "-1", "0", auditStopLine),
+		xeMsg("xl", xb.Add(3*time.Second), "5701", "10", "Changed database context to 'db01'."),
+		auditAL("xa", xb.Add(4*time.Second), "admin01", "audit01", "ALTER SERVER AUDIT audit01 WITH (STATE=OFF)"),
+	)
 	src := model.SliceSource(ev)
 	for _, id := range []string{sqlBurstRule, sqlConfigRule, sqlBlockRule, sqlAuditRule} {
 		for _, r := range All() {
