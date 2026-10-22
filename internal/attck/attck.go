@@ -46,6 +46,11 @@ var registry = map[string]Technique{
 		Tactic: "Credential Access",
 		URL:    "https://attack.mitre.org/techniques/T1110/",
 	},
+	"T1105": {
+		ID: "T1105", Name: "Ingress Tool Transfer",
+		Tactic: "Command and Control",
+		URL:    "https://attack.mitre.org/techniques/T1105/",
+	},
 	"T1562": {
 		ID: "T1562", Name: "Impair Defenses",
 		Tactic: "Defense Evasion",

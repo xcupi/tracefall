@@ -329,6 +329,15 @@ const (
 	// request IIS answered; it records the status returned, not what the request
 	// did on the server.
 	ArtifactIISLog = "iis_w3c_log"
+	// ArtifactCryptnetURLCache is one entry of the CryptoAPI URL cache
+	// (CryptnetUrlCache\MetaData). Windows writes one whenever it retrieves a
+	// URL for certificate validation (revocation lists, OCSP, trust lists) and
+	// certutil -urlcache -f writes one for a file it downloads, so an entry
+	// shows that a URL was retrieved and when, not which program asked.
+	ArtifactCryptnetURLCache = "cryptnet_url_cache"
+	// ArtifactDefenderCmdLog is MpCmdRun.log, the Defender command-line tool's
+	// own log. It records each run with its command line.
+	ArtifactDefenderCmdLog = "defender_cmd_log"
 	// ArtifactNetworkCapture is a packet capture (pcap or pcapng). Its
 	// events are stamped by the CAPTURING machine's clock, not by any host
 	// that appears in it; the two can differ (see package clockskew).
@@ -946,6 +955,14 @@ const (
 	// was asked and how the server answered; a request that looks like an
 	// attack is an attempt, and a 2xx answer does not prove it worked.
 	EventWebRequest = "web_request"
+	// EventCryptoURLRetrieval is a URL the CryptoAPI retrieved and cached. It
+	// does not identify the program that asked, and most entries are Windows
+	// validating certificates.
+	EventCryptoURLRetrieval = "crypto_url_retrieval"
+	// EventDefenderCommand is one run of MpCmdRun.exe as the Defender tool's own
+	// log recorded it: the command line, and the start and end it printed in
+	// the machine's local time.
+	EventDefenderCommand = "defender_command"
 	// EventServiceMessage is a service message a daemon wrote to the system
 	// log and that bears on security or integrity: a database running with
 	// a passwordless administrator account, corrupt tables, a server

@@ -885,6 +885,8 @@ const ARTIFACT_TYPE_LABELS = {
   auth_log: "Authentication log (auth.log)",
   syslog: "System log (syslog)",
   web_access_log: "Web server access log",
+  cryptnet_url_cache: "CryptoAPI URL cache (CryptnetUrlCache)",
+  defender_cmd_log: "Defender command-line log (MpCmdRun.log)",
   iis_w3c_log: "IIS web log (W3C)",
   container_json_log: "Container log (Docker json-file)",
   container_config: "Container configuration (Docker)",
@@ -971,6 +973,8 @@ const EVENT_CATEGORIES = {
   registry_run_key_set: "persistence",
   scheduled_task_created: "persistence",
   network_connection: "network",
+  crypto_url_retrieval: "network",
+  defender_command: "execution",
   // Phase 4 additions.
   logon_explicit_credentials: "authentication",
   privileged_logon: "authentication",

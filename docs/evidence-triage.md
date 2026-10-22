@@ -114,6 +114,8 @@ what the binary can actually parse:
 | `syslog` | System log (syslog) | Log | High | `syslog@1` |
 | `web_access_log` | Web server access log | Log | High | `webaccess@1` |
 | `iis_w3c_log` | IIS web log (W3C) | Log | High | `iislog@1` |
+| `cryptnet_url_cache` | CryptoAPI URL cache (CryptnetUrlCache) | Execution | High | `cryptneturl@1` |
+| `defender_cmd_log` | Defender command-line log (MpCmdRun.log) | Execution | High | `defendercmd@1` |
 | `package_log` | Package log (dpkg) | Log | Medium | `packagelog@1` |
 | `network_capture` | Network capture (pcap) | Network | High | `netcapture@1` |
 | `journal` | Systemd journal | Log | Medium | `journal@1` |
@@ -1623,6 +1625,82 @@ Limitations:
   never guessed at.
 - Behind a load balancer `c-ip` is the balancer. `x_forwarded_for` is shown when
   logged but is a header the client controls.
+
+### CryptoAPI URL cache (`cryptneturl@1`)
+
+Reads `CryptnetUrlCache\MetaData\<hash>` entries (system profile and per user).
+Windows writes one for every URL it retrieves while validating a certificate
+(revocation lists, OCSP, trust lists), and `certutil -urlcache -f` writes one for
+a file it downloads, together with the file itself in `Content\<hash>`.
+
+One `crypto_url_retrieval` event per entry, dated by the last-download FILETIME,
+with `url`, `url_host`, `file_size`, `etag`, `last_modified_header` (the
+response's Last-Modified), `cache_profile` and, from the sibling Content file,
+`content_present`, `content_size_matches`, `content_magic` (pe, zip, 7z, rar, cab,
+der, elf, pdf, text, unknown), `content_sha256`. The layout is the published one
+(urlSize at 12, FILETIME at 16 and 88, ETag size at 100, file size at 112, then
+URL and ETag in UTF-16LE); an entry whose parts do not account for the whole file
+is marked `layout_verified: false`.
+
+The rule `cryptnet-executable-retrieval` reports an entry only when the cached
+object is an executable (high), an archive or ELF (medium), or the URL ends like a
+program or script and the object is not there to examine (medium, low confidence).
+Certificate traffic (DER, CAB, empty) is never reported.
+
+Limitations:
+
+- An entry shows that a URL was retrieved and when. It does not name the program
+  that asked. In a normal system almost every entry is Windows itself.
+- The ETag and Last-Modified are the server's headers, not the file's own times.
+- Only the first 116 bytes of the header and the URL and ETag are interpreted; the
+  rest of the header is not documented and is not read.
+- Entries that Windows has already removed from the cache are not recoverable here.
+
+Validated on 53 entries of a real Windows 10 collection: all 53 cached object
+sizes equal the recorded `fileSize`, all layouts account for the whole file, and
+the host tally, content kinds and time range equal a separate pass over the raw
+bytes. That collection contains only certificate traffic, so no true positive was
+available; the rule is tested on constructed entries.
+
+### Defender command-line log (`defendercmd@1`)
+
+Reads `MpCmdRun.log` (UTF-16LE with a byte order mark; also the rotated
+`MpCmdRun-<date>.log`). One `defender_command` event per run, with
+`command_line`, `executable`, `verb` (the first argument), `download_url` and
+`download_path` when `-url` and `-path` are present, `timestamp_local` and
+`end_local` (ISO, no zone), `error_lines` (up to three lines that say error or
+failed) and `line_number`.
+
+The times are the machine's local time and carry no zone, so a run has no instant.
+When the collection's SYSTEM hive records the zone, `timestamp_utc` is derived
+with that one fixed offset and `timestamp_utc_basis` names the hive and says that
+daylight-saving changes are not applied. Only English day and month names are
+read; any other time is kept as written in `timestamp_text`.
+
+The rule `defender-mpcmdrun-misuse` reports `-DownloadFile` (high; MpCmdRun.exe is
+a signed Microsoft binary that will fetch a file) and `-RemoveDefinitions -All`
+(medium).
+
+Limitations:
+
+- The log records the command, not that a download succeeded or what happened to
+  the file.
+- Only MpCmdRun.log is read. MPLog, MPDetection and the other Defender text logs
+  are not, and neither is the Defender event log's detection history beyond the
+  existing event-log mappings.
+- Validated on a real log of 16 runs (verbs, error runs, start times and the
+  absence of any instant equal a separate pass over the raw bytes); it contains
+  only signature updates, so the rule is tested on constructed runs.
+
+### Not read yet
+
+- **WMI repository** (`OBJECTS.DATA`, `INDEX.BTR`, `MAPPING*.MAP`). The sample
+  repository held only class definitions and the default bindings, with no
+  persistence instance to validate a reader against, so none was built.
+- **BITS** (`qmgr.db` and `qmgr*.dat`). The Windows 10 database is an ESE file and
+  Tracefall has no ESE reader.
+- **Windows Firewall log** (`pfirewall.log`) and **Defender MPLog**. No real
+  sample was available.
 
 ### Package log (`packagelog@1`)
 

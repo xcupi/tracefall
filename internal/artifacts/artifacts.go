@@ -427,6 +427,16 @@ var supportedTypeInfo = map[string]typeInfo{
 		label: "Web server access log", family: FamilyLog, priority: PriorityHigh,
 		why: "Records every request a web server answered, with the source address, URL, status and client -- the trail of web attacks and web-shell use.",
 	},
+	model.ArtifactCryptnetURLCache: {
+		label: "CryptoAPI URL cache (CryptnetUrlCache)", family: FamilyExecution, priority: PriorityHigh,
+		why:  "Records URLs Windows retrieved and cached, with the time, size and ETag, and the cached object itself. certutil -urlcache -f leaves its download here.",
+		note: "An entry shows that a URL was retrieved and when. It does not name the program that asked: almost every entry in an ordinary system is Windows validating certificates (revocation lists, OCSP, trust lists). The Content folder is read only to report what the cached object is and its hash.",
+	},
+	model.ArtifactDefenderCmdLog: {
+		label: "Defender command-line log (MpCmdRun.log)", family: FamilyExecution, priority: PriorityHigh,
+		why:  "Records each run of MpCmdRun.exe with its command line. MpCmdRun.exe -DownloadFile can fetch a file with a signed Microsoft binary.",
+		note: "Times are the machine's local time with no zone, so a run has no instant unless the collection's SYSTEM hive records the zone (then a UTC reading is derived with one fixed offset). Only English day and month names are read. Other Defender text logs (MPLog, MPDetection) are not read.",
+	},
 	model.ArtifactIISLog: {
 		label: "IIS web log (W3C)", family: FamilyLog, priority: PriorityHigh,
 		why:  "Records every request IIS answered, with the source address, URL, query, user and status -- the trail of web exploitation and web-shell use on a Windows server.",
@@ -933,7 +943,7 @@ var unsupportedRules = []unsupportedRule{
 	{
 		label: "Antimalware detection log", family: FamilyLog, priority: PriorityHigh,
 		why:    "Detection and remediation history names malicious files and the time they were seen, often the earliest signal available.",
-		reason: "Tracefall has no antimalware log parser.",
+		reason: "Tracefall reads MpCmdRun.log only. This Defender text log (MPLog, MPDetection and others) is not read.",
 		match:  matchDefenderLog,
 	},
 	{

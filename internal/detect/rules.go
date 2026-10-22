@@ -43,7 +43,7 @@ func All() []Rule {
 		// Packet captures. See rules_network.go.
 		rdpConnectionBurst{},
 		executableFromBareAddress{},
-	}, append(append(windowsServerRules(), sqlRules()...), containerRules()...)...)
+	}, append(append(append(windowsServerRules(), sqlRules()...), containerRules()...), windowsToolRules()...)...)
 }
 
 // ---------- Rule 1: Office application spawning PowerShell ----------

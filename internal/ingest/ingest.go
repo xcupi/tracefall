@@ -35,6 +35,8 @@ import (
 	browsercacheparser "tracefall/internal/parsers/browsercache"
 	browsercacheindexparser "tracefall/internal/parsers/browsercacheindex"
 	"tracefall/internal/parsers/browserhistory"
+	"tracefall/internal/parsers/cryptneturl"
+	"tracefall/internal/parsers/defendercmd"
 	"tracefall/internal/parsers/dockercontainer"
 	evtxnative "tracefall/internal/parsers/evtx"
 	"tracefall/internal/parsers/evtxcsv"
@@ -115,6 +117,9 @@ func Registry() []parsers.ArtifactParser {
 		grafanadb.New(),
 		webaccess.New(),
 		iislog.New(),
+		// Name-claimed by folder and file name, and confirmed by their own header.
+		cryptneturl.New(),
+		defendercmd.New(),
 		// Packet captures: claimed by extension and confirmed by their magic
 		// number, and also found by magic number under any name.
 		netcapture.New(),
