@@ -128,7 +128,9 @@ func FindSegments(first string) ([]string, error) {
 	case ext == ".001":
 		next = func(i int) string { return fmt.Sprintf("%s.%03d", stem, i) }
 	default:
-		return []string{first}, nil
+		// A VMDK descriptor, or the first extent of a split VMDK, names the
+		// files that hold the disk. They belong to the same evidence.
+		return vmdkSegments(first), nil
 	}
 	out := []string{first}
 	for i := 2; i < 100000; i++ {

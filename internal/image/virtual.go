@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"io"
 	"os"
+	"path/filepath"
 )
 
 // Detection of the virtual disk containers. Each is identified from the file's
@@ -51,4 +52,100 @@ func isVMDKDescriptor(path string) bool {
 	buf := make([]byte, 64)
 	n, _ := f.Read(buf)
 	return bytes.HasPrefix(bytes.TrimLeft(buf[:n], " \t\r\n\xef\xbb\xbf"), []byte("# Disk DescriptorFile"))
+}
+
+// IsVirtualDisk reports whether path is a VHD, VHDX or VMDK container, from its
+// contents. It claims the file even when the reader would refuse it (a
+// differencing disk, say), so the analyst is told why instead of being told the
+// file is unrecognised.
+func IsVirtualDisk(path string) bool {
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	var head [8]byte
+	n, _ := io.ReadFull(f, head[:])
+	f.Close()
+	switch {
+	case n == 8 && string(head[:]) == vhdxSignature:
+		return true
+	case n >= 4 && string(head[:4]) == vmdkSparseMagic:
+		return true
+	}
+	return isVMDKDescriptor(path) || isVHD(path)
+}
+
+// vmdkSegments returns the files that make up a VMDK given its descriptor (or
+// the first sparse extent of a split set): the descriptor, then every extent it
+// names, in order. The evidence fingerprint is taken over this list, so it must
+// cover the extents that hold the disk and not only a few hundred bytes of
+// descriptor text.
+//
+// It never invents or skips anything: if the file is not a VMDK, an extent name
+// is not a plain file name inside the directory, an extent is missing or the
+// layout cannot be reconciled, it returns just the given path, and Open then
+// reports the real reason.
+func vmdkSegments(first string) []string {
+	alone := []string{first}
+	f, err := os.Open(first)
+	if err != nil {
+		return alone
+	}
+	defer f.Close()
+	var magic [4]byte
+	f.ReadAt(magic[:], 0)
+	var text string
+	sparse := string(magic[:]) == vmdkSparseMagic
+	switch {
+	case sparse:
+		ext, err := newSparseExtent(f)
+		if err != nil || ext.desc == "" {
+			return alone
+		}
+		text = ext.desc
+	case isVMDKDescriptor(first):
+		if text, err = readVMDKDescriptorFile(f); err != nil {
+			return alone
+		}
+	default:
+		return alone
+	}
+	d, err := parseVMDKDescriptor(text)
+	if err != nil || len(d.extents) == 0 {
+		return alone
+	}
+	dir := filepath.Dir(first)
+	realFirst, err := filepath.EvalSymlinks(first)
+	if err != nil {
+		return alone
+	}
+	var out []string
+	if !sparse {
+		out = append(out, first)
+	}
+	seen := map[string]bool{}
+	for i, e := range d.extents {
+		p, err := vmdkExtentPath(dir, e.name)
+		if err != nil {
+			return alone
+		}
+		if st, err := os.Stat(p); err != nil || !st.Mode().IsRegular() {
+			return alone
+		}
+		if sparse && i == 0 {
+			if p != realFirst {
+				return alone // the given file is not the first extent; do not guess
+			}
+			p = first
+		}
+		if seen[p] {
+			continue
+		}
+		seen[p] = true
+		out = append(out, p)
+	}
+	if sparse && len(out) < 2 {
+		return alone
+	}
+	return out
 }

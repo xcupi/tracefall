@@ -28,7 +28,7 @@ import (
 
 // Disk images (roadmap item 3).
 //
-//	container      internal/image      raw/dd (split sets too), E01/EWF
+//	container      internal/image      raw/dd (split sets too), E01/EWF, VHD, VHDX, VMDK
 //	partitions     internal/partition  MBR + extended, GPT (backup fallback)
 //	file system    internal/ntfsvol    NTFS, read directly from bytes
 //	  -> catalog   artifacts that existing parsers claim
@@ -142,6 +142,13 @@ func sniffDiskImage(path string) bool {
 	}
 	if string(head[:4]) == "PK\x03\x04" || string(head[:4]) == "PK\x05\x06" {
 		return false // an archive that happens to have 55 AA in its tail
+	}
+	// VHD, VHDX and VMDK have no partition table at byte 0 (the disk sits behind
+	// the container's own structures), so the check below cannot see them. They
+	// are claimed by their signatures, even when the reader will refuse one
+	// (a differencing disk), so the refusal carries its reason.
+	if image.IsVirtualDisk(path) {
+		return true
 	}
 	tb, err := partition.Read(f, st.Size(), 512)
 	return err == nil && len(tb.Partitions) > 0
