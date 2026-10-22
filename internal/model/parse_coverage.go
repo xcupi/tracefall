@@ -3,6 +3,8 @@ package model
 // ParseCoverage records what a parser actually read, separately from timeline
 // events. Nil means not recorded (including older imports), never complete.
 type ParseCoverage struct {
+	// Notes are bounded parser-generated caveats, never raw evidence text.
+	Notes           []string        `json:"notes,omitempty"`
 	RecordsRead     int             `json:"records_read"`
 	Mapped          int             `json:"mapped"`
 	Unmapped        int             `json:"unmapped"`
@@ -24,5 +26,5 @@ type CoverageEvent struct {
 }
 
 func (c *ParseCoverage) Incomplete() bool {
-	return c != nil && (c.Unmapped > 0 || c.Undated > 0 || c.RecordsFailed > 0 || c.ChunksFailed > 0 || c.LimitReached || c.UnlistedRecords > 0)
+	return c != nil && (len(c.Notes) > 0 || c.Unmapped > 0 || c.Undated > 0 || c.RecordsFailed > 0 || c.ChunksFailed > 0 || c.LimitReached || c.UnlistedRecords > 0)
 }

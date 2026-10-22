@@ -128,6 +128,11 @@ func (e Event) ComputeDedupHash() string {
 	if e.ArtifactType == ArtifactWindowsEventLog && (e.EventType == EventSQLMessage || e.EventType == EventSQLAgentMessage || e.EventType == EventSQLLoginFailed || e.EventType == EventSQLLoginSuccess) {
 		parts = append(parts, e.Extra["sql_record_data"])
 	}
+	// SQL observations can tie; preserve source content and ordinal/span.
+	// Collection IDs and runtime/renderer notes do not split recollections.
+	if e.ArtifactType == ArtifactMSSQLExtendedEvents || e.ArtifactType == ArtifactMSSQLAudit {
+		parts = append(parts, e.SourceReference, e.Extra["sql_source_sha256"], e.Extra["sql_record_sha256"])
+	}
 	sum := sha256.Sum256([]byte(strings.Join(parts, unitSep)))
 	return hex.EncodeToString(sum[:])
 }

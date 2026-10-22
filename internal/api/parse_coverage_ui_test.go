@@ -24,3 +24,15 @@ func TestUI_ParseCoverageDoesNotCallUnmappedRecordsEmptyEvidence(t *testing.T) {
 		t.Fatalf("misleading zero-event note: %s", out)
 	}
 }
+
+func TestUI_SQLZeroCoverageNotes(t *testing.T) {
+	src := appJS(t)
+	js := "function parseCoverageText(" + functionBody(t, src, "function parseCoverageText(") + "\nconsole.log(parseCoverageText({records_read:0,mapped:0,notes:['PARTIAL export; NOT-VERIFIED native audit']}))"
+	out, err := exec.Command("node", "-e", js).CombinedOutput()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(out), "PARTIAL export; NOT-VERIFIED native audit") {
+		t.Fatalf("lost caveat: %s", out)
+	}
+}

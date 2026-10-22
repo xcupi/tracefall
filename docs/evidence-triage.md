@@ -1586,3 +1586,68 @@ sections with entropy, imports, exports, signature directory and appended data,
 and network, path, registry and command strings. Static only: nothing is
 executed, no hash is looked up anywhere, and Authenticode is not verified. An
 indicator is a property common in malware, never a verdict.
+
+
+## SQL Server Audit and Extended Events
+
+| Artifact | Status | Evidence limits |
+|---|---|---|
+| `.xel` | Optional configured offline external reader | Linux offline fixture verified; selected captured events only; no all-query/completeness claim |
+| `.sqlaudit` | Experimental **NOT-VERIFIED**, default refused | Genuine audit fixture and independent field reference still required |
+| `.sqlaudit.csv` | **PARTIAL** explicit `fn_get_audit_file` export | Different evidence form, not binary equivalence; original/export method required |
+| `.xel.xml`, `.xel.jsonl` | **PARTIAL** explicit XE exports | Recorded fields only; export selection/truncation can omit evidence |
+
+Native configuration, source-only helper, protocol, resource and licensing gates:
+[optional offline XE reader](../tools/mssql-xe-reader/README.md). These artifact
+names are recognized even when the runtime is absent: attempting native import
+then fails visibly, never silently falls back to text or claims native support.
+
+Audit CSV must have exact `event_time` and `action_id` columns; optional columns
+use documented `sys.fn_get_audit_file` names (including `succeeded`, `session_id`,
+`server_instance_name`, principals/SIDs, database/schema/object, `statement`,
+client fields, `sequence_number`, `audit_file_offset`). Header names are not
+guessed or mapped from arbitrary CSV. Audit `event_time` is documented UTC;
+outer XE timestamp is retained separately. Zone-less XE export timestamps stay
+undated/local. No filesystem time or examiner timezone is substituted.
+
+XE XML accepts `<event name="..." timestamp="...">` records with named
+`data/value` and `action/value` children, standalone or under `Events` /
+`RingBufferTarget`. Declared `truncated="1"` or `"true"` is rejected rather than
+reported as complete. JSONL has one object per record with `name`, `timestamp`,
+`fields` and `actions` maps, using the same documented XE names and scalar values
+(e.g. `session_id`, `client_pid`, `client_hostname`, `client_app_name`,
+`client_connection_id`, `attach_activity_id`, `sql_text`). The export contract is
+explicit, not arbitrary vendor JSON recognition. Raw XML records, CSV row bytes
+and JSONL lines remain independently accessible; summary text does not copy SQL
+statement/credential text. Unknown fields survive in raw and `sql_field_*`.
+
+For non-login audit actions, `succeeded` means **permission_check_allowed/denied**,
+not completed execution, transaction commit, query result, or OS effects.
+Documented login actions LGIS/LGIF retain login semantics. Missing/invalid outcome
+stays unknown. Packed integer action IDs retain raw value and a separately decoded
+little-endian four-byte action code; audit buffer offsets are never XE event
+byte offsets. Statements/additional-information sequence fragments remain
+separate records with an incomplete/not-reconstructed note; no blind assembly.
+
+SQL session IDs are **not Windows PIDs**. Remote client PID/hostname/IP/application
+are client claims, never host attribution or the sqlservr PID. Normalization uses
+`sql_instance`, `sql_session_id`, `sql_client_pid`, `sql_client_hostname`,
+`sql_client_ip`, `sql_statement`, `sql_action`, `sql_outcome`,
+`sql_outcome_basis`, `sql_client_connection_id`, `sql_activity_id`,
+`sql_activity_sequence`, `sql_server_pid` only when recorded. Evidence form,
+raw record hash and per-file ordinal/span prevent tied observations collapsing;
+collection IDs and sandbox notes do not split genuine recollections. Old cases
+need a fresh import; lost rows cannot be recovered by rehashing old events.
+
+Export caps: 16 MiB input, 1 MiB record/line, 10,000 records. Native reader caps
+are documented beside its source. Corrupt, capped, incomplete-protocol or missing
+reader imports fail the source visibly, not “empty evidence.” Successful sources
+carry persistent parser coverage caveats even with zero events, visible in source
+details, provenance and reports. No events is not evidence of no activity:
+Audit/XE selection, predicates, sampling, loss modes, queue/dispatch delay,
+rollover/deletion and missing acquisitions constrain every conclusion.
+
+References: [audit records](https://learn.microsoft.com/en-us/sql/relational-databases/security/auditing/sql-server-audit-records),
+[fn_get_audit_file](https://learn.microsoft.com/en-us/sql/relational-databases/system-functions/sys-fn-get-audit-file-transact-sql),
+[XE targets](https://learn.microsoft.com/en-us/sql/relational-databases/extended-events/targets-for-extended-events-in-sql-server),
+[Read-SqlXEvent](https://learn.microsoft.com/en-us/powershell/module/sqlserver/read-sqlxevent).

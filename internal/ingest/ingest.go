@@ -45,6 +45,7 @@ import (
 	"tracefall/internal/parsers/logfile"
 	"tracefall/internal/parsers/mft"
 	"tracefall/internal/parsers/mssql"
+	"tracefall/internal/parsers/mssqlxe"
 	"tracefall/internal/parsers/netcapture"
 	"tracefall/internal/parsers/packagelog"
 	"tracefall/internal/parsers/pecmd"
@@ -99,6 +100,8 @@ func Registry() []parsers.ArtifactParser {
 		// is mistaken for one.
 		// SQL text logs require a recognizable header even for a name match.
 		mssql.New(), mssql.NewAgent(),
+		// Explicit XE/Audit exports and optional fail-closed offline binary reader.
+		mssqlxe.New(), mssqlxe.NewAudit(),
 		packagelog.New(),
 		webaccess.New(),
 		// Packet captures: claimed by extension and confirmed by their magic

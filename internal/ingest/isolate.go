@@ -169,6 +169,11 @@ func (s Subprocess) Run(p parsers.ArtifactParser, root, abs string, pctx parsers
 		}
 		defer release()
 	}
+	// Trusted registered adapters may own a mandatory external-runtime sandbox.
+	// Do not pass CoreCLR through the Go worker inherited RLIMIT_AS/seccomp.
+	if own, ok := p.(interface{ OwnSandbox(string) bool }); ok && own.OwnSandbox(abs) {
+		return inProcess{}.Run(p, root, abs, pctx)
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), s.timeout())
 	defer cancel()
 

@@ -598,6 +598,9 @@ func reportCoverage(files []model.SourceFile) report.Coverage {
 	for _, sf := range files {
 		if c := sf.ParseCoverage; c != nil {
 			summary := fmt.Sprintf("read=%d mapped=%d unmapped=%d undated=%d records_failed=%d chunks_failed=%d capped=%t", c.RecordsRead, c.Mapped, c.Unmapped, c.Undated, c.RecordsFailed, c.ChunksFailed, c.LimitReached)
+			if len(c.Notes) > 0 {
+				summary += "; " + strings.Join(c.Notes, "; ")
+			}
 			for _, v := range c.ByEvent {
 				summary += fmt.Sprintf("; %s/%s %d: %d read, %d mapped", v.Channel, v.Provider, v.EventID, v.Records, v.Mapped)
 			}
@@ -725,6 +728,10 @@ func reportLimitations(d report.Data, in reportInputs) []string {
 	for _, sf := range in.sourceFiles {
 		c := sf.ParseCoverage
 		if !c.Incomplete() {
+			continue
+		}
+		if len(c.Notes) > 0 {
+			problems = append(problems, sf.Path+": "+strings.Join(c.Notes, "; "))
 			continue
 		}
 		if c.Undated > 0 || c.RecordsFailed > 0 || c.ChunksFailed > 0 || c.LimitReached || c.UnlistedRecords > 0 {

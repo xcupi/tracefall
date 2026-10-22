@@ -79,3 +79,11 @@ func TestReport_CaseCaveatsIncludeCaptureAndMemorySemantics(t *testing.T) {
 		}
 	}
 }
+
+func TestReport_SQLCoverageNotesSurviveZeroEvents(t *testing.T) {
+	in := reportInputs{sourceFiles: []model.SourceFile{{Path: "capture.sqlaudit.csv", ParseCoverage: &model.ParseCoverage{Notes: []string{"PARTIAL export; native audit NOT-VERIFIED"}}}}}
+	text := strings.Join(reportLimitations(report.Data{}, in), " ")
+	if !strings.Contains(text, "PARTIAL export; native audit NOT-VERIFIED") {
+		t.Fatal(text)
+	}
+}

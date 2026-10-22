@@ -259,9 +259,11 @@ type typeInfo struct {
 }
 
 var supportedTypeInfo = map[string]typeInfo{
-	model.ArtifactMSSQLLog:    {label: "SQL Server ERRORLOG", family: FamilySQLServer, priority: PriorityHigh, why: "Records engine messages and explicit login outcomes; local clocks remain unconverted."},
-	model.ArtifactSQLAgentLog: {label: "SQL Server Agent text log", family: FamilySQLServer, priority: PriorityHigh, why: "Records Agent messages, not proof that every configured job ran."},
-	model.ArtifactSQLInstance: {label: "SQL Server instance configuration", family: FamilySQLServer, priority: PriorityHigh, why: "Records instance mapping and startup configuration, not observed execution."},
+	model.ArtifactMSSQLExtendedEvents: {label: "SQL Server Extended Events", family: FamilySQLServer, priority: PriorityHigh, why: "Retains selected XE events, statements and recorded client/session claims.", note: "Native XEL requires a separately deployed offline .NET reader and mandatory network-disabled sandbox. XML/JSONL exports are PARTIAL, not binary equivalents. Selective capture and rollover prevent completeness claims; client host/PID claims are not server host/process identity."},
+	model.ArtifactMSSQLAudit:          {label: "SQL Server Audit", family: FamilySQLServer, priority: PriorityHigh, why: "Retains recorded audit actions, principals and permission outcomes.", note: "CSV exports are PARTIAL. Native binary audit is experimental NOT-VERIFIED pending a genuine fixture. Non-login succeeded means permission check, not completed execution. External proprietary reader licensing and deployment remain operator gates."},
+	model.ArtifactMSSQLLog:            {label: "SQL Server ERRORLOG", family: FamilySQLServer, priority: PriorityHigh, why: "Records engine messages and explicit login outcomes; local clocks remain unconverted."},
+	model.ArtifactSQLAgentLog:         {label: "SQL Server Agent text log", family: FamilySQLServer, priority: PriorityHigh, why: "Records Agent messages, not proof that every configured job ran."},
+	model.ArtifactSQLInstance:         {label: "SQL Server instance configuration", family: FamilySQLServer, priority: PriorityHigh, why: "Records instance mapping and startup configuration, not observed execution."},
 	model.ArtifactWindowsEventLog: {
 		label: "Windows Event Log (EVTX)", family: FamilyEventLog, priority: PriorityCritical,
 		why: "Records logons, process creation, service installs and PowerShell activity -- the primary account of what happened on the system.",

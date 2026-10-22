@@ -869,6 +869,8 @@ const SOURCE_TYPE_LABELS = {
 // which fails if a supported artifact type is missing here or is named
 // differently from the registry.
 const ARTIFACT_TYPE_LABELS = {
+  mssql_extended_events: "SQL Server Extended Events",
+  mssql_audit: "SQL Server Audit",
   mssql_error_log: "SQL Server ERRORLOG",
   sql_agent_log: "SQL Server Agent text log",
   sql_instance_configuration: "SQL Server instance configuration",
@@ -949,6 +951,8 @@ function artifactLabel(t) {
 // added later fails visibly (falls into "other") rather than silently
 // miscategorized.
 const EVENT_CATEGORIES = {
+  mssql_xe_event: "other",
+  mssql_audit_event: "other",
   sql_message: "other",
   sql_login_failed: "authentication",
   sql_login_success: "authentication",
@@ -8239,7 +8243,7 @@ function renderSourceFileProvenance(p) {
 // point on a clock.
 function parseCoverageText(c) {
  if (!c) return "Coverage not recorded";
- return `read=${c.records_read} mapped=${c.mapped} unmapped=${c.unmapped} undated=${c.undated} records_failed=${c.records_failed} chunks_failed=${c.chunks_failed} capped=${!!c.limit_reached}`;
+ return `read=${c.records_read} mapped=${c.mapped} unmapped=${c.unmapped} undated=${c.undated} records_failed=${c.records_failed} chunks_failed=${c.chunks_failed} capped=${!!c.limit_reached}${(c.notes || []).length ? "; " + c.notes.join("; ") : ""}`;
 }
 
 function noEventNote(sf, eventCount) {
