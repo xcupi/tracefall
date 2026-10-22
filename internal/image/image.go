@@ -41,6 +41,11 @@ type Format string
 const (
 	FormatRaw Format = "raw"
 	FormatEWF Format = "ewf"
+	// Virtual disk containers (Hyper-V, VMware). Their framing, block maps and
+	// sparse holes are removed, so the view is the guest's disk.
+	FormatVHD  Format = "vhd"
+	FormatVHDX Format = "vhdx"
+	FormatVMDK Format = "vmdk"
 )
 
 var (
@@ -95,6 +100,12 @@ func Open(paths ...string) (Image, error) {
 		return nil, fmt.Errorf("%w: Ex01 (EWF version 2) images are not read yet", ErrUnsupported)
 	case n == 8 && string(magic[:3]) == "LVF":
 		return nil, fmt.Errorf("%w: L01 logical evidence files are not read yet", ErrUnsupported)
+	case n == 8 && string(magic[:]) == vhdxSignature:
+		return openVHDX(paths)
+	case n >= 4 && string(magic[:4]) == vmdkSparseMagic, n >= 8 && isVMDKDescriptor(paths[0]):
+		return openVMDK(paths)
+	case isVHD(paths[0]):
+		return openVHD(paths)
 	}
 	return openRaw(paths)
 }
