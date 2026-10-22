@@ -297,6 +297,15 @@ var redactions = []struct {
 	{ci(`(-Password\s+)\(?ConvertTo-SecureString\s+("[^"]*"|'[^']*'|\S+)`), `${1}<redacted>`},
 	{ci(`(\bConvertTo-SecureString\s+)("[^"]*"|'[^']*')`), `${1}<redacted>`},
 	{ci(`(\b(?:-pass(?:word)?|--pass(?:word)?|/pass(?:word)?:?)[ =:]\s*)("[^"]*"|\S+)`), `${1}<redacted>`},
+	// SQL Server: [OLD_]PASSWORD = [N]'secret' in CREATE/ALTER LOGIN or USER.
+	{ci(`(\b(?:old_)?password\s*=\s*N?)'(?:[^']|'')*'`), `${1}'<redacted>'`},
+	// Stored-procedure parameters that carry a secret: @rmtpassword, @new,
+	// @old, @password, @pwd (quoted value).
+	{ci(`(@(?:rmtpassword|password|pwd|new|old)\s*=\s*N?)'(?:[^']|'')*'`), `${1}'<redacted>'`},
+	// Connection-string keys: Password= / Pwd= up to the next semicolon.
+	{ci(`(\b(?:password|pwd)\s*=\s*)("[^"]*"|'[^']*'|[^;'"\s][^;]*)`), `${1}<redacted>`},
+	// sqlcmd / osql / bcp -P secret (a capital P; -p is something else).
+	{regexp.MustCompile(`(\b(?:sqlcmd|osql|bcp)(?:\.exe)?\b[^|;&\n]*?\s-P\s*)("[^"]*"|'[^']*'|\S+)`), `${1}<redacted>`},
 }
 
 // Redact masks the secrets a command line can carry -- the password in
