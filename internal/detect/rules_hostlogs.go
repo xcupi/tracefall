@@ -140,14 +140,17 @@ func (webAttackIndicators) Inputs() model.EventFilter {
 var minRequests = map[string]int{webattack.AdminInterfaceProbe: 3}
 
 func (r webAttackIndicators) Evaluate(events []model.Event) []model.Finding {
-	type key struct{ host, src, category string }
+	// The artifact type is part of the key: one request can be written by two
+	// logs (a container's stdout and the application's own file, say), and the
+	// copies must not be counted as separate requests or reach a threshold.
+	type key struct{ host, artifact, src, category string }
 	groups := map[key][]model.Event{}
-	catsBySource := map[[2]string]map[string]bool{}
+	catsBySource := map[[3]string]map[string]bool{}
 	for _, e := range byType(events, model.EventWebRequest) {
 		for _, c := range webattack.Classify(e.Extra["uri"], e.Extra["user_agent"]) {
-			k := key{e.Host, e.NetworkSource, c}
+			k := key{e.Host, e.ArtifactType, e.NetworkSource, c}
 			groups[k] = append(groups[k], e)
-			sk := [2]string{e.Host, e.NetworkSource}
+			sk := [3]string{e.Host, e.ArtifactType, e.NetworkSource}
 			if catsBySource[sk] == nil {
 				catsBySource[sk] = map[string]bool{}
 			}
@@ -162,6 +165,9 @@ func (r webAttackIndicators) Evaluate(events []model.Event) []model.Finding {
 		a, b := keys[i], keys[j]
 		if a.host != b.host {
 			return a.host < b.host
+		}
+		if a.artifact != b.artifact {
+			return a.artifact < b.artifact
 		}
 		if a.src != b.src {
 			return a.src < b.src
@@ -199,7 +205,7 @@ func (r webAttackIndicators) Evaluate(events []model.Event) []model.Finding {
 				sev = model.SeverityHigh
 			}
 		}
-		if len(reqs) >= 5 || len(catsBySource[[2]string{k.host, k.src}]) >= 2 {
+		if len(reqs) >= 5 || len(catsBySource[[3]string{k.host, k.artifact, k.src}]) >= 2 {
 			if conf == model.ConfidenceLow {
 				conf = model.ConfidenceMedium
 			}
@@ -209,7 +215,7 @@ func (r webAttackIndicators) Evaluate(events []model.Event) []model.Finding {
 			"Source %s sent %d request(s) to host %s between %s and %s whose %s resembles %s. Answers: %s. Example: %s. "+
 				"A request of this shape is an attempt. The access log records the status the server returned, not what the "+
 				"application did with the request: a 2xx answer does not prove the attack worked, and a 4xx answer does not "+
-				"prove it failed.",
+				"prove it failed. Counts are for this one log; another log may also record the same request, and the two counts are not added.",
 			orDash(k.src), len(reqs), orDash(k.host), fmtTime(reqs[0].Timestamp), fmtTime(reqs[len(reqs)-1].Timestamp),
 			whatWasRead(k.category), webattack.Label(k.category), statusSummary(status), clipText(reqs[0].Extra["uri"], 160))
 		out = append(out, newFinding(reqs[0].CaseID, r.ID(), title, sev, conf, desc,
