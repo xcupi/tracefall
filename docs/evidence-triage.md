@@ -1,5 +1,17 @@
 # Evidence triage
 
+## SQL Server core text and instance evidence
+
+| Artifact | Coverage |
+|---|---|
+| SQL Server ERRORLOG / numbered rotations | Recognizable SQL text; local clock readings remain unconverted |
+| SQL Server Agent OUT / numbered rotations | Agent text messages, not complete job execution history |
+| SOFTWARE SQL instance mapping, Setup, Parameters | Recorded configuration, not observed execution |
+| MSSQL / SQL Agent Application events | Provider-and-channel gated normalization through native EVTX and CSV |
+
+See [SQL Server forensics](sql-server-forensics.md) for formats, identity and timestamp semantics, source references and verification limits. Binary `.xel`, `.sqlaudit`, `.trc` and database transaction logs are **not parsed by this core phase**. An arbitrary ERRORLOG filename is not enough to claim support.
+
+
 A browser upload can run the complete default workflow automatically:
 
 ```

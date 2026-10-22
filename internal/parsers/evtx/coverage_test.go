@@ -50,7 +50,7 @@ func TestCoverage_EmptyOutputStillDisclosesCorruptionAndCaps(t *testing.T) {
 
 func TestCoverage_UnsupportedOnlyLogRetainsCensusWithoutInventedTimeline(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "Application.evtx")
-	b := evtxgen.Build([]evtxgen.Event{{RecordID: 1, Timestamp: time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC), Provider: "MSSQLSERVER", Channel: "Application", Computer: "SERVER01", EventID: 18456}})
+	b := evtxgen.Build([]evtxgen.Event{{RecordID: 1, Timestamp: time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC), Provider: "OtherApplication", Channel: "Application", Computer: "SERVER01", EventID: 18456}})
 	if err := os.WriteFile(p, b, 0600); err != nil {
 		t.Fatal(err)
 	}

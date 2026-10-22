@@ -44,6 +44,7 @@ import (
 	lnkparser "tracefall/internal/parsers/lnk"
 	"tracefall/internal/parsers/logfile"
 	"tracefall/internal/parsers/mft"
+	"tracefall/internal/parsers/mssql"
 	"tracefall/internal/parsers/netcapture"
 	"tracefall/internal/parsers/packagelog"
 	"tracefall/internal/parsers/pecmd"
@@ -96,6 +97,8 @@ func Registry() []parsers.ArtifactParser {
 		// log is claimed by name, and also by the layout of its first
 		// line, so a renamed log is still found while no other text file
 		// is mistaken for one.
+		// SQL text logs require a recognizable header even for a name match.
+		mssql.New(), mssql.NewAgent(),
 		packagelog.New(),
 		webaccess.New(),
 		// Packet captures: claimed by extension and confirmed by their magic
@@ -212,7 +215,7 @@ func Discover(root string, registry []parsers.ArtifactParser) ([]DiscoveredFile,
 			// bytes. See parsers.ContentConfirmer: this is what stops a
 			// text file called SAM being claimed as a registry hive and
 			// then reported as a broken one.
-			if cc, ok := p.(parsers.ContentConfirmer); ok && len(header) > 0 && !cc.ConfirmContent(header) {
+			if cc, ok := p.(parsers.ContentConfirmer); ok && !cc.ConfirmContent(header) {
 				continue
 			}
 			matched = p
@@ -412,7 +415,7 @@ func MatchParser(relPath string, header []byte, registry []parsers.ArtifactParse
 		if !p.Detect(relPath) {
 			continue
 		}
-		if cc, ok := p.(parsers.ContentConfirmer); ok && len(header) > 0 && !cc.ConfirmContent(header) {
+		if cc, ok := p.(parsers.ContentConfirmer); ok && !cc.ConfirmContent(header) {
 			continue
 		}
 		return p

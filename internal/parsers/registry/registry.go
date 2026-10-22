@@ -62,7 +62,7 @@ func (Parser) EventArtifactTypes() []string {
 		model.ArtifactUserAssist, model.ArtifactShellBags,
 		model.ArtifactAmcache, model.ArtifactRecentDocs, model.ArtifactRunMRU,
 		model.ArtifactTypedPaths, model.ArtifactOpenSaveMRU, model.ArtifactMUICache,
-		model.ArtifactSAM,
+		model.ArtifactSAM, model.ArtifactSQLInstance,
 	}
 }
 
@@ -156,6 +156,12 @@ func (p Parser) ParseWithContext(absPath string, ctx parsers.ParseContext) (pars
 		out.Raw = append(out.Raw, raw)
 	}
 	if hiveType == HiveSoftware {
+		sqlEv, sqlRaw, sqlErr := sqlInstanceEvents(h)
+		if sqlErr != nil {
+			return parsers.ParseResult{}, sqlErr
+		}
+		out.Events = append(out.Events, sqlEv...)
+		out.Raw = append(out.Raw, sqlRaw...)
 		if ev, raw, ok := softwareIdentityEvent(h, hiveType); ok {
 			out.Events = append(out.Events, ev)
 			out.Raw = append(out.Raw, raw)

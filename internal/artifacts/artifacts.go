@@ -109,6 +109,7 @@ func (p Priority) Rank() int {
 type Family string
 
 const (
+	FamilySQLServer     Family = "sql_server"
 	FamilyEventLog      Family = "event_log"
 	FamilyRegistry      Family = "registry"
 	FamilyPrefetch      Family = "prefetch"
@@ -136,6 +137,7 @@ const (
 // FamilyLabels renders a family for display. One place, so the UI never
 // invents its own wording.
 var FamilyLabels = map[Family]string{
+	FamilySQLServer:     "SQL Server",
 	FamilyEventLog:      "Event Log",
 	FamilyRegistry:      "Registry",
 	FamilyPrefetch:      "Prefetch",
@@ -257,6 +259,9 @@ type typeInfo struct {
 }
 
 var supportedTypeInfo = map[string]typeInfo{
+	model.ArtifactMSSQLLog:    {label: "SQL Server ERRORLOG", family: FamilySQLServer, priority: PriorityHigh, why: "Records engine messages and explicit login outcomes; local clocks remain unconverted."},
+	model.ArtifactSQLAgentLog: {label: "SQL Server Agent text log", family: FamilySQLServer, priority: PriorityHigh, why: "Records Agent messages, not proof that every configured job ran."},
+	model.ArtifactSQLInstance: {label: "SQL Server instance configuration", family: FamilySQLServer, priority: PriorityHigh, why: "Records instance mapping and startup configuration, not observed execution."},
 	model.ArtifactWindowsEventLog: {
 		label: "Windows Event Log (EVTX)", family: FamilyEventLog, priority: PriorityCritical,
 		why: "Records logons, process creation, service installs and PowerShell activity -- the primary account of what happened on the system.",

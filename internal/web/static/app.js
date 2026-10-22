@@ -869,6 +869,9 @@ const SOURCE_TYPE_LABELS = {
 // which fails if a supported artifact type is missing here or is named
 // differently from the registry.
 const ARTIFACT_TYPE_LABELS = {
+  mssql_error_log: "SQL Server ERRORLOG",
+  sql_agent_log: "SQL Server Agent text log",
+  sql_instance_configuration: "SQL Server instance configuration",
   windows_event_log: "Windows Event Log (EVTX)",
   prefetch: "Prefetch",
   registry_run_key: "Registry (RECmd export)",
@@ -946,6 +949,11 @@ function artifactLabel(t) {
 // added later fails visibly (falls into "other") rather than silently
 // miscategorized.
 const EVENT_CATEGORIES = {
+  sql_message: "other",
+  sql_login_failed: "authentication",
+  sql_login_success: "authentication",
+  sql_agent_message: "other",
+  sql_instance_configuration: "other",
   logon_success: "authentication",
   logon_failure: "authentication",
   process_create: "execution",

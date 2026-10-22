@@ -90,6 +90,11 @@ func (e Event) ComputeDedupHash() string {
 			parts = append(parts, e.Extra["timestamp_original"])
 		}
 	}
+	// SQL text records can tie on timestamps, including explicit instants.
+	// Keep per-file ordinal and recorded source/message identity for SQL only.
+	if e.ArtifactType == ArtifactMSSQLLog || e.ArtifactType == ArtifactSQLAgentLog {
+		parts = append(parts, e.SourceReference, e.Extra["timestamp_local"], e.Extra["message"], e.Extra["instance"], e.Extra["sql_source"], e.Extra["agent_message_id"])
+	}
 	// Journal entries are timestamped at microsecond resolution, so two
 	// entries from the same process in the same microsecond would collapse
 	// under the timestamped rule above. The per-file sequence number is what
@@ -114,6 +119,14 @@ func (e Event) ComputeDedupHash() string {
 			parts = append(parts, e.NetworkSource, e.Extra["local_port"],
 				e.Extra["protocol"], e.Extra["state"])
 		}
+	}
+	// SQL configuration values and SQL-provider insertion data are evidence
+	// identity, not renderer metadata. Leave unrelated historical hashes alone.
+	if e.ArtifactType == ArtifactSQLInstance {
+		parts = append(parts, e.Extra["registry_value_data"], e.Extra["instance_id"])
+	}
+	if e.ArtifactType == ArtifactWindowsEventLog && (e.EventType == EventSQLMessage || e.EventType == EventSQLAgentMessage || e.EventType == EventSQLLoginFailed || e.EventType == EventSQLLoginSuccess) {
+		parts = append(parts, e.Extra["sql_record_data"])
 	}
 	sum := sha256.Sum256([]byte(strings.Join(parts, unitSep)))
 	return hex.EncodeToString(sum[:])

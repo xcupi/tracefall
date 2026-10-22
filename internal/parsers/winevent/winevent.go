@@ -61,6 +61,9 @@ func Normalize(ev *model.Event, in Input) bool {
 	}
 	setExtra(ev, "event_provider", in.Provider)
 	setExtra(ev, "event_channel", in.Channel)
+	if handled, mapped := normalizeMSSQLEvent(ev, in); handled {
+		return mapped
+	}
 	if handled, mapped := normalizeServerEvent(ev, in); handled {
 		return mapped
 	}
