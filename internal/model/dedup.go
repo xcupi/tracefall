@@ -102,6 +102,12 @@ func (e Event) ComputeDedupHash() string {
 	if e.ArtifactType == ArtifactJournal {
 		parts = append(parts, e.SourceReference)
 	}
+	// grafana.db keeps whole seconds, so rows of one table tie on type, time,
+	// user and file. The table row ("login_attempt:id=3") is the record's
+	// identity; the same database collected twice yields the same rows.
+	if e.ArtifactType == ArtifactGrafanaDB {
+		parts = append(parts, e.SourceReference)
+	}
 	// Most Extra fields are interpretation or renderer metadata, not identity.
 	// Memory observations are the exception: a PID at snapshot time may own
 	// many regions, services and sockets. Include their explicit object fields
