@@ -44,12 +44,27 @@ func RunFrom(caseID string, src model.EventSource) ([]model.Finding, error) {
 		}
 		findings = append(findings, rule.Evaluate(events)...)
 	}
+	taken := map[string]bool{}
 	for i := range findings {
 		if findings[i].CaseID == "" {
 			findings[i].CaseID = caseID
 		}
 		idParts := append([]string{findings[i].CaseID, findings[i].RuleID}, findings[i].SupportingEvents...)
-		findings[i].ID = model.StableID("finding", idParts...)
+		id := model.StableID("finding", idParts...)
+		// A rule can report several findings over the same events (one request
+		// that resembles two kinds of attack). The identifier is derived from the
+		// case, the rule and the events, so those would share it and the second
+		// could not be stored. The identifier of a finding that is alone stays as
+		// it was, so analyst decisions recorded against it are not orphaned; only
+		// the colliding ones take their title into it.
+		if taken[id] {
+			id = model.StableID("finding", append(idParts, "title:"+findings[i].Title)...)
+			for n := 2; taken[id]; n++ {
+				id = model.StableID("finding", append(idParts, "title:"+findings[i].Title, fmt.Sprint(n))...)
+			}
+		}
+		taken[id] = true
+		findings[i].ID = id
 	}
 	sort.SliceStable(findings, func(i, j int) bool {
 		if !findings[i].FirstSeen.Equal(findings[j].FirstSeen) {

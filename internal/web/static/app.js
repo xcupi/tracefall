@@ -885,6 +885,7 @@ const ARTIFACT_TYPE_LABELS = {
   auth_log: "Authentication log (auth.log)",
   syslog: "System log (syslog)",
   web_access_log: "Web server access log",
+  iis_w3c_log: "IIS web log (W3C)",
   container_json_log: "Container log (Docker json-file)",
   container_config: "Container configuration (Docker)",
   grafana_log: "Grafana log",

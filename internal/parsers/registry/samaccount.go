@@ -152,7 +152,7 @@ func (p Parser) bootKeyBesideSAM(samPath string) sam.BootKeyResult {
 		if statErr != nil || info.Size() < 4096 {
 			continue
 		}
-		sh, oerr := regf.Open(path, p.limits)
+		sh, oerr := regf.OpenReplayed(path, p.limits)
 		if oerr != nil {
 			continue
 		}

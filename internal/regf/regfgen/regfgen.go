@@ -391,3 +391,89 @@ func xor32(b []byte) uint32 {
 	}
 	return sum
 }
+
+// ---------- dirty hives and their transaction logs ----------
+//
+// Test fixtures for the replay of a transaction log. Like everything in this
+// package they exist so tests can build the input a reader must handle; the
+// reader itself never writes a hive.
+
+// WithSequences returns a copy of hive whose base block says that transaction
+// begun was started and transaction finished was completed, with the base block
+// checksum recomputed. begun != finished is a hive that was not cleanly written.
+func WithSequences(hive []byte, begun, finished uint32) []byte {
+	out := append([]byte(nil), hive...)
+	binary.LittleEndian.PutUint32(out[4:8], begun)
+	binary.LittleEndian.PutUint32(out[8:12], finished)
+	binary.LittleEndian.PutUint32(out[508:512], xor32(out[:508]))
+	return out
+}
+
+// NewFormatLog builds a transaction log of the Windows 8.1 and later format that
+// carries, in one entry numbered seq, every 4096-byte page in which truth
+// differs from old. Replayed over old it yields truth. seq is also the sequence
+// the log's base block starts at.
+func NewFormatLog(old, truth []byte, seq uint32) []byte {
+	oldBins, newBins := old[hiveBinsOffset:], truth[hiveBinsOffset:]
+	var offs []int
+	for off := 0; off < len(newBins); off += 4096 {
+		if off+4096 <= len(oldBins) && string(oldBins[off:off+4096]) == string(newBins[off:off+4096]) {
+			continue
+		}
+		offs = append(offs, off)
+	}
+	body := 40 + 8*len(offs) + 4096*len(offs)
+	e := make([]byte, (body+511)&^511)
+	copy(e[0:4], "HvLE")
+	binary.LittleEndian.PutUint32(e[4:8], uint32(len(e)))
+	binary.LittleEndian.PutUint32(e[8:12], 1)
+	binary.LittleEndian.PutUint32(e[12:16], seq)
+	binary.LittleEndian.PutUint32(e[16:20], uint32(len(newBins)))
+	binary.LittleEndian.PutUint32(e[20:24], uint32(len(offs)))
+	pos := 40
+	for _, off := range offs {
+		binary.LittleEndian.PutUint32(e[pos:], uint32(off))
+		binary.LittleEndian.PutUint32(e[pos+4:], 4096)
+		pos += 8
+	}
+	for _, off := range offs {
+		copy(e[pos:], newBins[off:off+4096])
+		pos += 4096
+	}
+	binary.LittleEndian.PutUint64(e[24:32], marvin32(e[40:]))
+	binary.LittleEndian.PutUint64(e[32:40], marvin32(e[0:32]))
+
+	base := make([]byte, 512)
+	copy(base[0:4], "regf")
+	binary.LittleEndian.PutUint32(base[4:8], seq)
+	binary.LittleEndian.PutUint32(base[8:12], seq)
+	binary.LittleEndian.PutUint32(base[20:24], 1)
+	binary.LittleEndian.PutUint32(base[24:28], binary.LittleEndian.Uint32(truth[24:28]))
+	binary.LittleEndian.PutUint32(base[28:32], 6)
+	binary.LittleEndian.PutUint32(base[36:40], binary.LittleEndian.Uint32(truth[36:40]))
+	binary.LittleEndian.PutUint32(base[44:48], 1)
+	binary.LittleEndian.PutUint32(base[508:512], xor32(base[:508]))
+	return append(base, e...)
+}
+
+// marvin32 is the hash that signs log entries (seed 0x82EF4D887A4E55C5). It is
+// written out here again, independently of the reader, so that a fault in one
+// is not hidden by the same fault in the other.
+func marvin32(b []byte) uint64 {
+	lo, hi := uint32(0x7A4E55C5), uint32(0x82EF4D88)
+	rotl := func(x uint32, n uint) uint32 { return x<<n | x>>(32-n) }
+	mix := func(v uint32) {
+		lo += v
+		hi ^= lo
+		lo = rotl(lo, 20) + hi
+		hi = rotl(hi, 9) ^ lo
+		lo = rotl(lo, 27) + hi
+		hi = rotl(hi, 19)
+	}
+	for ; len(b) >= 4; b = b[4:] {
+		mix(binary.LittleEndian.Uint32(b))
+	}
+	mix(0x80)
+	mix(0)
+	return uint64(hi)<<32 | uint64(lo)
+}

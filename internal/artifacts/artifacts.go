@@ -340,11 +340,12 @@ var supportedTypeInfo = map[string]typeInfo{
 	},
 	model.ArtifactRegistryTransactionLog: {
 		label: "Registry transaction log", family: FamilyRegistry, priority: PriorityLow,
-		why: "Records that a hive's .LOG1/.LOG2 companion was collected, which is part of knowing how complete " +
-			"the registry evidence is.",
-		note: "RECOGNIZED, NOT PARSED. A transaction log is a REGF file with no key tree; replaying one into " +
-			"its hive is not something Tracefall does. It is never treated as a hive, and never reported as a " +
-			"broken one.",
+		why: "Holds the registry changes a hive was missing when it was copied while Windows was running, so it decides " +
+			"how complete the registry evidence is.",
+		note: "USED WITH ITS HIVE, NOT PARSED ON ITS OWN. When the hive beside it was not cleanly written, a log of " +
+			"the Windows 8.1 and later format is replayed over the hive in memory, and only if it connects to the " +
+			"hive without a gap; the older format is not replayed. The log produces no events of its own and is " +
+			"never treated as a hive or reported as a broken one. Nothing is written to either file.",
 	},
 	model.ArtifactActivitiesCache: {
 		label: "Windows Timeline (ActivitiesCache)", family: FamilyExecution, priority: PriorityHigh,
@@ -425,6 +426,11 @@ var supportedTypeInfo = map[string]typeInfo{
 	model.ArtifactWebAccessLog: {
 		label: "Web server access log", family: FamilyLog, priority: PriorityHigh,
 		why: "Records every request a web server answered, with the source address, URL, status and client -- the trail of web attacks and web-shell use.",
+	},
+	model.ArtifactIISLog: {
+		label: "IIS web log (W3C)", family: FamilyLog, priority: PriorityHigh,
+		why:  "Records every request IIS answered, with the source address, URL, query, user and status -- the trail of web exploitation and web-shell use on a Windows server.",
+		note: "Only the site logs (u_ex*.log) are read. FTP site logs and HTTP.sys error logs under the same folders are not. Times are UTC. A line shows the status IIS returned, not what the request did on the server.",
 	},
 	model.ArtifactContainerLog: {
 		label: "Container log (Docker json-file)", family: FamilyLog, priority: PriorityHigh,
@@ -933,7 +939,7 @@ var unsupportedRules = []unsupportedRule{
 	{
 		label: "Web server log (IIS / W3C)", family: FamilyLog, priority: PriorityHigh,
 		why:    "Records requests against a hosted service: the primary evidence for web exploitation and webshell activity.",
-		reason: "Tracefall has no web server log parser.",
+		reason: "Tracefall reads IIS site logs (u_ex*.log). This file is another kind of log kept under the same folders (an FTP site log or an HTTP.sys error log) or not an IIS site log, and is not read.",
 		match:  matchWebServerLog,
 	},
 	{

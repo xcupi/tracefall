@@ -113,6 +113,7 @@ what the binary can actually parse:
 | `auth_log` | Authentication log (auth.log) | Log | High | `authlog@1` |
 | `syslog` | System log (syslog) | Log | High | `syslog@1` |
 | `web_access_log` | Web server access log | Log | High | `webaccess@1` |
+| `iis_w3c_log` | IIS web log (W3C) | Log | High | `iislog@1` |
 | `package_log` | Package log (dpkg) | Log | Medium | `packagelog@1` |
 | `network_capture` | Network capture (pcap) | Network | High | `netcapture@1` |
 | `journal` | Systemd journal | Log | Medium | `journal@1` |
@@ -1169,6 +1170,68 @@ generic failures.
 
 ---
 
+## Registry hives copied while Windows was running (transaction logs)
+
+A hive copied from a running system is usually not cleanly written: its base
+block has two different sequence numbers (offsets 4 and 8; the second is the last
+transaction finished, the first the last one begun). The changes it is missing are
+in `HIVE.LOG1` and `HIVE.LOG2` beside it. Without them the registry shown is older
+than the machine was, and a run key or service added in the last minutes before
+collection can be absent.
+
+Tracefall replays those logs in memory (`regf.OpenWithLogs`). No file is written,
+the evidence is read as it is, and the replayed state exists only while the hive
+is read. The logs are found beside the hive whatever the case of their names.
+
+What is replayed: logs of the Windows 8.1 and later format (file type 6, entries
+signed `HvLE`). Every entry is checked before it is used: the two Marvin32
+hashes, a size that is a multiple of 512 inside the file, a hive-bins size that is
+a multiple of 4096, page references wholly inside the entry and the hive, and the
+expected sequence number. The first entry that fails ends the chain; what follows
+is stale remnant of an earlier use of the file, which is normal.
+
+Every record from such a hive carries `hive_state` and `hive_recovery` in
+`Extra`, and the parse coverage carries a note unless the hive was fully
+replayed. A clean hive carries neither.
+
+| `hive_state` | Meaning |
+|---|---|
+| `replayed` | The log chain covers every transaction the primary file had begun. Records reflect the logged state. |
+| `replayed_partial` | Logged changes were applied, but the log ends before the transaction the primary file had begun. Changes of that transaction are not covered. |
+| `not_recoverable` | The hive is dirty and the logs cannot be applied safely. The hive is read as the primary file is, and the registry changes of the gap are missing. |
+| `no_logs` | The hive is dirty and no log was found beside it. |
+
+**Where this is stricter than the reference implementation.** yarp, and probably
+Windows, apply a log whose first entry is newer than the primary file's finished
+transaction even when transactions lie between them. Tracefall does not: a log
+must start at or before the transaction the primary file had begun, and a second
+log must start right after the first one's last entry. On a live collection the
+primary file is often copied earlier than its logs; applying the later pages
+without the transactions in between yields a hive that never existed. The reason
+names the sequence numbers (for example, a primary that finished 586 with a log
+starting at 617).
+
+Validation:
+
+- `NewDirtyHive1` from yarp's test set ships with `RecoveredHive_Windows10`, the
+  hive Windows wrote after recovering the same files. The replayed hive bins data
+  are byte-identical to it (4 entries, both logs), and `NewDirtyHive2` applies
+  only the second log, as the reference does.
+- On a real Windows 10 live collection, DEFAULT (sequence 118 to 124) and SECURITY
+  (to 122) replay to bytes identical to yarp's result. SYSTEM (primary 586, log
+  from 617) and SOFTWARE (primary 1629, logs from 1738) are refused for the gap.
+- The Marvin32 implementation matches yarp's on pinned vectors.
+
+Limits:
+
+- The older log format (file types 1 and 2, with a dirty vector; Windows 8 and
+  earlier) is not replayed. It is named in the reason.
+- A hive whose base block checksum is wrong is not replayed.
+- Only the hive's key tree is replayed; deleted keys and values in slack are not
+  examined here.
+- An entry larger than 128 MiB, a log larger than 256 MiB, or more than 512 MiB of
+  entries is refused.
+
 ## Events with no timestamp
 
 Most artifacts record when something happened. PowerShell console
@@ -1523,6 +1586,43 @@ Limitations:
   other host-less artifacts, and left empty when that is ambiguous.
 - A rule reads every request of a case, so memory grows with the size of the
   logs. The parser limit is 256 MiB per file.
+
+### IIS web log (`iislog@1`)
+
+Parses IIS W3C extended logs. It claims `u_ex*.log`, `u_in*.log` and `u_nc*.log`
+by name, and any file whose `#Fields:` directive names `cs-uri-stem` and
+`sc-status`, so a renamed log is still found while the Windows Firewall log and
+other W3C-format files are not. FTP site logs (`FTPSVC*`) and HTTP.sys error
+logs (`HTTPERR`) share the folder and are not claimed.
+
+One `web_request` event per request line, with the client address (`c-ip`) as
+the network source, `cs-username` as the user and, in `Extra`: `method`, `uri`
+(stem and query, as logged), `uri_stem`, `uri_query`, `status`, `substatus`,
+`win32_status`, `bytes`, `request_bytes`, `time_taken_ms`, `server_ip`,
+`server_port`, `site`, `server_name`, `host_header`, `protocol`, `user_agent`,
+`referrer` and `x_forwarded_for` when the log records it. The columns are named
+by the log's own `#Fields:` line, which may change part-way through a file, so
+nothing depends on column order. The existing rule `web-attack-indicators` reads
+these events with no change.
+
+Limitations:
+
+- A line shows what was asked and the status IIS returned. It does not show what
+  the application did: a 200 on an uploaded script proves the script was served,
+  not what it ran.
+- Times are UTC. Microsoft documents this for the W3C format; a single log file
+  cannot confirm it. A row with no `date` or no `time` column is undated and is
+  never given a date from the header or the file name.
+- The user agent and query are stored as logged. IIS writes a space as `+`, and
+  a literal `+` is not distinguishable, so neither is decoded. The cookie column
+  is not copied into the event (it can hold session tokens); the untouched line
+  is kept as raw evidence.
+- A row that arrives before any `#Fields:` line, a row whose column count
+  disagrees with the line in force, a row cut off while IIS was writing it, and a
+  line longer than 64 KiB are counted in `unparsed_lines` on the first event and
+  never guessed at.
+- Behind a load balancer `c-ip` is the balancer. `x_forwarded_for` is shown when
+  logged but is a header the client controls.
 
 ### Package log (`packagelog@1`)
 

@@ -43,7 +43,7 @@ func (s *Service) readCollectionTimeZone(caseID, collectionID string, collection
 		if !ok {
 			continue
 		}
-		h, err := regf.Open(path, regf.DefaultLimits())
+		h, err := regf.OpenReplayed(path, regf.DefaultLimits())
 		if err != nil {
 			reason = fmt.Sprintf("%s could not be read as a registry hive", sf.Path)
 			continue

@@ -324,6 +324,11 @@ const (
 	// format). Each line is one request the server answered, with the
 	// timestamp and UTC offset the server wrote.
 	ArtifactWebAccessLog = "web_access_log"
+	// ArtifactIISLog is an IIS W3C extended log (u_exYYMMDD.log). Every
+	// timestamp in it is UTC, whatever the server's time zone. A line is one
+	// request IIS answered; it records the status returned, not what the request
+	// did on the server.
+	ArtifactIISLog = "iis_w3c_log"
 	// ArtifactNetworkCapture is a packet capture (pcap or pcapng). Its
 	// events are stamped by the CAPTURING machine's clock, not by any host
 	// that appears in it; the two can differ (see package clockskew).

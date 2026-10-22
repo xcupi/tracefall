@@ -41,6 +41,7 @@ import (
 	filezillaparser "tracefall/internal/parsers/filezilla"
 	"tracefall/internal/parsers/grafanadb"
 	"tracefall/internal/parsers/grafanalogfile"
+	"tracefall/internal/parsers/iislog"
 	imageparser "tracefall/internal/parsers/image"
 	"tracefall/internal/parsers/journal"
 	jumplistparser "tracefall/internal/parsers/jumplist"
@@ -113,6 +114,7 @@ func Registry() []parsers.ArtifactParser {
 		grafanalogfile.New(),
 		grafanadb.New(),
 		webaccess.New(),
+		iislog.New(),
 		// Packet captures: claimed by extension and confirmed by their magic
 		// number, and also found by magic number under any name.
 		netcapture.New(),

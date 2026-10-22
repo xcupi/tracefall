@@ -85,7 +85,7 @@ func (s *Service) prepareBootKey(caseID, collectionID string, collection model.C
 		if !ok {
 			continue
 		}
-		h, oerr := regf.Open(path, regf.DefaultLimits())
+		h, oerr := regf.OpenReplayed(path, regf.DefaultLimits())
 		if oerr != nil {
 			// Not a readable hive. For a file actually named SYSTEM that
 			// is worth reporting: it is the file the analyst believes

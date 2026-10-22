@@ -122,7 +122,7 @@ func (p Parser) Parse(absPath string) (parsers.ParseResult, error) {
 // Every other artifact this parser reads ignores ctx entirely, and the
 // zero context reproduces Parse exactly.
 func (p Parser) ParseWithContext(absPath string, ctx parsers.ParseContext) (parsers.ParseResult, error) {
-	h, err := regf.Open(absPath, p.limits)
+	h, err := regf.OpenReplayed(absPath, p.limits)
 	if err != nil {
 		return parsers.ParseResult{}, fmt.Errorf("registry: %w", err)
 	}
@@ -255,7 +255,38 @@ func (p Parser) ParseWithContext(absPath string, ctx parsers.ParseContext) (pars
 			}
 		}
 	}
+	annotateRecovery(&out, h.Recovery())
 	return out, nil
+}
+
+// annotateRecovery says on every event, and in the parse coverage, what became
+// of a hive that was not cleanly written. A clean hive gets nothing: this is
+// provenance for the exceptions, not noise on every record.
+func annotateRecovery(out *parsers.ParseResult, rec regf.Recovery) {
+	if rec.State == regf.RecoveryClean || rec.State == "" {
+		return
+	}
+	summary := rec.Reason
+	if rec.State == regf.RecoveryReplayed {
+		summary = fmt.Sprintf("the hive was not cleanly written (sequence %d begun, %d finished); %d log entries (sequence %d to %d) from %s were applied in memory, so this record reflects the logged state; no file was changed",
+			rec.PrimarySeq1, rec.PrimarySeq2, rec.Entries, rec.FirstSeq, rec.LastSeq, strings.Join(rec.LogsApplied, " and "))
+	} else if rec.State == regf.RecoveryReplayedPartial {
+		summary = fmt.Sprintf("%d log entries (sequence %d to %d) from %s were applied in memory; %s", rec.Entries, rec.FirstSeq, rec.LastSeq, strings.Join(rec.LogsApplied, " and "), rec.Reason)
+	}
+	summary = truncate(summary, 600)
+	for i := range out.Events {
+		if out.Events[i].Extra == nil {
+			out.Events[i].Extra = map[string]string{}
+		}
+		out.Events[i].Extra["hive_state"] = string(rec.State)
+		out.Events[i].Extra["hive_recovery"] = summary
+	}
+	if rec.State != regf.RecoveryReplayed {
+		if out.Coverage == nil {
+			out.Coverage = &model.ParseCoverage{}
+		}
+		out.Coverage.Notes = append(out.Coverage.Notes, summary)
+	}
 }
 
 // hiveRoot is the registry path prefix a hive's contents live under on a
