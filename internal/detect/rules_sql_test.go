@@ -675,6 +675,12 @@ func TestSQLRules_InputsAreASupersetOfWhatTheyRead(t *testing.T) {
 		model.Event{ID: "x2", CaseID: "case1", EventType: model.EventMSSQLAudit, SourceFileID: "logA"},
 		model.Event{ID: "x3", CaseID: "case1", EventType: "unrelated_event"},
 	)
+	// Login failures that exist only as Server Audit rows or Extended Events.
+	auditBase := time.Date(2026, 3, 1, 9, 0, 0, 0, time.UTC)
+	ev = append(ev, auditBurst("sa", 5, auditBase, "user02", "203.0.113.7", reasonBadPass)...)
+	for i := 0; i < 5; i++ {
+		ev = append(ev, xeError(fmt.Sprintf("sx%d", i), auditBase.Add(time.Duration(i)*time.Second), "18456", failMsg("user03", reasonBadPass, "203.0.113.8")))
+	}
 	src := model.SliceSource(ev)
 	for _, id := range []string{sqlBurstRule, sqlConfigRule, sqlBlockRule, sqlAuditRule} {
 		for _, r := range All() {

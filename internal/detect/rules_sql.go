@@ -70,7 +70,14 @@ func (p sqlPlaced) dated() bool { return !p.ev.Timestamp.IsZero() }
 // file belongs to no shared clock, so it gets a scope of its own.
 func sqlScope(e model.Event) string {
 	if !e.Timestamp.IsZero() {
-		return "dated|" + e.CaseID + "|" + e.Host + "|" + e.Extra["instance"]
+		inst := e.Extra["instance"]
+		if inst == "" {
+			inst = e.Extra["sql_instance"]
+		}
+		// The artifact type keeps text/Application-log, Server Audit and
+		// Extended Events apart: they can record the same attempt, so their
+		// counts must never be added together.
+		return "dated|" + e.CaseID + "|" + e.Host + "|" + inst + "|" + e.ArtifactType
 	}
 	if e.SourceFileID == "" {
 		return "alone|" + e.ID
@@ -207,7 +214,67 @@ type sqlLoginFailureBurst struct{}
 func (sqlLoginFailureBurst) ID() string { return "sql-login-failure-burst" }
 
 func (sqlLoginFailureBurst) Inputs() model.EventFilter {
-	return model.EventFilter{Types: []string{model.EventSQLLoginFailed, model.EventSQLLoginSuccess}}
+	return model.EventFilter{Types: []string{model.EventSQLLoginFailed, model.EventSQLLoginSuccess, model.EventMSSQLAudit, model.EventMSSQLXE}}
+}
+
+const (
+	sqlLoginNone = iota
+	sqlLoginFail
+	sqlLoginOK
+)
+
+// sqlLoginKind says whether an event is a recorded login failure or success, in
+// whichever source form carries it: the text log and Application log (typed
+// events), a Server Audit row (action LGIF / LGIS), or an Extended Events
+// error_reported 18456, whose message is the same "Login failed" line.
+func sqlLoginKind(e model.Event) int {
+	switch e.EventType {
+	case model.EventSQLLoginFailed:
+		return sqlLoginFail
+	case model.EventSQLLoginSuccess:
+		return sqlLoginOK
+	case model.EventMSSQLAudit:
+		switch strings.TrimSpace(e.Extra["sql_action"]) {
+		case "LGIF":
+			return sqlLoginFail
+		case "LGIS":
+			return sqlLoginOK
+		}
+	case model.EventMSSQLXE:
+		if e.Extra["sql_field_event_name"] == "error_reported" && e.Extra["sql_field_error_number"] == "18456" {
+			return sqlLoginFail
+		}
+	}
+	return sqlLoginNone
+}
+
+// sqlSourceName names where a login record came from, for finding text.
+func sqlSourceName(e model.Event) string {
+	switch e.EventType {
+	case model.EventMSSQLAudit:
+		return "Server Audit"
+	case model.EventMSSQLXE:
+		return "Extended Events"
+	}
+	if e.Timestamp.IsZero() {
+		return "SQL Server text log"
+	}
+	return "SQL Server Application log"
+}
+
+var (
+	sqlClientRe   = regexp.MustCompile(`(?i)\[CLIENT:\s*([^\]\s]+)\s*\]`)
+	sqlLoginMsgRe = regexp.MustCompile(`(?i)Login (?:failed|succeeded) for user '((?:[^']|'')*)'`)
+)
+
+// sqlLoginText is the message of a login record, from whichever field holds it.
+func sqlLoginText(e model.Event) string {
+	for _, k := range []string{"sql_statement", "sql_field_message"} {
+		if s := e.Extra[k]; s != "" && sqlLoginMsgRe.MatchString(s) {
+			return s
+		}
+	}
+	return sqlText(e)
 }
 
 var sqlReasonRe = regexp.MustCompile(`(?i)Reason:\s*(.*?)\s*(?:\[CLIENT:|$)`)
@@ -216,18 +283,33 @@ func sqlClient(e model.Event) string {
 	if e.NetworkSource != "" {
 		return e.NetworkSource
 	}
-	return e.Extra["client"]
+	if c := e.Extra["client"]; c != "" {
+		return c
+	}
+	if c := e.Extra["sql_client_ip"]; c != "" {
+		return c
+	}
+	if m := sqlClientRe.FindStringSubmatch(sqlLoginText(e)); m != nil {
+		return m[1]
+	}
+	return ""
 }
 
 func sqlLogin(e model.Event) string {
 	if l := e.Extra["login"]; l != "" {
 		return l
 	}
+	if l := e.Extra["sql_principal"]; l != "" {
+		return l
+	}
+	if m := sqlLoginMsgRe.FindStringSubmatch(sqlLoginText(e)); m != nil {
+		return strings.ReplaceAll(m[1], "''", "'")
+	}
 	return e.User
 }
 
 func sqlReason(e model.Event) string {
-	if m := sqlReasonRe.FindStringSubmatch(sqlText(e)); m != nil {
+	if m := sqlReasonRe.FindStringSubmatch(sqlLoginText(e)); m != nil {
 		if r := strings.TrimRight(strings.TrimSpace(m[1]), "."); r != "" {
 			return r
 		}
@@ -245,10 +327,10 @@ func (r sqlLoginFailureBurst) Evaluate(events []model.Event) []model.Finding {
 			continue
 		}
 		k := key{sqlScope(e), client}
-		switch e.EventType {
-		case model.EventSQLLoginFailed:
+		switch sqlLoginKind(e) {
+		case sqlLoginFail:
 			failures[k] = append(failures[k], sqlPlace(e))
-		case model.EventSQLLoginSuccess:
+		case sqlLoginOK:
 			successes[k] = append(successes[k], sqlPlace(e))
 		}
 	}
@@ -360,13 +442,14 @@ func (r sqlLoginFailureBurst) finding(client string, run []sqlPlaced, successes 
 		supporting = append(supporting, follow.ev)
 	}
 	desc := fmt.Sprintf(
-		"%d failed SQL Server logins from client %s, each within %s of the one before, from %s to %s. "+
+		"%d failed SQL Server logins from client %s, as recorded by the %s, each within %s of the one before, from %s to %s. "+
 			"%d distinct login %s: %s%s. Reasons recorded: %s.%s "+
 			"Limits: these are failed attempts recorded by the engine. The ERRORLOG does not record successful logins by default, "+
 			"so nothing here shows whether a guess later worked. The client address can be a proxy or container gateway, "+
 			"so it may not be the real origin. For logs with no zone, order and distance come from the local reading inside one "+
-			"file only. A person mistyping a password produces a similar shape. This is a lead, not a verdict.",
-		len(run), client, sqlBurstGap, sqlWhen(first), sqlWhen(last),
+			"file only. The text log, Server Audit and Extended Events may also record the same attempts; counts from different sources are never added together, so a second finding for the same client can describe the same attempts. "+
+			"A person mistyping a password produces a similar shape. This is a lead, not a verdict.",
+		len(run), client, sqlSourceName(first.ev), sqlBurstGap, sqlWhen(first), sqlWhen(last),
 		len(names), sqlPlural(len(names), "name", "names"), strings.Join(quoted, ", "), more,
 		strings.Join(parts, "; "), followText)
 	return newFinding(first.ev.CaseID, r.ID(), title, severity, confidence, desc, []string{"T1110"}, supporting)
