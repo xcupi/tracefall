@@ -279,7 +279,7 @@ func (s *vmdkSpec) expected() []byte {
 	return out
 }
 
-func writeTemp(t *testing.T, dir, name string, data []byte) string {
+func vmdkWriteTemp(t *testing.T, dir, name string, data []byte) string {
 	t.Helper()
 	p := filepath.Join(dir, name)
 	if err := os.WriteFile(p, data, 0o644); err != nil {
@@ -327,7 +327,7 @@ func wantErr(t *testing.T, err, target error) {
 func TestVMDK_SparseReadsAllocatedZeroedAndUnallocatedGrains(t *testing.T) {
 	s := multiGTSpec()
 	built := buildSparseVMDK(s)
-	p := writeTemp(t, t.TempDir(), "disk.vmdk", built.b)
+	p := vmdkWriteTemp(t, t.TempDir(), "disk.vmdk", built.b)
 	img := mustOpen(t, p)
 	in := img.Info()
 	if in.Format != FormatVMDK || in.Size != int64(s.capSectors*vsec) || in.SectorSize != 512 || in.Segments != 1 {
@@ -356,7 +356,7 @@ func TestVMDK_SparseReadsAllocatedZeroedAndUnallocatedGrains(t *testing.T) {
 
 func TestVMDK_SparseReadsStraddleGrainsAndHonourEOF(t *testing.T) {
 	s := multiGTSpec()
-	p := writeTemp(t, t.TempDir(), "disk.vmdk", buildSparseVMDK(s).b)
+	p := vmdkWriteTemp(t, t.TempDir(), "disk.vmdk", buildSparseVMDK(s).b)
 	img := mustOpen(t, p)
 	want := s.expected()
 	// straddles grain 5/6/7 (allocated, zeroed, unallocated) and the GT0/GT1 boundary
@@ -395,7 +395,7 @@ func TestVMDK_SparseDirectoryEntryZeroMeansUnallocatedTable(t *testing.T) {
 	if len(built.gtSector) != 1 {
 		t.Fatalf("builder wrote %d tables", len(built.gtSector))
 	}
-	img := mustOpen(t, writeTemp(t, t.TempDir(), "d.vmdk", built.b))
+	img := mustOpen(t, vmdkWriteTemp(t, t.TempDir(), "d.vmdk", built.b))
 	if !bytes.Equal(readAll(t, img), s.expected()) {
 		t.Fatal("bytes differ")
 	}
@@ -406,7 +406,7 @@ func TestVMDK_SparseDirectoryEntryZeroMeansUnallocatedTable(t *testing.T) {
 
 func TestVMDK_SparseLargerGrainSize(t *testing.T) {
 	s := vmdkSpec{capSectors: 4096, grain: 128, grains: map[int][]byte{0: grainData(0, 128), 31: grainData(31, 128)}}
-	img := mustOpen(t, writeTemp(t, t.TempDir(), "d.vmdk", buildSparseVMDK(s).b))
+	img := mustOpen(t, vmdkWriteTemp(t, t.TempDir(), "d.vmdk", buildSparseVMDK(s).b))
 	if !bytes.Equal(readAll(t, img), s.expected()) {
 		t.Fatal("bytes differ")
 	}
@@ -414,7 +414,7 @@ func TestVMDK_SparseLargerGrainSize(t *testing.T) {
 
 func TestVMDK_SparseCapacityNotMultipleOfGrain(t *testing.T) {
 	s := vmdkSpec{capSectors: 20, grains: map[int][]byte{2: grainData(2, 8)}}
-	img := mustOpen(t, writeTemp(t, t.TempDir(), "d.vmdk", buildSparseVMDK(s).b))
+	img := mustOpen(t, vmdkWriteTemp(t, t.TempDir(), "d.vmdk", buildSparseVMDK(s).b))
 	if img.Size() != 20*512 {
 		t.Fatalf("Size = %d", img.Size())
 	}
@@ -429,7 +429,7 @@ func TestVMDK_SparseCapacityNotMultipleOfGrain(t *testing.T) {
 func TestVMDK_SparseUncleanShutdownIsReadAndFlagged(t *testing.T) {
 	s := multiGTSpec()
 	s.unclean = true
-	img := mustOpen(t, writeTemp(t, t.TempDir(), "d.vmdk", buildSparseVMDK(s).b))
+	img := mustOpen(t, vmdkWriteTemp(t, t.TempDir(), "d.vmdk", buildSparseVMDK(s).b))
 	if img.Info().Meta["vmdk_unclean_shutdown"] != "true" {
 		t.Fatalf("Meta = %v", img.Info().Meta)
 	}
@@ -440,7 +440,7 @@ func TestVMDK_SparseUncleanShutdownIsReadAndFlagged(t *testing.T) {
 
 func TestVMDK_ConcurrentReadsAreSafe(t *testing.T) {
 	s := multiGTSpec()
-	img := mustOpen(t, writeTemp(t, t.TempDir(), "d.vmdk", buildSparseVMDK(s).b))
+	img := mustOpen(t, vmdkWriteTemp(t, t.TempDir(), "d.vmdk", buildSparseVMDK(s).b))
 	want := s.expected()
 	var wg sync.WaitGroup
 	errs := make(chan string, 16)
@@ -473,7 +473,7 @@ func TestVMDK_GrainTableCacheIsBounded(t *testing.T) {
 	for tb := 0; tb < tables; tb++ {
 		s.grains[tb*512+7] = grainData(tb, 8)
 	}
-	img := mustOpen(t, writeTemp(t, t.TempDir(), "d.vmdk", buildSparseVMDK(s).b))
+	img := mustOpen(t, vmdkWriteTemp(t, t.TempDir(), "d.vmdk", buildSparseVMDK(s).b))
 	for tb := 0; tb < tables; tb++ {
 		buf := make([]byte, 4096)
 		off := int64(tb*512+7) * 4096
@@ -491,7 +491,7 @@ func TestVMDK_GrainTableCacheIsBounded(t *testing.T) {
 
 func TestVMDK_BadMagicWithKDMVLikeText(t *testing.T) {
 	data := append([]byte("kdmv sparse extent but not really"), make([]byte, 2048)...)
-	p := writeTemp(t, t.TempDir(), "d.vmdk", data)
+	p := vmdkWriteTemp(t, t.TempDir(), "d.vmdk", data)
 	_, err := openVMDK([]string{p})
 	wantErr(t, err, ErrCorrupt)
 }
@@ -522,7 +522,7 @@ func TestVMDK_HeaderValuesAreValidated(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			b := base()
 			c.mut(b)
-			p := writeTemp(t, t.TempDir(), "d.vmdk", b)
+			p := vmdkWriteTemp(t, t.TempDir(), "d.vmdk", b)
 			img, err := Open(p)
 			if err == nil {
 				img.Close()
@@ -537,7 +537,7 @@ func TestVMDK_GrainTableAndGrainPastTheEndAreCorrupt(t *testing.T) {
 	t.Run("directory entry past the end", func(t *testing.T) {
 		built := buildSparseVMDK(s)
 		le32(built.b, built.gdSector*vsec, 0x7fffff00)
-		img := mustOpen(t, writeTemp(t, t.TempDir(), "d.vmdk", built.b))
+		img := mustOpen(t, vmdkWriteTemp(t, t.TempDir(), "d.vmdk", built.b))
 		buf := make([]byte, 4096)
 		_, err := img.ReadAt(buf, 0)
 		wantErr(t, err, ErrCorrupt)
@@ -545,7 +545,7 @@ func TestVMDK_GrainTableAndGrainPastTheEndAreCorrupt(t *testing.T) {
 	t.Run("table entry past the end", func(t *testing.T) {
 		built := buildSparseVMDK(s)
 		le32(built.b, built.gtSector[0]*vsec, 0x7fffff00)
-		img := mustOpen(t, writeTemp(t, t.TempDir(), "d.vmdk", built.b))
+		img := mustOpen(t, vmdkWriteTemp(t, t.TempDir(), "d.vmdk", built.b))
 		buf := make([]byte, 4096)
 		_, err := img.ReadAt(buf, 0)
 		wantErr(t, err, ErrCorrupt)
@@ -553,7 +553,7 @@ func TestVMDK_GrainTableAndGrainPastTheEndAreCorrupt(t *testing.T) {
 	t.Run("grain truncated by the end of the file", func(t *testing.T) {
 		built := buildSparseVMDK(s)
 		le32(built.b, built.gtSector[0]*vsec, uint32(len(built.b)/vsec)-1)
-		img := mustOpen(t, writeTemp(t, t.TempDir(), "d.vmdk", built.b))
+		img := mustOpen(t, vmdkWriteTemp(t, t.TempDir(), "d.vmdk", built.b))
 		buf := make([]byte, 4096)
 		_, err := img.ReadAt(buf, 0)
 		wantErr(t, err, ErrCorrupt)
@@ -561,7 +561,7 @@ func TestVMDK_GrainTableAndGrainPastTheEndAreCorrupt(t *testing.T) {
 	t.Run("table entry 0xFFFFFFFF", func(t *testing.T) {
 		built := buildSparseVMDK(s)
 		le32(built.b, built.gtSector[0]*vsec+4*3, 0xFFFFFFFF) // grain 3
-		img := mustOpen(t, writeTemp(t, t.TempDir(), "d.vmdk", built.b))
+		img := mustOpen(t, vmdkWriteTemp(t, t.TempDir(), "d.vmdk", built.b))
 		_, err := img.ReadAt(make([]byte, 16), 3*4096)
 		wantErr(t, err, ErrCorrupt)
 	})
@@ -584,7 +584,7 @@ func TestVMDK_StreamOptimizedCompressedGrains(t *testing.T) {
 		t.Run(fmt.Sprintf("footer=%v", footer), func(t *testing.T) {
 			s := streamSpec()
 			built := buildStreamVMDK(s, footer)
-			img := mustOpen(t, writeTemp(t, t.TempDir(), "s.vmdk", built.b))
+			img := mustOpen(t, vmdkWriteTemp(t, t.TempDir(), "s.vmdk", built.b))
 			in := img.Info()
 			if in.Format != FormatVMDK || in.Size != 4800*512 || in.Meta["vmdk_create_type"] != "streamOptimized" {
 				t.Fatalf("Info = %+v", in)
@@ -607,7 +607,7 @@ func TestVMDK_StreamOptimizedDamageIsCorrupt(t *testing.T) {
 	t.Run("decompressed length differs from the grain size", func(t *testing.T) {
 		s := streamSpec()
 		s.shortLen = map[int]int{5: 1000}
-		img := mustOpen(t, writeTemp(t, t.TempDir(), "s.vmdk", buildStreamVMDK(s, true).b))
+		img := mustOpen(t, vmdkWriteTemp(t, t.TempDir(), "s.vmdk", buildStreamVMDK(s, true).b))
 		_, err := img.ReadAt(make([]byte, 4096), 5*4096)
 		wantErr(t, err, ErrCorrupt)
 	})
@@ -615,7 +615,7 @@ func TestVMDK_StreamOptimizedDamageIsCorrupt(t *testing.T) {
 		s := streamSpec()
 		built := buildStreamVMDK(s, true)
 		le64(built.b, built.grainSector[5]*vsec, 9*8)
-		img := mustOpen(t, writeTemp(t, t.TempDir(), "s.vmdk", built.b))
+		img := mustOpen(t, vmdkWriteTemp(t, t.TempDir(), "s.vmdk", built.b))
 		_, err := img.ReadAt(make([]byte, 4096), 5*4096)
 		wantErr(t, err, ErrCorrupt)
 	})
@@ -623,7 +623,7 @@ func TestVMDK_StreamOptimizedDamageIsCorrupt(t *testing.T) {
 		s := streamSpec()
 		built := buildStreamVMDK(s, true)
 		le32(built.b, built.grainSector[5]*vsec+8, 0x40000000)
-		img := mustOpen(t, writeTemp(t, t.TempDir(), "s.vmdk", built.b))
+		img := mustOpen(t, vmdkWriteTemp(t, t.TempDir(), "s.vmdk", built.b))
 		_, err := img.ReadAt(make([]byte, 4096), 5*4096)
 		wantErr(t, err, ErrCorrupt)
 	})
@@ -633,7 +633,7 @@ func TestVMDK_StreamOptimizedDamageIsCorrupt(t *testing.T) {
 		for i := 0; i < 40; i++ {
 			built.b[built.grainSector[5]*vsec+14+i] ^= 0x5a
 		}
-		img := mustOpen(t, writeTemp(t, t.TempDir(), "s.vmdk", built.b))
+		img := mustOpen(t, vmdkWriteTemp(t, t.TempDir(), "s.vmdk", built.b))
 		_, err := img.ReadAt(make([]byte, 4096), 5*4096)
 		wantErr(t, err, ErrCorrupt)
 	})
@@ -641,7 +641,7 @@ func TestVMDK_StreamOptimizedDamageIsCorrupt(t *testing.T) {
 		s := streamSpec()
 		built := buildStreamVMDK(s, true)
 		le32(built.b, built.gtSector[0]*vsec+4*5, uint32(built.gtSector[0]-1)) // the GT marker sector
-		img := mustOpen(t, writeTemp(t, t.TempDir(), "s.vmdk", built.b))
+		img := mustOpen(t, vmdkWriteTemp(t, t.TempDir(), "s.vmdk", built.b))
 		_, err := img.ReadAt(make([]byte, 4096), 5*4096)
 		wantErr(t, err, ErrCorrupt)
 	})
@@ -649,7 +649,7 @@ func TestVMDK_StreamOptimizedDamageIsCorrupt(t *testing.T) {
 		s := streamSpec()
 		built := buildStreamVMDK(s, true)
 		b := built.b[:len(built.b)-1024] // drop footer header + end-of-stream
-		img, err := Open(writeTemp(t, t.TempDir(), "s.vmdk", b))
+		img, err := Open(vmdkWriteTemp(t, t.TempDir(), "s.vmdk", b))
 		if err == nil {
 			img.Close()
 		}
@@ -659,7 +659,7 @@ func TestVMDK_StreamOptimizedDamageIsCorrupt(t *testing.T) {
 		s := streamSpec()
 		built := buildStreamVMDK(s, true)
 		le64(built.b, len(built.b)-1024+12, 9999*8) // footer capacity
-		img, err := Open(writeTemp(t, t.TempDir(), "s.vmdk", built.b))
+		img, err := Open(vmdkWriteTemp(t, t.TempDir(), "s.vmdk", built.b))
 		if err == nil {
 			img.Close()
 		}
@@ -674,11 +674,11 @@ func flatExtentDisk(t *testing.T, dir string) (descPath string, want []byte) {
 	a := bytes.Repeat([]byte("A"), 8*vsec)
 	b := make([]byte, 16*vsec)
 	rand.New(rand.NewSource(7)).Read(b)
-	writeTemp(t, dir, "d-f001.vmdk", a)
-	writeTemp(t, dir, "d-f002.vmdk", b)
+	vmdkWriteTemp(t, dir, "d-f001.vmdk", a)
+	vmdkWriteTemp(t, dir, "d-f002.vmdk", b)
 	desc := descText("twoGbMaxExtentFlat", "ffffffff",
 		[]string{`RW 8 FLAT "d-f001.vmdk" 0`, `RW 16 FLAT "d-f002.vmdk" 0`}, stdDDB...)
-	return writeTemp(t, dir, "d.vmdk", []byte(desc)), append(append([]byte{}, a...), b...)
+	return vmdkWriteTemp(t, dir, "d.vmdk", []byte(desc)), append(append([]byte{}, a...), b...)
 }
 
 func TestVMDK_FlatDescriptorConcatenatesExtents(t *testing.T) {
@@ -710,9 +710,9 @@ func TestVMDK_FlatExtentOffsetIsInSectors(t *testing.T) {
 	dir := t.TempDir()
 	raw := make([]byte, 20*vsec)
 	rand.New(rand.NewSource(3)).Read(raw)
-	writeTemp(t, dir, "x-flat.vmdk", raw)
+	vmdkWriteTemp(t, dir, "x-flat.vmdk", raw)
 	desc := descText("monolithicFlat", "ffffffff", []string{`RW 12 FLAT "x-flat.vmdk" 5`})
-	img := mustOpen(t, writeTemp(t, dir, "x.vmdk", []byte(desc)))
+	img := mustOpen(t, vmdkWriteTemp(t, dir, "x.vmdk", []byte(desc)))
 	if !bytes.Equal(readAll(t, img), raw[5*vsec:17*vsec]) {
 		t.Fatal("offset not applied")
 	}
@@ -720,13 +720,13 @@ func TestVMDK_FlatExtentOffsetIsInSectors(t *testing.T) {
 
 func TestVMDK_FlatExtentShorterThanDeclaredIsCorrupt(t *testing.T) {
 	dir := t.TempDir()
-	writeTemp(t, dir, "x-flat.vmdk", make([]byte, 5*vsec))
+	vmdkWriteTemp(t, dir, "x-flat.vmdk", make([]byte, 5*vsec))
 	desc := descText("monolithicFlat", "ffffffff", []string{`RW 8 FLAT "x-flat.vmdk" 0`})
-	_, err := Open(writeTemp(t, dir, "x.vmdk", []byte(desc)))
+	_, err := Open(vmdkWriteTemp(t, dir, "x.vmdk", []byte(desc)))
 	wantErr(t, err, ErrCorrupt)
 	// offset + size beyond the file
 	desc = descText("monolithicFlat", "ffffffff", []string{`RW 4 FLAT "x-flat.vmdk" 3`})
-	_, err = Open(writeTemp(t, dir, "y.vmdk", []byte(desc)))
+	_, err = Open(vmdkWriteTemp(t, dir, "y.vmdk", []byte(desc)))
 	wantErr(t, err, ErrCorrupt)
 }
 
@@ -734,12 +734,12 @@ func TestVMDK_SplitSparseExtentsConcatenate(t *testing.T) {
 	dir := t.TempDir()
 	s1 := vmdkSpec{capSectors: 64, grains: map[int][]byte{0: grainData(1, 8), 7: grainData(2, 8)}}
 	s2 := vmdkSpec{capSectors: 32, grains: map[int][]byte{1: grainData(3, 8)}}
-	writeTemp(t, dir, "d-s001.vmdk", buildSparseVMDK(s1).b)
-	writeTemp(t, dir, "d-s002.vmdk", buildSparseVMDK(s2).b)
+	vmdkWriteTemp(t, dir, "d-s001.vmdk", buildSparseVMDK(s1).b)
+	vmdkWriteTemp(t, dir, "d-s002.vmdk", buildSparseVMDK(s2).b)
 	desc := descText("twoGbMaxExtentSparse", "ffffffff",
 		[]string{`RW 64 SPARSE "d-s001.vmdk"`, `RW 32 SPARSE "d-s002.vmdk"`}, stdDDB...)
 	want := append(s1.expected(), s2.expected()...)
-	img := mustOpen(t, writeTemp(t, dir, "d.vmdk", []byte(desc)))
+	img := mustOpen(t, vmdkWriteTemp(t, dir, "d.vmdk", []byte(desc)))
 	if img.Info().Segments != 2 || img.Size() != 96*512 {
 		t.Fatalf("Info = %+v", img.Info())
 	}
@@ -755,30 +755,30 @@ func TestVMDK_SplitSparseExtentsConcatenate(t *testing.T) {
 
 func TestVMDK_SplitSparseDeclaredSizeMustMatchExtentHeader(t *testing.T) {
 	dir := t.TempDir()
-	writeTemp(t, dir, "d-s001.vmdk", buildSparseVMDK(vmdkSpec{capSectors: 64}).b)
+	vmdkWriteTemp(t, dir, "d-s001.vmdk", buildSparseVMDK(vmdkSpec{capSectors: 64}).b)
 	desc := descText("twoGbMaxExtentSparse", "ffffffff", []string{`RW 80 SPARSE "d-s001.vmdk"`})
-	_, err := Open(writeTemp(t, dir, "d.vmdk", []byte(desc)))
+	_, err := Open(vmdkWriteTemp(t, dir, "d.vmdk", []byte(desc)))
 	wantErr(t, err, ErrCorrupt)
 }
 
 func TestVMDK_SparseExtentNamedByDescriptorMustBeSparse(t *testing.T) {
 	dir := t.TempDir()
-	writeTemp(t, dir, "d-s001.vmdk", make([]byte, 64*512))
+	vmdkWriteTemp(t, dir, "d-s001.vmdk", make([]byte, 64*512))
 	desc := descText("twoGbMaxExtentSparse", "ffffffff", []string{`RW 64 SPARSE "d-s001.vmdk"`})
-	_, err := Open(writeTemp(t, dir, "d.vmdk", []byte(desc)))
+	_, err := Open(vmdkWriteTemp(t, dir, "d.vmdk", []byte(desc)))
 	wantErr(t, err, ErrCorrupt)
 }
 
 func TestVMDK_MissingExtentFileReportsNotExist(t *testing.T) {
 	dir := t.TempDir()
 	desc := descText("monolithicFlat", "ffffffff", []string{`RW 8 FLAT "gone.vmdk" 0`})
-	_, err := Open(writeTemp(t, dir, "x.vmdk", []byte(desc)))
+	_, err := Open(vmdkWriteTemp(t, dir, "x.vmdk", []byte(desc)))
 	wantErr(t, err, os.ErrNotExist)
 }
 
 func TestVMDK_DescriptorEdgeCases(t *testing.T) {
 	dir := t.TempDir()
-	writeTemp(t, dir, "x-flat.vmdk", make([]byte, 16*vsec))
+	vmdkWriteTemp(t, dir, "x-flat.vmdk", make([]byte, 16*vsec))
 	ok := func(createType, parent string, ext ...string) string {
 		return descText(createType, parent, ext)
 	}
@@ -805,7 +805,7 @@ func TestVMDK_DescriptorEdgeCases(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			p := writeTemp(t, dir, "case.vmdk", []byte(c.text))
+			p := vmdkWriteTemp(t, dir, "case.vmdk", []byte(c.text))
 			img, err := Open(p)
 			if err == nil {
 				img.Close()
@@ -814,14 +814,14 @@ func TestVMDK_DescriptorEdgeCases(t *testing.T) {
 		})
 	}
 	t.Run("child message says snapshot chains are not followed", func(t *testing.T) {
-		p := writeTemp(t, dir, "child.vmdk", []byte(ok("monolithicFlat", "deadbeef", `RW 8 FLAT "x-flat.vmdk" 0`)))
+		p := vmdkWriteTemp(t, dir, "child.vmdk", []byte(ok("monolithicFlat", "deadbeef", `RW 8 FLAT "x-flat.vmdk" 0`)))
 		_, err := Open(p)
 		if err == nil || !strings.Contains(err.Error(), "snapshot chains are not followed") || !strings.Contains(err.Error(), "deadbeef") {
 			t.Fatalf("message = %v", err)
 		}
 	})
 	t.Run("type message names the kind", func(t *testing.T) {
-		p := writeTemp(t, dir, "se.vmdk", []byte(ok("seSparse", "ffffffff", `RW 8 SESPARSE "x-flat.vmdk"`)))
+		p := vmdkWriteTemp(t, dir, "se.vmdk", []byte(ok("seSparse", "ffffffff", `RW 8 SESPARSE "x-flat.vmdk"`)))
 		_, err := Open(p)
 		if err == nil || !strings.Contains(err.Error(), "seSparse") {
 			t.Fatalf("message = %v", err)
@@ -829,14 +829,14 @@ func TestVMDK_DescriptorEdgeCases(t *testing.T) {
 	})
 	t.Run("NUL padded descriptor file", func(t *testing.T) {
 		txt := ok("monolithicFlat", "ffffffff", `RW 8 FLAT "x-flat.vmdk" 0`)
-		p := writeTemp(t, dir, "padded.vmdk", append([]byte(txt), make([]byte, 400)...))
+		p := vmdkWriteTemp(t, dir, "padded.vmdk", append([]byte(txt), make([]byte, 400)...))
 		if img := mustOpen(t, p); img.Size() != 8*512 {
 			t.Fatalf("Size = %d", img.Size())
 		}
 	})
 	t.Run("oversized descriptor file", func(t *testing.T) {
 		txt := ok("monolithicFlat", "ffffffff", `RW 8 FLAT "x-flat.vmdk" 0`) + strings.Repeat("# filler line to make the descriptor huge\n", 60000)
-		p := writeTemp(t, dir, "huge.vmdk", []byte(txt))
+		p := vmdkWriteTemp(t, dir, "huge.vmdk", []byte(txt))
 		_, err := Open(p)
 		wantErr(t, err, ErrCorrupt)
 	})
@@ -846,25 +846,25 @@ func TestVMDK_EmbeddedDescriptorChecks(t *testing.T) {
 	t.Run("child disk", func(t *testing.T) {
 		s := multiGTSpec()
 		s.desc = descText("monolithicSparse", "deadbeef", []string{`RW 4800 SPARSE "disk.vmdk"`})
-		_, err := Open(writeTemp(t, t.TempDir(), "d.vmdk", buildSparseVMDK(s).b))
+		_, err := Open(vmdkWriteTemp(t, t.TempDir(), "d.vmdk", buildSparseVMDK(s).b))
 		wantErr(t, err, ErrUnsupported)
 	})
 	t.Run("sector count differs from the header", func(t *testing.T) {
 		s := multiGTSpec()
 		s.desc = descText("monolithicSparse", "ffffffff", []string{`RW 4000 SPARSE "disk.vmdk"`})
-		_, err := Open(writeTemp(t, t.TempDir(), "d.vmdk", buildSparseVMDK(s).b))
+		_, err := Open(vmdkWriteTemp(t, t.TempDir(), "d.vmdk", buildSparseVMDK(s).b))
 		wantErr(t, err, ErrCorrupt)
 	})
 	t.Run("flat create type inside a sparse file", func(t *testing.T) {
 		s := multiGTSpec()
 		s.desc = descText("monolithicFlat", "ffffffff", []string{`RW 4800 FLAT "disk.vmdk" 0`})
-		_, err := Open(writeTemp(t, t.TempDir(), "d.vmdk", buildSparseVMDK(s).b))
+		_, err := Open(vmdkWriteTemp(t, t.TempDir(), "d.vmdk", buildSparseVMDK(s).b))
 		wantErr(t, err, ErrCorrupt)
 	})
 	t.Run("seSparse in a sparse file", func(t *testing.T) {
 		s := multiGTSpec()
 		s.desc = descText("seSparse", "ffffffff", []string{`RW 4800 SESPARSE "disk.vmdk"`})
-		_, err := Open(writeTemp(t, t.TempDir(), "d.vmdk", buildSparseVMDK(s).b))
+		_, err := Open(vmdkWriteTemp(t, t.TempDir(), "d.vmdk", buildSparseVMDK(s).b))
 		wantErr(t, err, ErrUnsupported)
 	})
 }
@@ -882,8 +882,8 @@ func TestVMDK_ExtentNamesNeverLeaveTheDescriptorDirectory(t *testing.T) {
 	}
 	// A valid, big-enough flat file outside the directory: if the reader ever
 	// opens it, Open succeeds and the test fails.
-	canary := writeTemp(t, root, "outside.vmdk", bytes.Repeat([]byte("SECRET"), 4096))
-	writeTemp(t, dir, "sub/inner.vmdk", bytes.Repeat([]byte("X"), 8192))
+	canary := vmdkWriteTemp(t, root, "outside.vmdk", bytes.Repeat([]byte("SECRET"), 4096))
+	vmdkWriteTemp(t, dir, "sub/inner.vmdk", bytes.Repeat([]byte("X"), 8192))
 	if err := os.Symlink(canary, filepath.Join(dir, "link.vmdk")); err != nil {
 		t.Skipf("symlinks unavailable: %v", err)
 	}
@@ -919,7 +919,7 @@ func TestVMDK_ExtentNamesNeverLeaveTheDescriptorDirectory(t *testing.T) {
 					ct = "twoGbMaxExtentSparse"
 					ext = fmt.Sprintf(`RW 8 SPARSE "%s"`, name)
 				}
-				p := writeTemp(t, dir, "desc.vmdk", []byte(descText(ct, "ffffffff", []string{ext})))
+				p := vmdkWriteTemp(t, dir, "desc.vmdk", []byte(descText(ct, "ffffffff", []string{ext})))
 				img, err := Open(p)
 				if err == nil {
 					img.Close()
@@ -929,11 +929,11 @@ func TestVMDK_ExtentNamesNeverLeaveTheDescriptorDirectory(t *testing.T) {
 		}
 	}
 	t.Run("symlink to a file inside the directory is fine", func(t *testing.T) {
-		writeTemp(t, dir, "real-flat.vmdk", bytes.Repeat([]byte("Z"), 8*vsec))
+		vmdkWriteTemp(t, dir, "real-flat.vmdk", bytes.Repeat([]byte("Z"), 8*vsec))
 		if err := os.Symlink("real-flat.vmdk", filepath.Join(dir, "ok-link.vmdk")); err != nil {
 			t.Fatal(err)
 		}
-		p := writeTemp(t, dir, "ok.vmdk", []byte(descText("monolithicFlat", "ffffffff", []string{`RW 8 FLAT "ok-link.vmdk" 0`})))
+		p := vmdkWriteTemp(t, dir, "ok.vmdk", []byte(descText("monolithicFlat", "ffffffff", []string{`RW 8 FLAT "ok-link.vmdk" 0`})))
 		img := mustOpen(t, p)
 		if !bytes.Equal(readAll(t, img), bytes.Repeat([]byte("Z"), 8*vsec)) {
 			t.Fatal("bytes differ")
@@ -944,7 +944,7 @@ func TestVMDK_ExtentNamesNeverLeaveTheDescriptorDirectory(t *testing.T) {
 		if err := mkfifo(fifo); err != nil {
 			t.Skipf("no fifo: %v", err)
 		}
-		p := writeTemp(t, dir, "fifo.vmdk", []byte(descText("monolithicFlat", "ffffffff", []string{`RW 8 FLAT "pipe.vmdk" 0`})))
+		p := vmdkWriteTemp(t, dir, "fifo.vmdk", []byte(descText("monolithicFlat", "ffffffff", []string{`RW 8 FLAT "pipe.vmdk" 0`})))
 		done := make(chan error, 1)
 		go func() {
 			img, err := Open(p)
@@ -964,8 +964,8 @@ func TestVMDK_ExtentNamesNeverLeaveTheDescriptorDirectory(t *testing.T) {
 
 func TestVMDK_ExplicitSparsePathsMustBeSparseExtents(t *testing.T) {
 	dir := t.TempDir()
-	a := writeTemp(t, dir, "a.vmdk", buildSparseVMDK(vmdkSpec{capSectors: 64}).b)
-	b := writeTemp(t, dir, "b.vmdk", make([]byte, 4096))
+	a := vmdkWriteTemp(t, dir, "a.vmdk", buildSparseVMDK(vmdkSpec{capSectors: 64}).b)
+	b := vmdkWriteTemp(t, dir, "b.vmdk", make([]byte, 4096))
 	_, err := Open(a, b)
 	wantErr(t, err, ErrCorrupt)
 }
@@ -1012,7 +1012,7 @@ func TestVMDK_RandomCorruptionNeverPanics(t *testing.T) {
 				if r.Intn(10) == 0 {
 					b = b[:r.Intn(len(b))]
 				}
-				p := writeTemp(t, dir, "f.vmdk", b)
+				p := vmdkWriteTemp(t, dir, "f.vmdk", b)
 				func() {
 					defer func() {
 						if x := recover(); x != nil {

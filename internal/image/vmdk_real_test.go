@@ -19,8 +19,8 @@ import (
 // extent), split.vmdk (+ its split extents). The disk is 64 MiB with an MBR and
 // one NTFS partition.
 const (
-	realVDiskSHA256 = "3c6effa084abefa66a8bd1721061616f5422c2d18bedc5330685c70fb32a2c0e"
-	realVDiskSize   = 67108864
+	vmdkRealSHA256 = "3c6effa084abefa66a8bd1721061616f5422c2d18bedc5330685c70fb32a2c0e"
+	realVDiskSize  = 67108864
 )
 
 func TestVMDK_RealQemuWrittenDisks(t *testing.T) {
@@ -32,7 +32,7 @@ func TestVMDK_RealQemuWrittenDisks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if sum := sha256.Sum256(raw); hex.EncodeToString(sum[:]) != realVDiskSHA256 || len(raw) != realVDiskSize {
+	if sum := sha256.Sum256(raw); hex.EncodeToString(sum[:]) != vmdkRealSHA256 || len(raw) != realVDiskSize {
 		t.Fatalf("disk.raw is not the expected source (sha256 %x, %d bytes)", sum, len(raw))
 	}
 	cases := map[string][]string{
@@ -74,8 +74,8 @@ func TestVMDK_RealQemuWrittenDisks(t *testing.T) {
 			}
 			got := hex.EncodeToString(h.Sum(nil))
 			t.Logf("sha256 of decoded stream = %s", got)
-			if got != realVDiskSHA256 {
-				t.Fatalf("sha256 = %s, want %s", got, realVDiskSHA256)
+			if got != vmdkRealSHA256 {
+				t.Fatalf("sha256 = %s, want %s", got, vmdkRealSHA256)
 			}
 
 			tb, err := partition.Read(img, img.Size(), 512)
