@@ -35,9 +35,12 @@ import (
 	browsercacheparser "tracefall/internal/parsers/browsercache"
 	browsercacheindexparser "tracefall/internal/parsers/browsercacheindex"
 	"tracefall/internal/parsers/browserhistory"
+	"tracefall/internal/parsers/dockercontainer"
 	evtxnative "tracefall/internal/parsers/evtx"
 	"tracefall/internal/parsers/evtxcsv"
 	filezillaparser "tracefall/internal/parsers/filezilla"
+	"tracefall/internal/parsers/grafanadb"
+	"tracefall/internal/parsers/grafanalogfile"
 	imageparser "tracefall/internal/parsers/image"
 	"tracefall/internal/parsers/journal"
 	jumplistparser "tracefall/internal/parsers/jumplist"
@@ -103,6 +106,12 @@ func Registry() []parsers.ArtifactParser {
 		// Explicit XE/Audit exports and optional fail-closed offline binary reader.
 		mssqlxe.New(), mssqlxe.NewAudit(),
 		packagelog.New(),
+		// Container engine files and Grafana. All are claimed by name (the
+		// Grafana log also by its first line); grafana.db is named, so it is
+		// ordered before the content-driven SQLite parsers.
+		dockercontainer.New(),
+		grafanalogfile.New(),
+		grafanadb.New(),
 		webaccess.New(),
 		// Packet captures: claimed by extension and confirmed by their magic
 		// number, and also found by magic number under any name.

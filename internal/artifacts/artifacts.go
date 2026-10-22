@@ -426,6 +426,26 @@ var supportedTypeInfo = map[string]typeInfo{
 		label: "Web server access log", family: FamilyLog, priority: PriorityHigh,
 		why: "Records every request a web server answered, with the source address, URL, status and client -- the trail of web attacks and web-shell use.",
 	},
+	model.ArtifactContainerLog: {
+		label: "Container log (Docker json-file)", family: FamilyLog, priority: PriorityHigh,
+		why:  "Records what the application inside a container wrote to stdout and stderr, with the engine's own UTC time. Without this, activity in a container is invisible to the host logs.",
+		note: "Only the json-file log driver is read. Only what the container printed is here; a process that wrote nowhere the engine captured leaves nothing. Windows-container paths are built from the documented format and not verified.",
+	},
+	model.ArtifactContainerConfig: {
+		label: "Container configuration (Docker)", family: FamilyLog, priority: PriorityHigh,
+		why:  "Records the image, command, mounts, published ports and the privileges a container was started with: what could reach the host, and what secrets sit in its environment (names only).",
+		note: "A snapshot of configuration, not of what ran. Environment values are never shown.",
+	},
+	model.ArtifactGrafanaLog: {
+		label: "Grafana log", family: FamilyLog, priority: PriorityHigh,
+		why:  "Records the requests Grafana chose to log, with status and client address: login failures, probing and API use against the dashboard.",
+		note: "The default log is thin: a failed login is an anonymous 401 and does not name the account tried, and many successful actions are not logged at all.",
+	},
+	model.ArtifactGrafanaDB: {
+		label: "Grafana database", family: FamilyLog, priority: PriorityHigh,
+		why:  "Holds the users, service-account tokens, data sources (with stored credentials, never shown) and recent login attempts: the durable record when the log is thin.",
+		note: "Shows what Grafana stored, not who caused it. Login attempts cover only existing accounts and are pruned. Secrets are never read.",
+	},
 	model.ArtifactPackageLog: {
 		label: "Package log (dpkg)", family: FamilyLog, priority: PriorityMedium,
 		why: "Records which packages were installed, upgraded or removed, which dates a tool or service arriving on a host.",
