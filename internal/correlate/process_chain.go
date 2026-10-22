@@ -135,6 +135,9 @@ func BuildProcessChains(caseID string, events []model.Event) []model.Correlation
 			return s
 		}
 		desc := fmt.Sprintf("Recorded parent identity links %s to %s on host %s; the parent creation precedes the child and is compatible with available lifetime records. This is a recorded lineage, not proof of intent.", label(parent), label(child), child.Host)
+		if strong && parent.Extra["exit_time"] == "" {
+			desc += " The parent's exit is not recorded, so reuse of its PID by another process of the same name between the recorded creation and the child cannot be excluded."
+		}
 		if !strong {
 			title = "Hypothetical: " + title
 			desc = fmt.Sprintf("Hypothetical parent-name relationship: %s and %s on host %s have compatible names and ordered timestamps. Missing process or acquisition identity prevents attribution to a particular parent instance; causation is not established.", parent.ProcessName, child.ProcessName, child.Host)
