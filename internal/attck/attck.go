@@ -46,6 +46,26 @@ var registry = map[string]Technique{
 		Tactic: "Credential Access",
 		URL:    "https://attack.mitre.org/techniques/T1110/",
 	},
+	"T1562": {
+		ID: "T1562", Name: "Impair Defenses",
+		Tactic: "Defense Evasion",
+		URL:    "https://attack.mitre.org/techniques/T1562/",
+	},
+	"T1552": {
+		ID: "T1552", Name: "Unsecured Credentials",
+		Tactic: "Credential Access",
+		URL:    "https://attack.mitre.org/techniques/T1552/",
+	},
+	"T1611": {
+		ID: "T1611", Name: "Escape to Host",
+		Tactic: "Privilege Escalation",
+		URL:    "https://attack.mitre.org/techniques/T1611/",
+	},
+	"T1136": {
+		ID: "T1136", Name: "Create Account",
+		Tactic: "Persistence",
+		URL:    "https://attack.mitre.org/techniques/T1136/",
+	},
 	"T1566.001": {
 		ID: "T1566.001", Name: "Phishing: Spearphishing Attachment",
 		Tactic: "Initial Access",

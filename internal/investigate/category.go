@@ -44,6 +44,8 @@ var ruleFacets = map[string]facet{
 	"network-after-execution":          facetExecution | facetNetwork,
 	"remote-logon-observed":            facetCredential,
 	"sql-login-failure-burst":          facetCredential,
+	"grafana-login-failure-burst":      facetCredential,
+	"grafana-datasource-credential":    facetCredential,
 }
 
 // facetsFor unions the facets of every rule ID present in ruleIDs.
