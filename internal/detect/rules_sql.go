@@ -732,12 +732,12 @@ func (r sqlAuditStoppedWhileRunning) commands(events []model.Event) []model.Find
 		}
 		title := "SQL Server audit turned off or removed by a recorded statement"
 		desc := fmt.Sprintf(
-			"On host %s, a Server Audit row (%s) at %s records a statement to %s, issued by %s%s. "+
+			"On host %s, a Server Audit row at %s records a statement to %s, issued by %s%s. "+
 				"Auditing that was recording until then stops recording what follows. The statement is a deliberate act, so unlike a "+
 				"shutdown message it does not need later activity to stand out. The record does not show why: audits are also "+
 				"turned off for maintenance, and another audit may still be running. It does not show whether auditing was started "+
 				"again, and the statement text stays in the raw evidence. Treat it as a lead to check against change records.",
-			orDash(p.ev.Host), sqlSourceName(p.ev), sqlWhen(p), verb, who, from)
+			orDash(p.ev.Host), sqlWhen(p), verb, who, from)
 		out = append(out, newFinding(p.ev.CaseID, r.ID(), title, model.SeverityMedium, model.ConfidenceMedium, desc,
 			[]string{"T1562"}, []model.Event{p.ev}))
 	}
