@@ -322,3 +322,23 @@ hash are proven; that they were saved or run is not.
    test for the exact IDs you expect).
 6. Add a test in `internal/detect/rules_test.go` covering both the
    trigger case and at least one case that must *not* fire.
+
+## SQL Server rules (`internal/detect/rules_sql.go`)
+
+These read the SQL events produced from ERRORLOG, SQL Agent, the Application log
+and exported Audit/XE evidence. ERRORLOG text has no zone, so its events are
+undated: ordering and distances come from the local reading inside ONE source
+file, and a finding never prints an undated time as UTC. Dated events (Application
+log) are scoped by case, host and instance.
+
+| Rule | Severity / confidence | What it says, and what it does not |
+|---|---|---|
+| `sql-login-failure-burst` | medium; high severity when a success from the same client follows; confidence high with 2+ distinct logins | At least 5 failed logins from one client, each within 2 minutes of the previous. The engine log does not record successful logins by default, so it cannot show whether a guess worked. The client can be a proxy. |
+| `sql-risky-config-enabled` | medium (xp_cmdshell, Ole Automation Procedures, external scripts, Ad Hoc Distributed Queries) or low | A recorded change that enables a risky option. Not who made it, not whether it was used. `show advanced options` and `Agent XPs` are routine and never fire. |
+| `sql-disabled-component-attempt` | low / medium | A use of a disabled component was attempted and blocked. Blocked means it did not run. |
+| `sql-audit-stopped-while-running` | low / low | An audit stopped and the log continues afterwards. A normal shutdown also stops audits, so shutdown messages do not count. |
+
+Not covered: events typed `mssql_audit_event` / `mssql_xe_event` are not read by
+these rules yet, so a successful login that exists only in an Audit export does
+not raise the burst rule. Validation against engine-produced evidence is in
+[validation-sql-server.md](validation-sql-server.md).
