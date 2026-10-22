@@ -128,9 +128,17 @@ func (l Limits) withDefaults() Limits {
 
 // Hive is an open, read-only registry hive.
 type Hive struct {
-	f    *os.File
-	size int64
-	lim  Limits
+	// r is where cells are read from: the primary file itself, or that file
+	// with the dirty pages of a transaction log laid over it in memory. closer
+	// closes the one file handle; nothing is ever written.
+	r      io.ReaderAt
+	closer io.Closer
+	size   int64
+	lim    Limits
+
+	seq1, seq2   uint32
+	baseChecksum bool
+	recovery     Recovery
 
 	rootOffset   uint32
 	binsDataSize uint32
@@ -260,7 +268,11 @@ func Open(path string, lim Limits) (*Hive, error) {
 	}
 
 	h := &Hive{
-		f:            f,
+		r:            f,
+		closer:       f,
+		seq1:         binary.LittleEndian.Uint32(base[4:8]),
+		seq2:         binary.LittleEndian.Uint32(base[8:12]),
+		baseChecksum: baseChecksumOK(base),
 		size:         info.Size(),
 		lim:          lim,
 		majorVersion: binary.LittleEndian.Uint32(base[20:24]),
@@ -294,7 +306,7 @@ func Open(path string, lim Limits) (*Hive, error) {
 	return h, nil
 }
 
-func (h *Hive) Close() error { return h.f.Close() }
+func (h *Hive) Close() error { return h.closer.Close() }
 
 // MajorVersion/MinorVersion/LastModified/EmbeddedName expose base-block
 // facts that are evidence in their own right.
@@ -317,7 +329,7 @@ func (h *Hive) readCell(offset uint32) ([]byte, error) {
 	abs := int64(hiveBinsOffset) + int64(offset)
 
 	var sizeBuf [4]byte
-	if _, err := h.f.ReadAt(sizeBuf[:], abs); err != nil {
+	if _, err := h.r.ReadAt(sizeBuf[:], abs); err != nil {
 		return nil, fmt.Errorf("%w: reading cell size at %d: %v", ErrCorrupt, offset, err)
 	}
 	// Negative size means allocated, and the magnitude includes the size
@@ -336,7 +348,7 @@ func (h *Hive) readCell(offset uint32) ([]byte, error) {
 	}
 
 	data := make([]byte, size-4)
-	if _, err := h.f.ReadAt(data, abs+4); err != nil {
+	if _, err := h.r.ReadAt(data, abs+4); err != nil {
 		return nil, fmt.Errorf("%w: reading cell data at %d: %v", ErrCorrupt, offset, err)
 	}
 	return data, nil
@@ -980,4 +992,17 @@ func joinPath(parent, child string) string {
 		return child
 	}
 	return parent + `\` + child
+}
+
+// baseChecksumOK reports whether the base block's checksum (the XOR of its
+// first 127 little-endian words, stored at offset 508) is right.
+func baseChecksumOK(base []byte) bool {
+	if len(base) < baseBlockSize {
+		return false
+	}
+	var x uint32
+	for i := 0; i < 508; i += 4 {
+		x ^= binary.LittleEndian.Uint32(base[i : i+4])
+	}
+	return x == binary.LittleEndian.Uint32(base[508:512])
 }
