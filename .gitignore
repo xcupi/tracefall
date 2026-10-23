@@ -6,6 +6,9 @@
 *.db-shm
 /data/
 
+# Server integration credentials, including custom data directories.
+**/.integrations/
+
 # Forensic evidence images must never be committed. /data/ already covers
 # everything Tracefall stores itself, but an analyst working in the tree
 # can easily drop an image beside the source -- and a 700 MB AD1 in the

@@ -370,7 +370,7 @@ function renderUserBar() {
   if (!authState.enabled) {
     // Single-operator mode: say so plainly rather than implying an
     // identity Tracefall does not have.
-    bar.innerHTML = `<span class="user-chip muted small" title="Authentication is disabled; Tracefall is bound to localhost.">Local operator &middot; no authentication</span>`;
+    bar.innerHTML = `${integrationSettingsLink()}<span class="user-chip muted small" title="Authentication is disabled; Tracefall is bound to localhost.">Local operator &middot; no authentication</span>`;
     return;
   }
   if (!authState.authenticated) {
@@ -382,6 +382,7 @@ function renderUserBar() {
       <span class="user-name">${esc(authState.username)}</span>
       <span class="badge status user-role">${esc(authState.role)}</span>
     </span>
+    ${integrationSettingsLink()}
     <button type="button" class="secondary small" id="logout-btn">Sign out</button>`;
   document.getElementById("logout-btn").addEventListener("click", async () => {
     try {
@@ -3471,6 +3472,15 @@ async function checkHealth() {
 
 function route() {
   const hash = window.location.hash.replace(/^#/, "") || "/";
+  if (hash === "/settings/integrations") {
+    renderedCaseId = null;
+    renderedTab = null;
+    tabScroll.clear();
+    caseGuard.reset();
+    setSidebarOpen(false);
+    renderIntegrationSettings();
+    return;
+  }
   // Checked before the general case-detail pattern below, since both
   // start with /cases/{id}/investigations -- this one requires a third
   // segment (the investigation ID).
@@ -3643,6 +3653,113 @@ function renderLockBanner() {
 }
 
 // ---------------- Case list ----------------
+
+function integrationSettingsLink(className = "", label = "Settings") {
+  if (authState.enabled && authState.role !== "admin") return "";
+  return `<a class="${esc(className)}" href="#/settings/integrations">${esc(label)}</a>`;
+}
+
+function renderVTIntegrationForm(st) {
+  const managed = st.source === "environment";
+  return `<section class="panel integration-settings" aria-labelledby="vt-integration-title">
+    <h2 id="vt-integration-title">VirusTotal</h2>
+    <p id="vt-key-state" role="status"><strong>${st.configured ? "Configured" : "Not configured"}</strong> · ${managed ? "Managed by server environment" : st.configured ? "Saved on this server" : "No API key saved"}</p>
+    <p class="small muted">Global server setting. Saving a key sends no provider request and does not change any case's data policy. Case lookups still require permission in Outside services.</p>
+    ${managed ? `<p class="external-notice">The active key comes from <code>TRACEFALL_VT_API_KEY</code>. Change or remove that environment variable and restart the server to manage the key here.</p>` : ""}
+    <form id="vt-key-form" autocomplete="off">
+      <label for="vt-key-input">${st.configured ? "Replace API key" : "API key"}</label>
+      <div class="row integration-key-row">
+        <input type="password" id="vt-key-input" autocomplete="new-password" spellcheck="false" autocapitalize="off" maxlength="64" minlength="64" pattern="[a-fA-F0-9]{64}" placeholder="Paste your 64-character VirusTotal API key" required ${st.editable ? "" : "disabled"} aria-describedby="vt-key-storage" />
+        <button class="btn-primary" id="vt-key-save" type="submit" ${st.editable ? "" : "disabled"}>Save key</button>
+        <button class="danger" id="vt-key-remove" type="button" ${st.editable && st.configured ? "" : "disabled"}>Remove key</button>
+      </div>
+    </form>
+    <p class="small muted" id="vt-key-storage">Saved keys are not returned to this page, stored in the case database, or included in reports. Storage is an owner-only server file (0600 in a 0700 directory), <strong>not encrypted</strong>: the server's OS account and administrators can read it. Protect server backups too. Remove does not erase backups or old filesystem snapshots.</p>
+    ${!st.editable && !managed ? `<p class="field-error-box">Credential storage is unavailable. Check the server configuration.</p>` : ""}
+    <hr>
+    <h3>Test connection</h3>
+    <p class="small">Uses the saved key, sends one fixed public EICAR test-file hash to VirusTotal and consumes one API request. It sends <strong>no case data</strong>, uploads no file, and shares the same rate and daily/monthly limits as case lookups. Free-tier keys are for non-commercial use under VirusTotal's terms.</p>
+    <p class="small"><label><input id="vt-test-ack" type="checkbox" ${st.configured ? "" : "disabled"}> I authorize this external connection test and its quota usage.</label></p>
+    <button id="vt-key-test" type="button" class="secondary" disabled>Test connection</button>
+    <p id="vt-settings-msg" class="small" role="status" aria-live="polite"></p>
+  </section>`;
+}
+
+async function renderIntegrationSettings() {
+  const app = document.getElementById("app");
+  app.innerHTML = `<div id="integration-settings-root"><p><a href="#/">All Cases</a> / Settings / Integrations</p><h1>Integrations</h1><div id="vt-settings-content">Loading configuration…</div></div>`;
+  const root = document.getElementById("integration-settings-root");
+  const content = root.querySelector("#vt-settings-content");
+  if (authState.enabled && authState.role !== "admin") {
+    content.textContent = "Only an administrator can manage server integrations.";
+    return;
+  }
+  try {
+    let st = await api("/admin/integrations/virustotal");
+    if (!root.isConnected) return;
+    const mount = () => {
+      content.innerHTML = renderVTIntegrationForm(st);
+      const form = root.querySelector("#vt-key-form");
+      const input = root.querySelector("#vt-key-input");
+      const save = root.querySelector("#vt-key-save");
+      const remove = root.querySelector("#vt-key-remove");
+      const test = root.querySelector("#vt-key-test");
+      const ack = root.querySelector("#vt-test-ack");
+      const msg = root.querySelector("#vt-settings-msg");
+      let busy = false;
+      const sync = () => {
+        input.disabled = busy || !st.editable;
+        save.disabled = busy || !st.editable;
+        remove.disabled = busy || !st.editable || !st.configured;
+        ack.disabled = busy || !st.configured;
+        test.disabled = busy || !st.configured || !ack.checked || input.value.length > 0;
+      };
+      ack.addEventListener("change", sync);
+      input.addEventListener("input", sync);
+      const act = async (method, suffix, body) => {
+        if (busy) return;
+        busy = true; sync();
+        msg.textContent = suffix ? "Testing connection… rate limiting may delay this request." : "Updating server configuration…";
+        msg.className = "small";
+        try {
+          const result = await api("/admin/integrations/virustotal" + suffix, { method, ...(body ? { body: JSON.stringify(body) } : {}) });
+          const next = await api("/admin/integrations/virustotal");
+          if (!root.isConnected) return;
+          st = next;
+          mount();
+          root.querySelector("#vt-settings-msg").textContent = suffix ? result.message : method === "DELETE" ? "Key removed. Stored case results are unchanged." : "Key saved and active. No restart needed. No provider request was sent.";
+        } catch (e) {
+          if (!root.isConnected) return;
+          msg.textContent = e.message || "The operation failed.";
+          msg.className = "small field-error-box";
+        } finally {
+          busy = false;
+          if (form.isConnected) sync();
+        }
+      };
+      form.addEventListener("submit", (e) => {
+        e.preventDefault();
+        if (busy || !form.reportValidity()) return;
+        const key = input.value.trim();
+        input.value = "";
+        act("PUT", "", { api_key: key });
+      });
+      remove.addEventListener("click", () => {
+        if (!window.confirm("Remove the saved VirusTotal key? Future lookups will be disabled. Stored case results are kept.")) return;
+        input.value = "";
+        act("DELETE", "");
+      });
+      test.addEventListener("click", () => {
+        if (!ack.checked || input.value || busy) return;
+        act("POST", "/test", { acknowledge: true });
+      });
+      sync();
+    };
+    mount();
+  } catch (e) {
+    if (root.isConnected) content.textContent = "Could not load integration settings: " + (e.message || String(e));
+  }
+}
 
 async function renderCaseList() {
   app.innerHTML = `
@@ -4457,6 +4574,7 @@ function renderSidebar(caseId, c, tab) {
         <div class="sidenav-group">
           <div class="sidenav-heading">System</div>
           <a class="sidenav-item" href="#/">All Cases</a>
+          ${integrationSettingsLink("sidenav-item")}
         </div>
       </nav>
     </aside>`;
@@ -5670,7 +5788,7 @@ async function renderExternalTab(content, caseId, refresh) {
     .join("");
 
   let why = "";
-  if (!st.configured) why = "VirusTotal is not configured on this server (no API key).";
+  if (!st.configured) why = "VirusTotal is not configured. Open Settings → Integrations to save an API key (administrator access).";
   else if (!st.allowed) why = "This case's level does not allow file hashes to leave the server.";
   else if (running) why = "A lookup is running.";
   else if (st.candidates === 0) why = "No file hashes were found in this case's events.";
@@ -5728,6 +5846,7 @@ async function renderExternalTab(content, caseId, refresh) {
       </section>
       <section class="panel external-card" id="external-vt" aria-labelledby="external-vt-title">
       <h3 id="external-vt-title">VirusTotal <span class="external-optional">Optional · hashes only</span></h3>
+      <p class="small">${integrationSettingsLink("", "Configure VirusTotal in Settings → Integrations")}</p>
       <p class="small">${st.candidates} file hash(es) in this case's events &middot; ${st.already_answered} answered &middot; ${st.pending} waiting.
         </p><details id="vt-allowance" class="external-details"><summary>Quota and estimated duration</summary><p class="small">Free-key allowance: ${st.daily_used} of ${st.daily_limit} used in the last 24 hours, ${st.monthly_used} of ${st.monthly_limit} this calendar month (UTC). Lookups are spaced to stay under
         4 per minute, so ${st.pending} hash(es) take about ${Math.ceil((st.pending * 15.5) / 60)} minute(s).</p></details>

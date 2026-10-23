@@ -57,6 +57,41 @@ by default." This is a change from Tracefall's very first version, where
 the default `:8080` address bound to all interfaces without anyone
 intending that.
 
+## VirusTotal integration settings
+
+Open **Settings → Integrations** from the top bar (also linked from each
+case's Outside services page). In authenticated mode this is administrator-only;
+in local single-operator mode it belongs to the local operator.
+
+- **Save key** accepts a 64-character hexadecimal API key, activates it immediately,
+  and makes no provider request. A saved key survives server restarts.
+- **Test connection** requires a separate acknowledgement. It sends one fixed
+  public EICAR SHA-256 to VirusTotal (no case data, no upload), consumes one
+  request, and uses the same spacing and daily/monthly allowance ledger as
+  case lookups. The free API is subject to VirusTotal's non-commercial terms.
+- **Remove key** disables future lookups and deletes the saved server file;
+  existing enrichment results are kept. A key cannot be changed while a request
+  is in flight; wait for that request to finish and retry.
+
+Saved credentials live at `<data-dir>/.integrations/virustotal.key`, outside
+all case folders. The directory is 0700 and the file is 0600, replaced atomically.
+It is **not encrypted**: the OS account running Tracefall and administrators can
+read it. Protect or exclude it in backups; deletion cannot erase snapshots,
+backups, swap or existing process memory. The key is never returned through the
+API, stored in the case database, or included in report bundles. Do not add it
+to source control; `.integrations/` is ignored even under a custom data folder.
+A Docker deployment must persist the data directory if it wants saved keys to
+survive container replacement.
+
+`TRACEFALL_VT_API_KEY`, if set on startup, takes precedence over the saved file.
+The UI then reports **Managed by server environment** and disables Save/Remove.
+Remove that environment variable and restart the server to switch to UI-managed
+credentials. The environment key is never copied into the saved file.
+
+Configuring a key does not grant case egress permission. Each case still defaults
+to `none`; explicitly select `hashes` (or a higher permitted level) in Outside
+services before starting case lookups. Deterministic analysis works without VT.
+
 ## Single-operator mode (default)
 
 ```bash

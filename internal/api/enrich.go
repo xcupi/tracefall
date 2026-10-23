@@ -34,7 +34,7 @@ var (
 	// ErrEgressUnavailable: the level exists but no feature uses it yet.
 	ErrEgressUnavailable = errors.New("that egress level is reserved: no feature uses it in this version")
 	// ErrEnrichNotConfigured: no VirusTotal API key.
-	ErrEnrichNotConfigured = errors.New("VirusTotal is not configured: set TRACEFALL_VT_API_KEY")
+	ErrEnrichNotConfigured = errors.New("VirusTotal is not configured: open Settings → Integrations to save an API key, or set TRACEFALL_VT_API_KEY")
 	// ErrEnrichRunning: a lookup run for this case is already in progress.
 	ErrEnrichRunning = errors.New("a VirusTotal lookup for this case is already running")
 	// ErrEnrichDailyLimit: the day's request allowance is used up.
@@ -72,7 +72,11 @@ var hashFieldKeys = []string{"content_sha256", "response_sha256", "sha256", "sha
 
 // SetVirusTotal configures VirusTotal lookups. Call it before the service
 // handles requests. A nil or key-less client leaves lookups unavailable.
-func (s *Service) SetVirusTotal(c *virustotal.Client) { s.vt = c }
+func (s *Service) SetVirusTotal(c *virustotal.Client) {
+	s.vt.mu.Lock()
+	defer s.vt.mu.Unlock()
+	s.vt.client = c
+}
 
 // ---------- egress level ----------
 
@@ -464,12 +468,34 @@ func (s *Service) runVirusTotal(ctx context.Context, caseID string, pending []VT
 func (s *Service) vtLookup(parent context.Context, hash string) (virustotal.Result, error) {
 	ctx, cancel := context.WithTimeout(parent, 3*time.Minute)
 	defer cancel()
+	// One gate for case lookups AND manual connection tests. Configuration
+	// changes cannot reset spacing or race a request using the previous key.
+	v := s.vt
+	select {
+	case v.gate <- struct{}{}:
+		defer func() { <-v.gate }()
+	case <-ctx.Done():
+		return virustotal.Result{}, ctx.Err()
+	}
+	v.mu.RLock()
+	defer v.mu.RUnlock()
+	if !v.client.Configured() {
+		return virustotal.Result{}, virustotal.ErrNotConfigured
+	}
+	if al, err := s.vtAllowance(time.Now().UTC()); err != nil {
+		return virustotal.Result{}, err
+	} else if al.remaining <= 0 {
+		return virustotal.Result{}, al.err()
+	}
+	if err := ctx.Err(); err != nil {
+		return virustotal.Result{}, err
+	}
 	// Counted when it goes out, not when it is answered: the service counts a
 	// request that failed or found nothing, and a run cut short still used it.
 	if err := s.store.RecordProviderRequest(model.EnrichmentVirusTotal, time.Now().UTC()); err != nil {
 		return virustotal.Result{}, err
 	}
-	return s.vt.Lookup(ctx, hash)
+	return v.client.Lookup(ctx, hash)
 }
 
 // vtAllowances is where the key's request allowances stand.

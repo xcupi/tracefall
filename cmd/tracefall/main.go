@@ -29,7 +29,6 @@ import (
 	"tracefall/internal/casefiles"
 	"tracefall/internal/config"
 	"tracefall/internal/enrich/llm"
-	"tracefall/internal/enrich/virustotal"
 	"tracefall/internal/memory"
 	"tracefall/internal/store"
 	"tracefall/internal/web"
@@ -132,12 +131,11 @@ func main() {
 		slog.Info("memory analysis enabled", "isolation", string(runner.Isolation()))
 	}
 
-	// VirusTotal lookups need a key and are then still gated per case by its
-	// egress level (default none). The key is read from the environment only;
-	// it is not stored, logged or put in any report.
-	if key := os.Getenv("TRACEFALL_VT_API_KEY"); key != "" {
-		svc.SetVirusTotal(virustotal.New(key))
-		slog.Info("VirusTotal lookups available; each case must allow them (egress level hashes)")
+	// Integration credentials are server-owned, not case records. The UI can
+	// save a key in an owner-only file outside every case directory. An
+	// environment key takes precedence and is never persisted by Tracefall.
+	if err := svc.ConfigureVirusTotalStorage(filepath.Join(cfg.DataDir, ".integrations", "virustotal.key"), os.Getenv("TRACEFALL_VT_API_KEY")); err != nil {
+		logger.Warn("VirusTotal credential storage could not be loaded; analysis remains available", "error", err)
 	}
 
 	// A language model drafts summaries. It is gated per case either way: a

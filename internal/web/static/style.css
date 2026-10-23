@@ -2672,6 +2672,12 @@ body.deletion-open { overflow: hidden; }
 .external-grid { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--space-4); }
 .external-card { margin: 0; min-width: 0; }
 .external-card h3 { margin-top: 0; }
+.integration-settings { max-width: 960px; }
+.integration-key-row { flex-wrap: wrap; margin-top: var(--space-2); }
+.integration-key-row input { flex: 1 1 280px; min-width: 0; }
+.integration-settings p { line-height: 1.6; }
+.integration-settings hr { border: 0; border-top: 1px solid var(--border); margin: var(--space-5) 0; }
+.integration-settings code { overflow-wrap: anywhere; }
 #external-vt .data-table { min-width: 0; table-layout: fixed; width: 100%; }
 #external-vt th, #external-vt td { white-space: normal; overflow-wrap: anywhere; }
 #external-vt th:nth-child(1) { width: 31%; }

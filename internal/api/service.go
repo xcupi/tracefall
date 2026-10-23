@@ -44,7 +44,6 @@ import (
 	"tracefall/internal/correlate"
 	"tracefall/internal/detect"
 	"tracefall/internal/enrich/llm"
-	"tracefall/internal/enrich/virustotal"
 	"tracefall/internal/evtx"
 	"tracefall/internal/gate"
 	"tracefall/internal/ingest"
@@ -186,8 +185,8 @@ type Service struct {
 	// not configured. Set once at startup (SetMemoryRunner).
 	mem *memory.Runner
 	// vt looks file hashes up on VirusTotal; nil or key-less means lookups are
-	// not configured. Set once at startup (SetVirusTotal). See enrich.go.
-	vt *virustotal.Client
+	// not configured. Shared state supports admin configuration at runtime. See enrich.go.
+	vt *vtConfiguration
 	// enrich holds the state of running lookups, in memory only: the answers
 	// are in the database, the progress of a run is not worth persisting.
 	enrich *enrichManager
@@ -260,7 +259,7 @@ func (s *Service) heavyOp() (release func(), err error) {
 
 func NewService(s *store.Store, files *casefiles.Store) *Service {
 	return &Service{
-		store: s, files: files,
+		store: s, files: files, vt: &vtConfiguration{gate: make(chan struct{}, 1)},
 		extractLimits: archive.DefaultLimits, ad1Limits: ad1.DefaultLimits,
 		jobs: newImportJobs(), throttle: newLoginGuard(),
 		deletions: newDeletionTracker(), pipe: newPipelineManager(),

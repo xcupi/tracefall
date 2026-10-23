@@ -122,6 +122,16 @@ func New(key string) *Client {
 	return &Client{BaseURL: DefaultBaseURL, Key: strings.TrimSpace(key), HTTP: &http.Client{Timeout: 30 * time.Second}, Interval: DefaultInterval}
 }
 
+// WithKey returns a replacement client without resetting the rate-limit clock.
+func (c *Client) WithKey(key string) *Client {
+	if c == nil {
+		return New(key)
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return &Client{BaseURL: c.BaseURL, Key: strings.TrimSpace(key), HTTP: c.HTTP, Interval: c.Interval, last: c.last}
+}
+
 // Configured reports whether there is a key. The key is never exposed.
 func (c *Client) Configured() bool { return c != nil && strings.TrimSpace(c.Key) != "" }
 

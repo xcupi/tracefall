@@ -95,6 +95,10 @@ func NewRouterWithAuth(svc *Service, logger *slog.Logger, maxUploadBytes int64, 
 	// unchanged (scripted use, and every existing test), so this adds
 	// progress reporting without altering what already worked.
 	mux.HandleFunc("POST /api/cases/{id}/evidence/{collectionID}/import/start", h.startImport)
+	mux.HandleFunc("GET /api/admin/integrations/virustotal", h.getVTIntegration)
+	mux.HandleFunc("PUT /api/admin/integrations/virustotal", h.saveVTIntegration)
+	mux.HandleFunc("DELETE /api/admin/integrations/virustotal", h.removeVTIntegration)
+	mux.HandleFunc("POST /api/admin/integrations/virustotal/test", h.testVTIntegration)
 	mux.HandleFunc("GET /api/settings", h.getSettings)
 	mux.HandleFunc("PUT /api/settings", h.updateSettings)
 	mux.HandleFunc("GET /api/cases/{id}/import-jobs/{jobID}", h.importJobStatus)
