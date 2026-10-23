@@ -119,6 +119,31 @@ var (
 
 var severityRank = map[string]int{"critical": 5, "high": 4, "medium": 3, "low": 2, "info": 1, "informational": 1}
 
+// Select returns the findings a request covers: the most severe first, then
+// the earliest, then by id, cut to the limit. The same case always gives the
+// same selection, in the same order. Callers that need to fetch the events of
+// the findings use it so that they fetch only what Prepare will use.
+func Select(findings []model.Finding, lim Limits) []model.Finding {
+	if lim.MaxFindings == 0 {
+		lim = DefaultLimits
+	}
+	fs := append([]model.Finding(nil), findings...)
+	sort.SliceStable(fs, func(i, j int) bool {
+		ri, rj := severityRank[strings.ToLower(fs[i].Severity)], severityRank[strings.ToLower(fs[j].Severity)]
+		if ri != rj {
+			return ri > rj
+		}
+		if !fs[i].FirstSeen.Equal(fs[j].FirstSeen) {
+			return fs[i].FirstSeen.Before(fs[j].FirstSeen)
+		}
+		return fs[i].ID < fs[j].ID
+	})
+	if len(fs) > lim.MaxFindings {
+		fs = fs[:lim.MaxFindings]
+	}
+	return fs
+}
+
 // Prepare builds the request. It fails with ErrLeak rather than send anything
 // that could identify the case.
 func Prepare(in Input) (*Prepared, error) {
@@ -140,24 +165,9 @@ func Prepare(in Input) (*Prepared, error) {
 		p.Learn(pseudonym.Domain, d)
 	}
 
-	// Most severe first, then earliest, then id: the same case gives the same
-	// request.
-	fs := append([]model.Finding(nil), in.Findings...)
-	sort.SliceStable(fs, func(i, j int) bool {
-		ri, rj := severityRank[strings.ToLower(fs[i].Severity)], severityRank[strings.ToLower(fs[j].Severity)]
-		if ri != rj {
-			return ri > rj
-		}
-		if !fs[i].FirstSeen.Equal(fs[j].FirstSeen) {
-			return fs[i].FirstSeen.Before(fs[j].FirstSeen)
-		}
-		return fs[i].ID < fs[j].ID
-	})
-	omitted := 0
-	if len(fs) > lim.MaxFindings {
-		omitted = len(fs) - lim.MaxFindings
-		fs = fs[:lim.MaxFindings]
-	}
+	all := len(in.Findings)
+	fs := Select(in.Findings, lim)
+	omitted := all - len(fs)
 
 	// events cited by the included findings, numbered by first appearance
 	pr := &Prepared{limits: lim, p: p, FindingsOmitted: omitted, numbers: map[string]bool{}, leaks: map[string]bool{}}

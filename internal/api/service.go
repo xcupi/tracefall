@@ -43,6 +43,7 @@ import (
 	"tracefall/internal/casefiles"
 	"tracefall/internal/correlate"
 	"tracefall/internal/detect"
+	"tracefall/internal/enrich/llm"
 	"tracefall/internal/enrich/virustotal"
 	"tracefall/internal/evtx"
 	"tracefall/internal/gate"
@@ -190,6 +191,10 @@ type Service struct {
 	// enrich holds the state of running lookups, in memory only: the answers
 	// are in the database, the progress of a run is not worth persisting.
 	enrich *enrichManager
+	// llm drafts summaries; nil or key-less means drafting is not configured.
+	// narr holds the state of requests in progress, in memory only.
+	llm  *llm.Client
+	narr *narrativeManager
 	// actor is the identity behind the CURRENT request, set by
 	// WithActor on a per-request copy. The shared Service always has the
 	// zero value; only request-scoped copies carry an identity.
@@ -261,6 +266,7 @@ func NewService(s *store.Store, files *casefiles.Store) *Service {
 		deletions: newDeletionTracker(), pipe: newPipelineManager(),
 		heavy: gate.New(DefaultHeavyOps), imports: gate.New(DefaultImports),
 		enrich: newEnrichManager(),
+		narr:   newNarrativeManager(),
 	}
 }
 

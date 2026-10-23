@@ -238,6 +238,11 @@ func populate(t *testing.T, s *store.Store, caseID, name string, events int) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	// A language model's draft about this case's findings.
+	if err := s.SaveNarrative(model.Narrative{ID: caseID + "-nr1", CaseID: caseID, Status: model.NarrativeOK, CreatedAt: now, Destination: "llm.example.invalid",
+		Model: "m", PayloadSystem: "s", PayloadUser: "u", PayloadSHA256: "h"}); err != nil {
+		t.Fatal(err)
+	}
 	// An outside service's answer about an indicator of this case.
 	if err := s.UpsertEnrichment(model.Enrichment{
 		ID: caseID + "-en1", CaseID: caseID, Provider: model.EnrichmentVirusTotal, IndicatorType: "sha256",

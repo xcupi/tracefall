@@ -147,7 +147,7 @@ func TestEgress_DefaultsToNoneAndChangesAreAudited(t *testing.T) {
 	for _, o := range got.Options {
 		sel[o.Level] = o.Selectable
 	}
-	if !sel["none"] || !sel["hashes"] || sel["pseudonymized"] || sel["full"] {
+	if !sel["none"] || !sel["hashes"] || !sel["pseudonymized"] || sel["full"] {
 		t.Errorf("selectable options = %v", sel)
 	}
 	if rec := setLevel(t, mux, id, "hashes"); rec.Code != 200 {

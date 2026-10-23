@@ -13,9 +13,12 @@
 //	               evidence, and nothing else: no file name, path, host, user,
 //	               case name or event. A hash says "this exact content"; it
 //	               reveals to the service that someone holds that content.
-//	pseudonymized  structured facts about events and findings with names,
-//	               addresses and paths replaced by stable tokens that only this
-//	               server can reverse. Reserved: no feature uses it yet.
+//	pseudonymized  structured facts about findings and the events they cite
+//	               (titles, rules, times, process names, command lines, paths,
+//	               addresses) with every name, address, identifier and hash
+//	               replaced by a token that only this server can reverse, and
+//	               secrets removed. Sent to a language model to draft a summary.
+//	               Includes everything "hashes" allows.
 //	full           case content as it is. Reserved: no feature uses it yet.
 package egress
 
@@ -39,7 +42,7 @@ var order = []Level{None, Hashes, Pseudonymized, Full}
 // Available lists the levels some feature of this build uses. A level that is
 // reserved is understood but cannot be selected, so a setting never promises
 // protection or exposure that no code implements.
-var Available = []Level{None, Hashes}
+var Available = []Level{None, Hashes, Pseudonymized}
 
 // Parse accepts a level name, case-insensitively.
 func Parse(s string) (Level, error) {
@@ -82,7 +85,7 @@ func (l Level) Describe() string {
 	case Hashes:
 		return "File hashes (MD5, SHA-1, SHA-256) of files found in the evidence may be sent to a reputation service. No file name, path, host, user, case name or event is sent."
 	case Pseudonymized:
-		return "Reserved: facts with names, addresses and paths replaced by tokens only this server can reverse. No feature uses it yet."
+		return "Findings and the events they cite may be sent to a language model with every name, address, identifier and hash replaced by a token only this server can reverse, and secrets removed. Timestamps, process names and the shape of the activity are sent as they are. Includes file hashes."
 	case Full:
 		return "Reserved: case content as it is. No feature uses it yet."
 	}

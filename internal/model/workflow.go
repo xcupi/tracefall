@@ -194,6 +194,15 @@ const (
 	AuditEnrichmentSent = "enrichment_requested"
 	// AuditEnrichmentFinished records how an enrichment run ended.
 	AuditEnrichmentFinished = "enrichment_finished"
+
+	// AuditNarrativeRequested records that pseudonymized case facts were sent
+	// to a language model: where, how much, and the hash of exactly what.
+	AuditNarrativeRequested = "narrative_requested"
+	// AuditNarrativeRefused records that a request was stopped before it left
+	// because the text still held identifying values (kinds only, never values).
+	AuditNarrativeRefused = "narrative_refused"
+	// AuditNarrativeFinished records how a request ended.
+	AuditNarrativeFinished = "narrative_finished"
 )
 
 // ActorLocalUser is the only Actor value Tracefall currently produces --

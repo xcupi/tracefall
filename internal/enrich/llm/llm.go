@@ -21,6 +21,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -169,7 +170,11 @@ func (c *Client) Chat(ctx context.Context, msgs []Message) (Result, error) {
 	case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden:
 		return Result{}, ErrAuth
 	case resp.StatusCode == http.StatusTooManyRequests:
-		return Result{}, &RateLimitError{RetryAfter: 30 * time.Second}
+		wait := 30 * time.Second
+		if n, err := strconv.Atoi(strings.TrimSpace(resp.Header.Get("Retry-After"))); err == nil && n >= 0 && n <= 300 {
+			wait = time.Duration(n) * time.Second
+		}
+		return Result{}, &RateLimitError{RetryAfter: wait}
 	case resp.StatusCode >= 300 && resp.StatusCode < 400:
 		return Result{}, fmt.Errorf("llm: the endpoint redirected (HTTP %d); redirects are not followed", resp.StatusCode)
 	case resp.StatusCode != http.StatusOK:

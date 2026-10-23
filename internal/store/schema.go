@@ -488,6 +488,31 @@ CREATE TABLE IF NOT EXISTS provider_requests (
 );
 CREATE INDEX IF NOT EXISTS idx_provider_requests ON provider_requests(provider, at);
 
+-- Drafts written by a language model about a case's findings, with the exact
+-- text that was sent. Not evidence; kept apart from events and findings.
+CREATE TABLE IF NOT EXISTS narratives (
+	id                TEXT PRIMARY KEY,
+	case_id           TEXT NOT NULL REFERENCES cases(id),
+	status            TEXT NOT NULL,
+	error             TEXT NOT NULL DEFAULT '',
+	created_at        TEXT NOT NULL,
+	destination       TEXT NOT NULL,
+	local             INTEGER NOT NULL DEFAULT 0,
+	model             TEXT NOT NULL,
+	payload_system    TEXT NOT NULL,
+	payload_user      TEXT NOT NULL,
+	payload_sha256    TEXT NOT NULL,
+	raw_answer        TEXT NOT NULL DEFAULT '',
+	sentences_json    TEXT NOT NULL DEFAULT '[]',
+	rejected          INTEGER NOT NULL DEFAULT 0,
+	reasons_json      TEXT NOT NULL DEFAULT '',
+	finding_ids       TEXT NOT NULL DEFAULT '[]',
+	prompt_tokens     INTEGER NOT NULL DEFAULT 0,
+	completion_tokens INTEGER NOT NULL DEFAULT 0,
+	requested_by      TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_narratives_case ON narratives(case_id, created_at);
+
 CREATE TABLE IF NOT EXISTS upload_sessions (
 	id            TEXT PRIMARY KEY,
 	case_id       TEXT NOT NULL REFERENCES cases(id),

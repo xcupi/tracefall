@@ -96,3 +96,63 @@ func (h *handlers) cancelVirusTotal(w http.ResponseWriter, r *http.Request) {
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
+
+// getNarrative reports the case's summary state and the latest draft. It
+// sends nothing.
+func (h *handlers) getNarrative(w http.ResponseWriter, r *http.Request) {
+	st, err := h.as(r).NarrativeStatus(r.PathValue("id"))
+	if h.fail(w, err) {
+		return
+	}
+	writeJSON(w, http.StatusOK, st)
+}
+
+// getNarrativePayload returns exactly what the latest request sent.
+func (h *handlers) getNarrativePayload(w http.ResponseWriter, r *http.Request) {
+	p, ok, err := h.as(r).LatestNarrativePayload(r.PathValue("id"))
+	if h.fail(w, err) {
+		return
+	}
+	if !ok {
+		writeError(w, http.StatusNotFound, "no summary has been requested for this case")
+		return
+	}
+	writeJSON(w, http.StatusOK, p)
+}
+
+// startNarrative begins drafting in the background (202).
+func (h *handlers) startNarrative(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Acknowledge bool `json:"acknowledge"`
+	}
+	if r.ContentLength != 0 && !decodeJSON(w, r, &body) {
+		return
+	}
+	st, err := h.as(r).StartNarrative(r.PathValue("id"), body.Acknowledge)
+	switch {
+	case errors.Is(err, ErrNarrativeEgress), errors.Is(err, ErrNarrativeNeedsAck):
+		writeError(w, http.StatusForbidden, err.Error())
+		return
+	case errors.Is(err, ErrNarrativeNotConfigured):
+		writeError(w, http.StatusNotImplemented, err.Error())
+		return
+	case errors.Is(err, ErrNarrativeRunning):
+		writeError(w, http.StatusConflict, err.Error())
+		return
+	case errors.Is(err, ErrNarrativeNoFindings), errors.Is(err, ErrNarrativeRefused):
+		writeError(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
+	if h.fail(w, err) {
+		return
+	}
+	writeJSON(w, http.StatusAccepted, st)
+}
+
+// cancelNarrative stops a request in progress.
+func (h *handlers) cancelNarrative(w http.ResponseWriter, r *http.Request) {
+	if h.fail(w, h.as(r).CancelNarrative(r.PathValue("id"))) {
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}

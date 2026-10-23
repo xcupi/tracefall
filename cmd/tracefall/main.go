@@ -27,6 +27,7 @@ import (
 	"tracefall/internal/api"
 	"tracefall/internal/casefiles"
 	"tracefall/internal/config"
+	"tracefall/internal/enrich/llm"
 	"tracefall/internal/enrich/virustotal"
 	"tracefall/internal/memory"
 	"tracefall/internal/store"
@@ -136,6 +137,22 @@ func main() {
 	if key := os.Getenv("TRACEFALL_VT_API_KEY"); key != "" {
 		svc.SetVirusTotal(virustotal.New(key))
 		slog.Info("VirusTotal lookups available; each case must allow them (egress level hashes)")
+	}
+
+	// A language model drafts summaries. It needs a key and a model name, and
+	// is then still gated per case: a model on another machine is reached only
+	// at egress level "pseudonymized", with the analyst's acknowledgement.
+	// The key is read from the environment only; it is not stored, logged or
+	// put in any report.
+	if key := os.Getenv("TRACEFALL_LLM_API_KEY"); key != "" {
+		c := llm.New(os.Getenv("TRACEFALL_LLM_BASE_URL"), key, os.Getenv("TRACEFALL_LLM_MODEL"))
+		if c.Configured() {
+			svc.SetLLM(c)
+			host, local := c.Destination()
+			slog.Info("language-model summaries available", "host", host, "local", local, "model", c.ModelName())
+		} else {
+			slog.Warn("TRACEFALL_LLM_API_KEY is set but TRACEFALL_LLM_MODEL is not: summaries are not available")
+		}
 	}
 
 	// Server-side pipeline: work a previous process left running is put

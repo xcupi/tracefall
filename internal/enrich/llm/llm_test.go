@@ -197,3 +197,13 @@ func TestDestination_SaysWhereTextGoesAndWhetherThatIsThisMachine(t *testing.T) 
 		t.Errorf("nil client")
 	}
 }
+
+func TestChat_RateLimitHonoursRetryAfterWithinReason(t *testing.T) {
+	for hdr, want := range map[string]time.Duration{"2": 2 * time.Second, "0": 0, "": 30 * time.Second, "soon": 30 * time.Second, "-5": 30 * time.Second, "99999": 30 * time.Second} {
+		c, _ := serve(t, 429, `{}`, map[string]string{"Retry-After": hdr})
+		var rl *RateLimitError
+		if _, err := c.Chat(context.Background(), []Message{{"user", "x"}}); !errors.As(err, &rl) || rl.RetryAfter != want {
+			t.Errorf("Retry-After %q: %v", hdr, err)
+		}
+	}
+}

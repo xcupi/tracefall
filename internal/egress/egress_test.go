@@ -23,8 +23,8 @@ func TestParseAndOrder(t *testing.T) {
 }
 
 func TestOnlyLevelsSomethingUsesAreSelectable(t *testing.T) {
-	if !None.Selectable() || !Hashes.Selectable() || Pseudonymized.Selectable() || Full.Selectable() {
-		t.Errorf("selectable: none=%v hashes=%v pseudonymized=%v full=%v", None.Selectable(), Hashes.Selectable(), Pseudonymized.Selectable(), Full.Selectable())
+	if !None.Selectable() || !Hashes.Selectable() || !Pseudonymized.Selectable() || Full.Selectable() {
+		t.Errorf("selectable: none=%v hashes=%v pseudonymized=%v full=%v (only full is reserved)", None.Selectable(), Hashes.Selectable(), Pseudonymized.Selectable(), Full.Selectable())
 	}
 	for _, l := range []Level{None, Hashes, Pseudonymized, Full} {
 		if l.Describe() == "" {
