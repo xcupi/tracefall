@@ -2,6 +2,8 @@
 
 Optional AI summaries remain separate from deterministic analysis. Open **Settings → Integrations → ChatGPT / Codex** as an administrator (the local loopback operator is the administrator when authentication is off).
 
+The same provider also supports a separate [bounded AI Case Review](ai-case-review.md). This does not expand Summary's input or report appendix: review selection, caps, preview, consent, coverage and persistence are independent. Full all-case batch review is unavailable.
+
 ## Authorize, select, and verify are different actions
 
 1. Install the official OpenAI Codex CLI on the Tracefall server. Tracefall searches `PATH`, then `/usr/lib/chatgpt/resources/codex`; `TRACEFALL_CODEX_BIN` can specify an executable. Use an absolute executable path. This process-control implementation is Unix-only; other platforms report the integration unavailable rather than launch an uncontrolled process.

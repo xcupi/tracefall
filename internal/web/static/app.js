@@ -5649,7 +5649,7 @@ const STATUS_LABELS = {
 // The summary section of the Outside services tab. Plain strings in, HTML out;
 // every value that came from the server or from a model is escaped.
 function externalCitation(kind, id) {
-  if (kind !== "finding" && kind !== "event") return "";
+  if (!["finding", "event", "correlation", "coverage"].includes(kind)) return `<span class="small">Unsupported source reference: ${esc(kind)} ${esc(id)}</span>`;
   return `<button type="button" class="source-link" data-source-kind="${kind}" data-source-id="${esc(id)}" title="Open ${kind}: ${esc(id)}">${kind} ${esc(String(id).slice(0, 12))}</button>`;
 }
 
@@ -5677,6 +5677,23 @@ function wireExternalCitations(root, caseId) {
       const body = dialog.querySelector(".external-source-body");
       if (kind === "event") {
         await loadProvenanceInto(caseId, id, body);
+      } else if (kind === "correlation" || kind === "coverage") {
+        try {
+          if (kind === "correlation") {
+            const correlations = await api(`/cases/${caseId}/correlations`);
+            if (!dialog.isConnected) return;
+            const c = correlations.find(x => x.correlation_id === id);
+            if (!c) throw Error("Correlation is missing from the current case results.");
+            body.innerHTML = `<h3>${esc(c.title)}</h3><p>${esc(c.description || "")}</p><p class="small muted">Current deterministic correlation, not AI evidence. Citation order alone is not temporal order.</p><div class="source-links">${(c.event_ids || []).map(eid => externalCitation("event",eid)).join(" ") || "No supporting references recorded."}</div>`;
+            wireExternalCitations(body,caseId);
+          } else {
+            const data = id === "selection" ? (await api(`/cases/${caseId}/enrich/case-review`)).latest?.coverage : await api(`/cases/${caseId}/sources/${encodeURIComponent(id)}/provenance`);
+            if (!dialog.isConnected) return;
+            if (!data) throw Error("Coverage record is unavailable.");
+            body.innerHTML = `<p class="small">${id === "selection" ? "Recorded selection coverage for the latest bounded request." : "Current source provenance and parse coverage; it may have changed since the review."} Not raw-image coverage. Not recorded is not complete.</p><pre class="small" style="white-space:pre-wrap;overflow-wrap:anywhere"></pre>`;
+            body.querySelector("pre").textContent=JSON.stringify(data,null,2);
+          }
+        } catch(e) { body.textContent="Source unavailable: "+(e.message || String(e)); }
       } else {
         try {
           const finding = await api(`/cases/${caseId}/findings/${encodeURIComponent(id)}`);
@@ -5692,6 +5709,76 @@ function wireExternalCitations(root, caseId) {
       }
     });
   });
+}
+
+function renderCaseReviewSection(rv) {
+  const running = rv.run?.state === "running";
+  const l = rv.latest;
+  const coverage = (c) => c ? `<p class="small review-coverage"><strong>Bounded partial selection:</strong> ${c.events_included} of ${c.events_total} parsed events included; ${c.events_omitted} omitted. ${c.findings_included} of ${c.findings_total} findings (${c.findings_omitted} omitted); ${c.correlations_included} of ${c.correlations_total} correlations (${c.correlations_omitted} omitted); ${c.sources_included} of ${c.sources_total} source coverage records (${c.sources_omitted} omitted). ${c.undated_total} undated events in the case. Missing supporting references: ${c.missing_supporting_refs}; available supporting events omitted: ${c.supporting_refs_omitted}; unflagged observations included: ${c.unflagged_included}; source parse coverage not recorded: ${c.parse_coverage_not_recorded}.</p>` : "";
+  let why = !rv.configured ? "Set up a provider in Settings → Integrations." : !rv.allowed ? "Choose pseudonymized egress for an external destination." : rv.events === 0 ? "No parsed events are available." : running ? "A bounded review is running." : "Inspect a preview before starting.";
+  return `<h3>AI Case Review <span class="external-optional">Optional · bounded</span></h3>
+    <p class="small"><strong>Optional AI commentary, not a finding or evidence.</strong> A single request reviews selected parsed findings, correlations, supporting events, context and unflagged observations. It never changes findings or severity.</p>
+    <p class="small muted">Not exhaustive case analysis; no raw-image coverage. Full all-case batch review is unavailable in this phase. Unknown or tied times do not establish order; unknown hosts are acquisition-scoped. Validation checks references, entities and numbers, not semantic truth.</p>
+    <p class="small">Destination: ${rv.configured ? `${esc(rv.destination)} · ${esc(rv.model)} · ${rv.local ? "local model; nothing leaves this machine" : "another machine"}` : `<a href="#/settings/integrations">Settings → Integrations</a>`}.</p>
+    <p id="rv-caps" class="small"><strong>Request caps:</strong> 25 findings · 25 correlations · 120 parsed events · 60 source coverage records · 160000 payload bytes. One request, always limited in scope.</p>
+    <details id="rv-privacy" class="external-details"><summary>Selection plan and privacy</summary>
+      <p class="small">Half the event capacity is reserved for deterministic acquisition/source/type/identity/time-knownness strata beyond primary references. ID ordering is only a selection tie-break, never evidence of temporal order. Provenance identifies the primary observation, not every recollection.</p>
+      <p class="small">Only allowlisted normalized fields and numeric parse coverage are used. Names, addresses and hashes become stable tokens; secrets are removed. No file bodies, SQL statements, command bodies, cookies, notes, case names, evidence names, server paths or raw parser errors. Pseudonymized does not mean anonymous. Missing parse coverage means not recorded, not complete.</p>
+    </details>
+    ${rv.configured && !rv.local ? `<p class="external-notice small"><strong>Before sending:</strong> ${esc(rv.notice || "Check this provider's terms and data controls.")}</p><p class="small"><label><input type="checkbox" id="rv-ack"> I reviewed the preview and provider terms and authorize this one bounded request.</label></p>` : ""}
+    <p><button type="button" class="secondary" id="rv-preview" ${running || rv.events === 0 ? "disabled" : ""}>Inspect pre-send preview</button>
+    <button type="button" id="rv-start" disabled>Start bounded review</button>
+    <button type="button" class="secondary" id="rv-cancel" ${running ? "" : "hidden"}>Stop review</button></p>
+    <p id="rv-why" class="small muted">${esc(why)}</p><p id="rv-msg" class="small" role="status"></p>
+    <div id="rv-plan" hidden></div><pre id="rv-preview-box" hidden tabindex="0" aria-label="Pre-send bounded review payload" class="small" style="white-space:pre-wrap;overflow-wrap:anywhere;max-height:24em;overflow:auto"></pre>
+    ${rv.run ? `<p class="small">Last bounded request: <strong>${esc(rv.run.state)}</strong> ${esc(rv.run.reason || "")}</p>` : ""}
+    ${l ? `<div class="review-commentary"><p><strong>Optional AI commentary — not evidence or a new finding.</strong></p>
+      ${l.stale ? `<p class="field-error-box">Stale: parsed events, correlations, findings or source coverage changed since this request.</p>` : ""}
+      ${coverage(l.coverage)}
+      <p class="small">${esc(l.created_at)} · ${esc(l.destination)} · ${esc(l.model)}${l.prompt_tokens || l.completion_tokens ? ` · ${l.prompt_tokens} tokens in, ${l.completion_tokens} out` : ""}</p>
+      ${l.status === "ok" ? `<ol>${(l.sentences || []).map(s => `<li>${esc(s.text)} <span class="source-links">${(s.cites || []).map(c => externalCitation(c.kind,c.id)).join(" ")}</span></li>`).join("")}</ol>` : `<p>No usable commentary: ${esc(l.error || "request failed or interrupted")}. The request payload is recorded separately.</p>`}
+      <p class="small">${l.rejected || 0} line(s) rejected. Anchoring validation does not prove truth. Read every claim against its references.</p>
+      <button type="button" class="secondary" id="rv-payload">Show exactly what was sent</button>
+      <pre id="rv-payload-box" data-hash="${esc(l.payload_sha256)}" hidden tabindex="0" aria-label="Exact bounded review payload" class="small" style="white-space:pre-wrap;overflow-wrap:anywhere;max-height:24em;overflow:auto"></pre></div>` : `<p class="empty">No bounded case review has been requested.</p>`}`;
+}
+
+function wireCaseReviewSection(content, caseId, rv, say) {
+  const card = content.querySelector("#external-review");
+  if (!card) return;
+  const start = card.querySelector("#rv-start"), ack = card.querySelector("#rv-ack");
+  const sync = () => { start.disabled = !rv.configured || !rv.allowed || rv.events === 0 || rv.run?.state === "running" || !card.dataset.previewHash || (!rv.local && !ack?.checked); };
+  if (ack) ack.addEventListener("change",sync);
+  card.addEventListener("review-state-restored",sync);
+  card.querySelector("#rv-preview").addEventListener("click",async () => {
+    try {
+      const p = await api(`/cases/${caseId}/enrich/case-review/preview`);
+      if (!card.isConnected) return;
+      card.dataset.previewHash = p.preview_key;
+      card.dataset.fingerprint = p.source_fingerprint;
+      const box = card.querySelector("#rv-preview-box");
+      box.textContent = `Destination: ${p.destination} · Model: ${p.model}\nPayload SHA-256: ${p.sha256}\n\n${p.system}\n\n${p.user}`; box.hidden = false;
+      const plan = card.querySelector("#rv-plan"); plan.textContent = "Actual selection and coverage (not exhaustive): " + JSON.stringify(p.coverage); plan.hidden = false;
+      if (ack) ack.checked = false;
+      card.querySelector("#rv-why").textContent = "Preview built locally; nothing sent. Starting recomputes and refuses a changed payload.";
+      sync();
+    } catch(e) { say("rv-msg",e.message || String(e),true); }
+  });
+  start.addEventListener("click",async () => {
+    start.disabled = true;
+    try {
+      await api(`/cases/${caseId}/enrich/case-review`,{method:"POST",body:JSON.stringify({acknowledge:!!ack?.checked,preview_key:card.dataset.previewHash})});
+      if (card.isConnected) await renderExternalTab(content,caseId);
+    } catch(e) { if (!card.isConnected) return; delete card.dataset.previewHash; if (ack) ack.checked=false; sync(); say("rv-msg",e.message || String(e),true); }
+  });
+  card.querySelector("#rv-cancel").addEventListener("click",async () => {
+    try { await api(`/cases/${caseId}/enrich/case-review/cancel`,{method:"POST",body:"{}"}); if(card.isConnected)await renderExternalTab(content,caseId); }
+    catch(e) { say("rv-msg",e.message || String(e),true); }
+  });
+  card.querySelector("#rv-payload")?.addEventListener("click",async () => {
+    try { const p=await api(`/cases/${caseId}/enrich/case-review/payload`); if(!card.isConnected)return; const box=card.querySelector("#rv-payload-box"); if(box.dataset.hash!==p.sha256)throw Error("Latest review changed; refresh before inspecting it.");box.textContent=`Destination: ${p.destination} · Model: ${p.model}\nSHA-256: ${p.sha256}\n\n${p.system}\n\n${p.user}`;box.hidden=false; }
+    catch(e) { say("rv-msg",e.message || String(e),true); }
+  });
+  sync();
 }
 
 function renderNarrativeSection(nv) {
@@ -5816,7 +5903,11 @@ function captureExternalState(root, consentKey) {
   if (!root || root.dataset.consentKey !== consentKey) return null;
   const box = root.querySelector("#nv-payload-box");
   const active = document.activeElement;
+  const review = root.querySelector("#external-review");
+  const reviewPreview = root.querySelector("#rv-preview-box");
+  const reviewPayload = root.querySelector("#rv-payload-box");
   return {
+    review: review ? { ack: !!root.querySelector("#rv-ack")?.checked, hash: review.dataset.previewHash, fingerprint: review.dataset.fingerprint, preview: reviewPreview && !reviewPreview.hidden ? reviewPreview.textContent : null, plan: root.querySelector("#rv-plan")?.textContent, payload: reviewPayload && !reviewPayload.hidden ? {hash:reviewPayload.dataset.hash,text:reviewPayload.textContent,scrollTop:reviewPayload.scrollTop} : null, scrollTop:reviewPreview?.scrollTop } : null,
     ack: !!root.querySelector("#nv-ack")?.checked,
     openDetails: Array.from(root.querySelectorAll("details[id]")).filter((d) => d.open).map((d) => d.id),
     payload: box && !box.hidden ? { hash: box.dataset.hash, text: box.textContent, scrollTop: box.scrollTop } : null,
@@ -5836,6 +5927,20 @@ function restoreExternalState(root, state) {
     box.hidden = false;
     box.scrollTop = state.payload.scrollTop;
   }
+  const review = root.querySelector("#external-review");
+  const rv = state.review;
+  if (review && rv) {
+    if (rv.hash && rv.fingerprint === root.dataset.reviewFingerprint && rv.preview) {
+      review.dataset.previewHash=rv.hash; review.dataset.fingerprint=rv.fingerprint;
+      const preview=review.querySelector("#rv-preview-box");preview.textContent=rv.preview;preview.hidden=false;preview.scrollTop=rv.scrollTop || 0;
+      const plan=review.querySelector("#rv-plan");plan.textContent=rv.plan;plan.hidden=false;
+      const reviewAck=review.querySelector("#rv-ack");if(reviewAck){reviewAck.checked=rv.ack;reviewAck.dispatchEvent(new Event("change"));}
+      review.dispatchEvent(new Event("review-state-restored"));
+      review.querySelector("#rv-why").textContent="Preview built locally; nothing sent. Starting recomputes and refuses a changed payload.";
+    }
+    const sent=review.querySelector("#rv-payload-box");
+    if (sent && rv.payload && sent.dataset.hash===rv.payload.hash) {sent.textContent=rv.payload.text;sent.hidden=false;sent.scrollTop=rv.payload.scrollTop;}
+  }
   let focused = state.focusId ? Array.from(root.querySelectorAll("[id]")).find((el) => el.id === state.focusId) : null;
   if (!focused && state.focusSource) focused = Array.from(root.querySelectorAll(".source-link")).find((el) => el.dataset.sourceKind === state.focusSource.kind && el.dataset.sourceId === state.focusSource.id);
   if (focused && !focused.disabled) focused.focus({ preventScroll: true });
@@ -5846,14 +5951,15 @@ async function renderExternalTab(content, caseId, refresh) {
   // is ready: no "Loading..." flash, and the scroll position stays.
   const previousRoot = document.getElementById("ext-root");
   if (!refresh) content.innerHTML = `<p class="empty">Loading...</p>`;
-  const [eg, vt, nv] = await Promise.all([
+  const [eg, vt, nv, rv] = await Promise.all([
     api(`/cases/${caseId}/egress`),
     api(`/cases/${caseId}/enrich/virustotal`),
     api(`/cases/${caseId}/enrich/narrative`),
+    api(`/cases/${caseId}/enrich/case-review`),
   ]);
   // A response from a page we left must not repaint the next tab.
   if (!content.isConnected || (refresh && document.getElementById("ext-root") !== previousRoot)) return;
-  const consentKey = JSON.stringify([caseId, eg.level, nv.destination, nv.model, nv.local]);
+  const consentKey = JSON.stringify([caseId, eg.level, nv.destination, nv.model, nv.local, rv.destination, rv.model, rv.local]);
   const state = refresh ? captureExternalState(previousRoot, consentKey) : null;
   const st = vt.status;
   const run = st.run;
@@ -5957,12 +6063,16 @@ async function renderExternalTab(content, caseId, refresh) {
       <section class="panel external-card" id="external-llm" aria-label="AI summary">
       ${renderNarrativeSection(nv)}
       </section>
+      <section class="panel external-card" id="external-review" aria-label="AI Case Review">
+      ${renderCaseReviewSection(rv)}
+      </section>
       </div>
     </div>`;
 
   if (refresh) window.scrollTo(0, scrollY);
   const root = document.getElementById("ext-root");
   root.dataset.consentKey = consentKey;
+  root.dataset.reviewFingerprint = rv.source_fingerprint || "";
   const say = (id, text, bad) => {
     const el = document.getElementById(id);
     if (!el) return;
@@ -6004,12 +6114,13 @@ async function renderExternalTab(content, caseId, refresh) {
     });
 
   wireNarrativeSection(content, caseId, nv, say);
+  wireCaseReviewSection(content, caseId, rv, say);
   wireExternalCitations(root, caseId);
   restoreExternalState(root, state);
 
   // While a run is going, refresh. Stop as soon as the analyst leaves the
   // page: the root this render created is no longer the one on screen.
-  if (running || nRunning) {
+  if (running || nRunning || rv.run?.state === "running") {
     setTimeout(() => {
       if (document.getElementById("ext-root") === root) renderExternalTab(content, caseId, true).catch(() => {});
     }, 3000);

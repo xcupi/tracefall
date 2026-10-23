@@ -1519,6 +1519,7 @@ func (s *Store) DeleteCaseWithCounts(caseID string) (DeletedCaseCounts, error) {
 		// egress level chosen for it, have no meaning without the case.
 		`DELETE FROM enrichments WHERE case_id = ?`,
 		`DELETE FROM narratives WHERE case_id = ?`,
+		`DELETE FROM case_reviews WHERE case_id = ?`,
 		`DELETE FROM app_settings WHERE key = 'egress:' || ?`,
 		`DELETE FROM cases WHERE id = ?`,
 	}

@@ -2709,5 +2709,5 @@ body.deletion-open { overflow: hidden; }
 }
 @media (min-width: 1280px) {
   .external-grid { grid-template-columns: minmax(0, .8fr) minmax(0, 1.2fr); align-items: start; }
-  #external-llm { grid-column: 1 / -1; }
+  #external-llm, #external-review { grid-column: 1 / -1; }
 }

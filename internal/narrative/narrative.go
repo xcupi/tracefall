@@ -30,6 +30,7 @@ import (
 	"strings"
 	"time"
 
+	"tracefall/internal/cmdsem"
 	"tracefall/internal/model"
 	"tracefall/internal/pseudonym"
 )
@@ -90,6 +91,8 @@ type Prepared struct {
 	// "user=" and the instructions) are not checked, so a case that holds a
 	// user named "user" can still send.
 	leaks map[string]bool
+	// reviewRefs is populated only by the separately bounded review path.
+	reviewRefs map[string]Cite
 }
 
 // ErrLeak means the text that was about to be sent still held something
@@ -315,6 +318,13 @@ func build(in Input, names Names) (*Prepared, error) {
 // text is a value from the case: pseudonymized, flattened to one line, cut,
 // and checked.
 func (pr *Prepared) text(s string, max int) string {
+	if pr.reviewRefs != nil {
+		s = cmdsem.Redact(s)
+	}
+	if pr.reviewRefs != nil && reviewProhibitedBody.MatchString(s) {
+		pr.leaks["prohibited SQL or cookie body"] = true
+		return pseudonym.Redacted
+	}
 	s = strings.Join(strings.Fields(pr.p.Apply(s)), " ")
 	s = pseudonym.TruncateRunes(s, max)
 	pr.check(s)
@@ -430,7 +440,11 @@ func (pr *Prepared) Validate(answer string) (Draft, error) {
 			reject("more sentences than allowed")
 			continue
 		}
-		m := citeLineRe.FindStringSubmatch(line)
+		matcher := citeLineRe
+		if pr.reviewRefs != nil {
+			matcher = reviewCiteLineRe
+		}
+		m := matcher.FindStringSubmatch(line)
 		if m == nil {
 			reject("no citation at the end of the line")
 			continue
@@ -493,6 +507,14 @@ func (pr *Prepared) cites(list string) ([]Cite, string) {
 			continue
 		}
 		seen[c] = true
+		if pr.reviewRefs != nil {
+			ref, ok := pr.reviewRefs[c]
+			if !ok {
+				return nil, "an id that is not in the facts"
+			}
+			out = append(out, ref)
+			continue
+		}
 		var n int
 		if _, err := fmt.Sscanf(c[1:], "%d", &n); err != nil || n < 1 {
 			return nil, "an id that is not in the facts"

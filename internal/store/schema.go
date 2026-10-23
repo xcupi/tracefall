@@ -490,6 +490,14 @@ CREATE INDEX IF NOT EXISTS idx_provider_requests ON provider_requests(provider, 
 
 -- Drafts written by a language model about a case's findings, with the exact
 -- text that was sent. Not evidence; kept apart from events and findings.
+CREATE TABLE IF NOT EXISTS case_reviews (
+ id TEXT PRIMARY KEY,
+ case_id TEXT NOT NULL REFERENCES cases(id),
+ created_at TEXT NOT NULL,
+ record_json TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_case_reviews_case ON case_reviews(case_id, created_at);
+
 CREATE TABLE IF NOT EXISTS narratives (
 	id                TEXT PRIMARY KEY,
 	case_id           TEXT NOT NULL REFERENCES cases(id),

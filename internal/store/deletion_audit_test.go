@@ -243,6 +243,10 @@ func populate(t *testing.T, s *store.Store, caseID, name string, events int) {
 		Model: "m", PayloadSystem: "s", PayloadUser: "u", PayloadSHA256: "h"}); err != nil {
 		t.Fatal(err)
 	}
+	// The independent bounded review must also be case-owned.
+	if err := s.SaveCaseReview(store.CaseReview{Narrative: model.Narrative{ID: caseID + "-review1", CaseID: caseID, CreatedAt: now, Status: model.NarrativeOK}}); err != nil {
+		t.Fatal(err)
+	}
 	// An outside service's answer about an indicator of this case.
 	if err := s.UpsertEnrichment(model.Enrichment{
 		ID: caseID + "-en1", CaseID: caseID, Provider: model.EnrichmentVirusTotal, IndicatorType: "sha256",
