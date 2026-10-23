@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"tracefall/internal/enrich/virustotal"
 )
 
 func extSection(t *testing.T, html string) string {
@@ -102,3 +103,34 @@ func TestReport_AppendixDIsBoundedAndSaysSo(t *testing.T) {
 }
 
 var _ = http.StatusOK
+
+func TestAppendixD_RowsStateTheServicesAnswerPlainly(t *testing.T) {
+	long := strings.Repeat("x", 500)
+	p := buildVTSection([]VTResult{
+		{Indicator: hA, IndicatorType: "sha256", Status: "found", FetchedAt: "2026-03-14T09:00:00Z",
+			EventIDs: []string{"e1", "e2", "e3", "e4", "e5", "e6", "e7", "e8", "e9", "e10"},
+			Result: &virustotal.Result{Found: true, Malicious: 3, Suspicious: 2, Harmless: 1, Undetected: 4, Link: "https://example.invalid/a",
+				ThreatLabel: long, MeaningfulName: "a\n\tb  c", TypeDescription: long}},
+		{Indicator: hB, IndicatorType: "sha1", Status: "not_found", FetchedAt: "2026-03-14T09:00:01Z",
+			Result: &virustotal.Result{Found: false, Link: "https://example.invalid/b"}},
+	})
+	if len(p.Rows) != 2 {
+		t.Fatalf("rows = %+v", p.Rows)
+	}
+	k, u := p.Rows[0], p.Rows[1]
+	if k.Verdict != "5 of 10 engines flagged it (3 malicious, 2 suspicious)" {
+		t.Errorf("a suspicious verdict counts toward the engines that flagged it: %q", k.Verdict)
+	}
+	if k.Events != "e1, e2, e3 (+7 more)" {
+		t.Errorf("events = %q", k.Events)
+	}
+	if len([]rune(k.Label)) > 125 || !strings.HasSuffix(k.Label, "...") || len([]rune(k.FileType)) > 125 {
+		t.Errorf("text from the outside service is not bounded: label %d runes", len([]rune(k.Label)))
+	}
+	if k.ReportedName != "a b c" {
+		t.Errorf("reported name = %q: it is shown in one table cell, flattened to one line", k.ReportedName)
+	}
+	if u.Verdict != "not known to VirusTotal" || u.Link != "https://example.invalid/b" || k.Link != "https://example.invalid/a" {
+		t.Errorf("links/verdict: known %q unknown %+v", k.Link, u)
+	}
+}

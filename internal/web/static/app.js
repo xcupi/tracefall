@@ -4422,6 +4422,8 @@ const CASE_NAV = [
   // trail: it is a way of LOOKING at evidence, like the Timeline, not a
   // record of what was done to the case.
   { key: "geomap", label: "Photo Map" },
+  // Outside services sits before the audit trail: what it does is recorded there.
+  { key: "external", label: "Outside services" },
   { key: "audit", label: "Audit History" },
 ];
 
@@ -4797,6 +4799,9 @@ async function renderTabContent(caseId, tab, collections) {
         break;
       case "geomap":
         await renderGeoMapTab(content, caseId);
+        break;
+      case "external":
+        await renderExternalTab(content, caseId);
         break;
       case "audit":
         await renderAuditTab(content, caseId);
@@ -5428,6 +5433,157 @@ const STATUS_LABELS = {
   investigating: "Investigating",
   closed: "Closed",
 };
+
+// ---------------------------------------------------------------------
+// Outside services: how much of the case may leave the server, and the
+// VirusTotal hash lookups that level allows.
+//
+// Nothing here is needed for analysis. The level starts at "none". The page
+// sends nothing by itself: a lookup starts only from the button, and the
+// server refuses it unless the case's level allows file hashes out.
+// ---------------------------------------------------------------------
+async function renderExternalTab(content, caseId) {
+  content.innerHTML = `<p class="empty">Loading...</p>`;
+  const [eg, vt] = await Promise.all([
+    api(`/cases/${caseId}/egress`),
+    api(`/cases/${caseId}/enrich/virustotal`),
+  ]);
+  const st = vt.status;
+  const run = st.run;
+  const running = run && run.state === "running";
+  const canStart = st.allowed && st.configured && !running && st.pending > 0 && st.daily_used < st.daily_limit;
+
+  const options = eg.options
+    .map(
+      (o) => `<label class="egress-option" style="display:block;margin:var(--space-2) 0;${o.selectable ? "" : "opacity:.55;"}">
+        <input type="radio" name="egress-level" value="${esc(o.level)}"
+               ${o.level === eg.level ? "checked" : ""} ${o.selectable ? "" : "disabled"}>
+        <strong>${esc(o.level)}</strong>${o.selectable ? "" : " <span class=\"muted small\">(reserved, not available)</span>"}
+        <div class="muted small" style="margin-left:1.5em">${esc(o.description)}</div>
+      </label>`
+    )
+    .join("");
+
+  let why = "";
+  if (!st.configured) why = "VirusTotal is not configured on this server (no API key).";
+  else if (!st.allowed) why = "This case's level does not allow file hashes to leave the server.";
+  else if (running) why = "A lookup is running.";
+  else if (st.candidates === 0) why = "No file hashes were found in this case's events.";
+  else if (st.pending === 0) why = "Every hash has already been answered.";
+  else if (st.daily_used >= st.daily_limit) why = "The daily request allowance is used up.";
+
+  const runLine = run
+    ? `<p class="small">Last run: <strong>${esc(run.state)}</strong> &middot; ${run.done} of ${run.total} done
+         (${run.found} known, ${run.not_found} not known, ${run.errors} errors)${run.reason ? " &middot; " + esc(run.reason) : ""}</p>`
+    : "";
+
+  const rows = (vt.results || [])
+    .slice()
+    .sort((a, b) => {
+      const sc = (r) => (r.status === "error" ? -2 : r.result && r.result.found ? r.result.malicious + r.result.suspicious : -1);
+      return sc(b) - sc(a) || a.indicator.localeCompare(b.indicator);
+    })
+    .map((r) => {
+      let verdict;
+      if (r.status === "error") verdict = `no answer (${esc(r.error)})`;
+      else if (!r.result || !r.result.found) verdict = "not known to VirusTotal";
+      else {
+        const x = r.result;
+        const engines = x.malicious + x.suspicious + x.harmless + x.undetected;
+        verdict = `${x.malicious + x.suspicious} of ${engines} engines flagged it`;
+        if (x.threat_label) verdict += `<div class="muted small">${esc(x.threat_label)}</div>`;
+      }
+      return `<tr>
+        <td class="mono small" style="word-break:break-all">${esc(r.indicator_type)}<br>${esc(r.indicator)}</td>
+        <td class="small">${verdict}</td>
+        <td class="mono small">${esc((r.source_event_ids || []).slice(0, 3).join(", "))}${(r.source_event_ids || []).length > 3 ? " (+" + ((r.source_event_ids || []).length - 3) + " more)" : ""}</td>
+        <td class="mono small">${esc(fmtTime(r.fetched_at))}</td>
+      </tr>`;
+    })
+    .join("");
+
+  content.innerHTML = `
+    <div id="ext-root">
+      <h2>Outside services</h2>
+      <p class="muted small">Analysis never needs these. What is sent is decided here, per case, and every change and every
+        transmission is written to the audit history.</p>
+
+      <h3>How much of this case may leave the server</h3>
+      <div id="egress-options">${options}</div>
+      <p id="egress-msg" class="small" role="status"></p>
+
+      <h3>VirusTotal (file hashes only)</h3>
+      <p class="small">${st.candidates} file hash(es) in this case's events &middot; ${st.already_answered} answered &middot; ${st.pending} waiting.
+        Free-key allowance used in the last 24 hours: ${st.daily_used} of ${st.daily_limit}. Lookups are spaced to stay under
+        4 per minute, so ${st.pending} hash(es) take about ${Math.ceil((st.pending * 15.5) / 60)} minute(s).</p>
+      <p class="small muted">Only the hash is sent: no file, file name, path, host, user or case detail. VirusTotal's answer is an
+        outside opinion, not evidence: it is kept apart from the findings and never changes one.
+        &ldquo;Not known&rdquo; means VirusTotal has not been given that file, not that it is safe.</p>
+      <p>
+        <button type="button" class="btn-primary" id="vt-start" ${canStart ? "" : "disabled"}>Look up hashes</button>
+        <button type="button" class="btn-secondary" id="vt-cancel" ${running ? "" : "hidden"}>Stop</button>
+        ${canStart ? "" : `<span class="muted small" style="margin-left:var(--space-2)">${esc(why)}</span>`}
+      </p>
+      <p id="vt-msg" class="small" role="status"></p>
+      ${runLine}
+      ${
+        rows
+          ? `<div class="table-wrap"><table class="data-table">
+              <thead><tr><th>Hash</th><th>VirusTotal answer</th><th>Seen in events</th><th>Checked (${esc(tzLabel())})</th></tr></thead>
+              <tbody>${rows}</tbody></table></div>`
+          : `<p class="empty">No VirusTotal answers stored for this case.</p>`
+      }
+    </div>`;
+
+  const root = document.getElementById("ext-root");
+  const say = (id, text, bad) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    if (bad) el.innerHTML = `<span class="field-error-box">${esc(text)}</span>`;
+    else el.textContent = text;
+  };
+
+  document.querySelectorAll('input[name="egress-level"]').forEach((r) =>
+    r.addEventListener("change", async () => {
+      try {
+        await api(`/cases/${caseId}/egress`, { method: "PUT", body: JSON.stringify({ level: r.value }) });
+        await renderExternalTab(content, caseId);
+      } catch (e) {
+        say("egress-msg", e.message || String(e), true);
+      }
+    })
+  );
+  const start = document.getElementById("vt-start");
+  if (start)
+    start.addEventListener("click", async () => {
+      start.disabled = true;
+      try {
+        await api(`/cases/${caseId}/enrich/virustotal`, { method: "POST", body: "{}" });
+        await renderExternalTab(content, caseId);
+      } catch (e) {
+        say("vt-msg", e.message || String(e), true);
+        start.disabled = false;
+      }
+    });
+  const cancel = document.getElementById("vt-cancel");
+  if (cancel)
+    cancel.addEventListener("click", async () => {
+      try {
+        await api(`/cases/${caseId}/enrich/virustotal/cancel`, { method: "POST", body: "{}" });
+        await renderExternalTab(content, caseId);
+      } catch (e) {
+        say("vt-msg", e.message || String(e), true);
+      }
+    });
+
+  // While a run is going, refresh. Stop as soon as the analyst leaves the
+  // page: the root this render created is no longer the one on screen.
+  if (running) {
+    setTimeout(() => {
+      if (document.getElementById("ext-root") === root) renderExternalTab(content, caseId).catch(() => {});
+    }, 3000);
+  }
+}
 
 async function renderAuditTab(content, caseId) {
   content.innerHTML = `<p class="empty">Loading audit history...</p>`;
