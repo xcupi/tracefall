@@ -216,3 +216,16 @@ func TestLookup_AnswersThatAreNotAnalysesAreRefused(t *testing.T) {
 		}
 	}
 }
+
+func TestLookup_ACancelledRequestStillIsContextCanceled(t *testing.T) {
+	c2 := New(testKey)
+	c2.Interval = 0
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { time.Sleep(300 * time.Millisecond) }))
+	defer ts.Close()
+	c2.BaseURL = ts.URL
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel2()
+	if _, err := c2.Lookup(ctx2, sha256a); !errors.Is(err, context.DeadlineExceeded) || strings.Contains(err.Error(), testKey) {
+		t.Errorf("in-flight cancellation: %v", err)
+	}
+}

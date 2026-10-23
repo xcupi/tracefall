@@ -386,6 +386,11 @@ func (s *Service) runVirusTotal(ctx context.Context, caseID string, pending []VT
 				return
 			}
 		}
+		if ctx.Err() != nil {
+			// cancelled while the request was in flight: that is not an answer
+			finish("cancelled", "")
+			return
+		}
 		e := model.Enrichment{ID: uuid.NewString(), CaseID: caseID, Provider: model.EnrichmentVirusTotal, IndicatorType: c.Type, Indicator: c.Hash,
 			FetchedAt: time.Now().UTC(), SourceEventIDs: c.EventIDs}
 		switch {

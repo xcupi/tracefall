@@ -419,6 +419,11 @@ func TestVirusTotal_CancelStopsTheRunAndKeepsWhatWasAnswered(t *testing.T) {
 		t.Errorf("run = %+v", run)
 	}
 	res, _ := svc.VirusTotalResults(id)
+	for _, r := range res {
+		if r.Status == "error" {
+			t.Errorf("a cancelled request was stored as an error answer: %+v", r)
+		}
+	}
 	if len(res) != run.Done {
 		t.Errorf("%d stored answers for %d done", len(res), run.Done)
 	}

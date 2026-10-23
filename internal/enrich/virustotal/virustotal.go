@@ -204,8 +204,18 @@ func scrub(err error, key string) error {
 	if key == "" {
 		return err
 	}
-	return errors.New(strings.ReplaceAll(err.Error(), key, "[key]"))
+	return scrubbed{msg: strings.ReplaceAll(err.Error(), key, "[key]"), err: err}
 }
+
+// scrubbed reads without the key but still unwraps to the original error, so
+// errors.Is(err, context.Canceled) and the like keep working.
+type scrubbed struct {
+	msg string
+	err error
+}
+
+func (e scrubbed) Error() string { return e.msg }
+func (e scrubbed) Unwrap() error { return e.err }
 
 func parse(body []byte, link string) (Result, error) {
 	var d struct {
