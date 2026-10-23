@@ -486,3 +486,44 @@ func (p *Pseudonymizer) Entries() []Entry {
 	sort.Slice(out, func(i, j int) bool { return out[i].Token < out[j].Token })
 	return out
 }
+
+// Tokens returns the tokens that appear in s, in order, each once.
+func Tokens(s string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, t := range tokenRe.FindAllString(s, -1) {
+		if !seen[t] {
+			seen[t] = true
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+// Issued reports whether this Pseudonymizer issued the token (or it is the
+// fixed redaction mark). A token that merely has the right shape, such as one
+// a model made up, is not issued.
+func (p *Pseudonymizer) Issued(token string) bool {
+	if token == Redacted {
+		return true
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	_, ok := p.rev[token]
+	return ok
+}
+
+// TruncateRunes shortens s to at most n runes without cutting a token in two:
+// half of a token is neither a token nor a name, and would only confuse a
+// reader. A cut text ends with an ellipsis.
+func TruncateRunes(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	cut := string(r[:n])
+	if i := strings.LastIndexByte(cut, '['); i >= 0 && !strings.Contains(cut[i:], "]") {
+		cut = cut[:i]
+	}
+	return cut + "..."
+}

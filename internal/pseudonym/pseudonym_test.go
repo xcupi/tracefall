@@ -330,3 +330,46 @@ func TestApply_EscapedBackslashPathsAreNotUNC(t *testing.T) {
 		t.Errorf("a UNC path was missed: %q", got)
 	}
 }
+
+func TestTokens_AndIssued_OnlyWhatThisPseudonymizerIssuedIsIssued(t *testing.T) {
+	p := learned()
+	out := p.Apply("host01 then alice then host01")
+	toks := Tokens(out)
+	if len(toks) != 2 || toks[0] != "[HOST_1]" || toks[1] != "[USER_1]" {
+		t.Fatalf("tokens = %v in %q", toks, out)
+	}
+	for _, tk := range toks {
+		if !p.Issued(tk) {
+			t.Errorf("%s was issued", tk)
+		}
+	}
+	for _, tk := range []string{"[HOST_2]", "[IP_PUB_1]", "[USER_9]", "HOST_1", ""} {
+		if p.Issued(tk) {
+			t.Errorf("%q was never issued", tk)
+		}
+	}
+	if !p.Issued(Redacted) {
+		t.Errorf("the redaction mark is always valid")
+	}
+	if len(Tokens("no tokens here, only [brackets] and (HOST_1)")) != 0 {
+		t.Errorf("a non-token was found")
+	}
+}
+
+func TestTruncateRunes_NeverCutsATokenInTwo(t *testing.T) {
+	s := "abcdefghij [HOST_12] klmnop"
+	if got := TruncateRunes(s, 100); got != s {
+		t.Errorf("short text changed: %q", got)
+	}
+	// cut inside the token: the whole token is dropped, not half of it
+	if got := TruncateRunes(s, 14); got != "abcdefghij ..." {
+		t.Errorf("got %q", got)
+	}
+	// cut right after the token keeps it
+	if got := TruncateRunes(s, 20); got != "abcdefghij [HOST_12]..." {
+		t.Errorf("got %q", got)
+	}
+	if got := TruncateRunes("héllo wörld", 5); got != "héllo..." {
+		t.Errorf("runes, not bytes: %q", got)
+	}
+}
