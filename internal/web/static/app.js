@@ -5442,8 +5442,10 @@ const STATUS_LABELS = {
 // sends nothing by itself: a lookup starts only from the button, and the
 // server refuses it unless the case's level allows file hashes out.
 // ---------------------------------------------------------------------
-async function renderExternalTab(content, caseId) {
-  content.innerHTML = `<p class="empty">Loading...</p>`;
+async function renderExternalTab(content, caseId, refresh) {
+  // A refresh while a run is going keeps the page as it is until the new one
+  // is ready: no "Loading..." flash, and the scroll position stays.
+  if (!refresh) content.innerHTML = `<p class="empty">Loading...</p>`;
   const [eg, vt] = await Promise.all([
     api(`/cases/${caseId}/egress`),
     api(`/cases/${caseId}/enrich/virustotal`),
@@ -5502,6 +5504,7 @@ async function renderExternalTab(content, caseId) {
     })
     .join("");
 
+  const scrollY = window.scrollY;
   content.innerHTML = `
     <div id="ext-root">
       <h2>Outside services</h2>
@@ -5535,6 +5538,7 @@ async function renderExternalTab(content, caseId) {
       }
     </div>`;
 
+  if (refresh) window.scrollTo(0, scrollY);
   const root = document.getElementById("ext-root");
   const say = (id, text, bad) => {
     const el = document.getElementById(id);
@@ -5580,7 +5584,7 @@ async function renderExternalTab(content, caseId) {
   // page: the root this render created is no longer the one on screen.
   if (running) {
     setTimeout(() => {
-      if (document.getElementById("ext-root") === root) renderExternalTab(content, caseId).catch(() => {});
+      if (document.getElementById("ext-root") === root) renderExternalTab(content, caseId, true).catch(() => {});
     }, 3000);
   }
 }
