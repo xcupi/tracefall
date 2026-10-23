@@ -310,3 +310,35 @@ func TestNone_IsNeverConfiguredAndSendsNothing(t *testing.T) {
 		t.Errorf("err = %v", err)
 	}
 }
+
+// requiredOff is written out here, apart from the list in the code, on purpose:
+// a test that walked the code's own list would pass when a feature is dropped
+// from it. Each of these gives a model a way to act, and each was found to be
+// reachable until it was switched off.
+var requiredOff = []string{
+	"shell_tool", "unified_exec", "code_mode_host", "code_mode_interrupt", "computer_use", "browser_use", "browser_use_external",
+	"plugins", "apps", "multi_agent", "hooks", "image_generation", "memories", "goals", "view_image",
+}
+
+func TestCodex_EveryFeatureThatLetsAModelActIsSwitchedOff(t *testing.T) {
+	c, f := newFake(t, "ok")
+	if _, err := c.Chat(context.Background(), msgsWithMarker); err != nil {
+		t.Fatal(err)
+	}
+	args := f.read(t, "args.txt")
+	for _, feat := range requiredOff {
+		if !strings.Contains(args, "--disable\n"+feat+"\n") {
+			t.Errorf("%s is not disabled", feat)
+		}
+	}
+	// and the code's own list may not shrink below what is required
+	have := map[string]bool{}
+	for _, x := range codexDisabledFeatures {
+		have[x] = true
+	}
+	for _, feat := range requiredOff {
+		if !have[feat] {
+			t.Errorf("%s is missing from the list in the code", feat)
+		}
+	}
+}
