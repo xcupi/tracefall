@@ -46,7 +46,12 @@ var (
 
 // SetLLM configures the language model. Call it before the service handles
 // requests. A nil or key-less client leaves drafting unavailable.
-func (s *Service) SetLLM(c *llm.Client) { s.llm = c }
+func (s *Service) SetLLM(c llm.Chatter) {
+	if c == nil {
+		c = llm.None{}
+	}
+	s.llm = c
+}
 
 // NarrativeRun is the state of a request.
 type NarrativeRun struct {
@@ -99,6 +104,9 @@ type NarrativeStatus struct {
 	Destination string `json:"destination,omitempty"`
 	Local       bool   `json:"local"`
 	Model       string `json:"model,omitempty"`
+	// Notice is what the provider route says about how it treats what it
+	// receives, to be read before acknowledging a request.
+	Notice      string `json:"notice,omitempty"`
 	EgressLevel string `json:"egress_level"`
 	// Allowed: the egress level lets this request go where it goes.
 	Allowed bool `json:"allowed"`
@@ -160,6 +168,7 @@ func (s *Service) NarrativeStatus(caseID string) (NarrativeStatus, error) {
 	if s.llm.Configured() {
 		st.Destination, _ = s.llm.Destination()
 		st.Model = s.llm.ModelName()
+		st.Notice = s.llm.Notice()
 	}
 	if n, ok, err := s.store.LatestNarrative(caseID); err != nil {
 		return NarrativeStatus{}, err
@@ -351,6 +360,10 @@ func (s *Service) runNarrative(ctx context.Context, caseID string, pr *narrative
 		return
 	}
 	n.RawAnswer, n.PromptTokens, n.CompletionTokens = res.Content, res.PromptTokens, res.CompletionTokens
+	if res.Model != "" {
+		// the model that answered, when the provider says (a default is not known until then)
+		n.Model = res.Model
+	}
 	draft, verr := pr.Validate(res.Content)
 	n.Rejected = draft.Rejected
 	if len(draft.Reasons) > 0 {

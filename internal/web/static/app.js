@@ -5471,7 +5471,7 @@ function renderNarrativeSection(nv) {
       <div class="narrative-draft" style="border:1px solid var(--border, #334);padding:var(--space-3);border-radius:6px">
         <p class="small"><strong>Draft written by a language model: not a finding, not evidence.</strong>
           ${esc(fmtTime(l.created_at))} &middot; ${l.local ? "ran on this machine" : "sent to " + esc(l.destination)} &middot; ${esc(l.model)}
-          &middot; ${l.prompt_tokens} tokens in, ${l.completion_tokens} out</p>
+          ${l.prompt_tokens || l.completion_tokens ? ` &middot; ${l.prompt_tokens} tokens in, ${l.completion_tokens} out` : ""}</p>
         ${l.stale ? `<p><strong>The findings changed after this draft was written.</strong> Draft it again.</p>` : ""}
         ${
           l.status === "ok"
@@ -5497,7 +5497,8 @@ function renderNarrativeSection(nv) {
     ${
       nv.configured && !nv.local
         ? `<p class="small"><label><input type="checkbox" id="nv-ack"> I have checked this provider's terms for the data it will receive
-             (a free tier may use what it receives to train its models).</label></p>`
+             (a free tier may use what it receives to train its models).</label></p>
+           ${nv.notice ? `<p class="small"><strong>Read this first:</strong> ${esc(nv.notice)}</p>` : ""}`
         : ""
     }
     <p>

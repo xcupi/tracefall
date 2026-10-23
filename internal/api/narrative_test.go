@@ -287,7 +287,7 @@ func TestNarrative_WhatLeavesHoldsNoNameAndTheDraftComesBackWithThem(t *testing.
 	if len(s0.Cites) != 2 || s0.Cites[0].ID != "fnd-1" || s0.Cites[0].Kind != "finding" || s0.Cites[1].ID != "ev-1" || s0.Cites[1].Kind != "event" {
 		t.Errorf("cites map back to real ids: %+v", s0.Cites)
 	}
-	if d.Model != "stub-model" || d.Destination != "llm.example.invalid" || d.Local || d.PromptTokens != 321 || d.CompletionTokens != 45 || d.FindingsCovered != 2 || d.Stale {
+	if d.Model != "stub-model-2026" || d.Destination != "llm.example.invalid" || d.Local || d.PromptTokens != 321 || d.CompletionTokens != 45 || d.FindingsCovered != 2 || d.Stale {
 		t.Errorf("view = %+v", d)
 	}
 
@@ -515,5 +515,80 @@ func TestViewOf_ADraftIsStaleWhenAFindingIsReplacedEvenIfTheCountIsTheSame(t *te
 	}
 	if v := viewOf(n, nil); !v.Stale {
 		t.Errorf("no findings left must be stale")
+	}
+}
+
+// chatterStub is a provider that is not a chat completions endpoint: it names
+// no model until it answers, and carries a notice.
+type chatterStub struct {
+	answered string
+	notice   string
+	seen     []string
+}
+
+func (c *chatterStub) Chat(_ context.Context, m []llm.Message) (llm.Result, error) {
+	c.seen = append(c.seen, m[len(m)-1].Content)
+	_, ans := goodAnswer(m[len(m)-1].Content)
+	var body struct {
+		Choices []struct {
+			Message llm.Message `json:"message"`
+		} `json:"choices"`
+	}
+	_ = json.Unmarshal([]byte(ans), &body)
+	return llm.Result{Content: body.Choices[0].Message.Content, Model: c.answered}, nil
+}
+func (c *chatterStub) Configured() bool { return true }
+func (c *chatterStub) Destination() (string, bool) {
+	return "chatgpt.com (through the Codex CLI)", false
+}
+func (c *chatterStub) ModelName() string { return "the Codex CLI's default model" }
+func (c *chatterStub) Notice() string    { return c.notice }
+
+func TestNarrative_AnyProviderWorksAndTheModelThatAnsweredIsRecorded(t *testing.T) {
+	mux, svc := newTestRouterWithService(t)
+	cs := &chatterStub{answered: "gpt-actual-1", notice: "Improve the model for everyone is something this program cannot check."}
+	svc.SetLLM(cs)
+	id := caseWithFindings(t, svc, mux, nil)
+	setLevel(t, mux, id, "pseudonymized")
+
+	var st NarrativeStatus
+	doJSON(t, mux, "GET", "/api/cases/"+id+"/enrich/narrative", nil, &st)
+	if !st.Configured || st.Destination != "chatgpt.com (through the Codex CLI)" || st.Model != "the Codex CLI's default model" || st.Notice != cs.notice || !st.NeedsAcknowledgement {
+		t.Errorf("status = %+v", st)
+	}
+	if rec := startNarr(t, mux, id, false); rec.Code != http.StatusForbidden {
+		t.Errorf("any provider that is not this machine needs the acknowledgement: %d", rec.Code)
+	}
+	if rec := startNarr(t, mux, id, true); rec.Code != http.StatusAccepted {
+		t.Fatalf("start: %d %s", rec.Code, rec.Body.String())
+	}
+	st = waitNarr(t, svc, id)
+	if st.Latest == nil || st.Latest.Status != "ok" || st.Latest.Model != "gpt-actual-1" {
+		t.Errorf("the model that answered must replace the description of the default: %+v", st.Latest)
+	}
+	if len(cs.seen) != 1 || strings.Contains(strings.ToLower(cs.seen[0]), "alice") {
+		t.Errorf("the provider received %d request(s) / a name", len(cs.seen))
+	}
+	if st.Latest.PromptTokens != 0 || st.Latest.CompletionTokens != 0 {
+		t.Errorf("tokens a provider does not report are not invented: %+v", st.Latest)
+	}
+	b, _ := svc.buildReport(id, time.Date(2026, 3, 14, 12, 0, 0, 0, time.UTC))
+	h := appendixEOf(t, string(b.HTML))
+	if strings.Contains(h, "Tokens used") || !strings.Contains(h, "gpt-actual-1") || !strings.Contains(h, "chatgpt.com (through the Codex CLI)") {
+		t.Errorf("appendix:\n%s", h)
+	}
+}
+
+func TestSetLLM_NilMeansNotConfigured(t *testing.T) {
+	mux, svc := newTestRouterWithService(t)
+	svc.SetLLM(&chatterStub{})
+	svc.SetLLM(nil)
+	id := caseWithFindings(t, svc, mux, nil)
+	var st NarrativeStatus
+	if rec := doJSON(t, mux, "GET", "/api/cases/"+id+"/enrich/narrative", nil, &st); rec.Code != 200 || st.Configured {
+		t.Errorf("%d %+v", rec.Code, st)
+	}
+	if rec := startNarr(t, mux, id, true); rec.Code != http.StatusNotImplemented {
+		t.Errorf("start: %d", rec.Code)
 	}
 }

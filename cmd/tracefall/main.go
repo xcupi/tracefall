@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	// tzdata is embedded so timezone conversion works identically on
@@ -139,20 +140,40 @@ func main() {
 		slog.Info("VirusTotal lookups available; each case must allow them (egress level hashes)")
 	}
 
-	// A language model drafts summaries. It needs a key and a model name, and
-	// is then still gated per case: a model on another machine is reached only
-	// at egress level "pseudonymized", with the analyst's acknowledgement.
-	// The key is read from the environment only; it is not stored, logged or
-	// put in any report.
-	if key := os.Getenv("TRACEFALL_LLM_API_KEY"); key != "" {
-		c := llm.New(os.Getenv("TRACEFALL_LLM_BASE_URL"), key, os.Getenv("TRACEFALL_LLM_MODEL"))
+	// A language model drafts summaries. It is gated per case either way: a
+	// model on another machine is reached only at egress level
+	// "pseudonymized", with the analyst's acknowledgement. Credentials come
+	// from the environment (or, for the Codex CLI, from its own sign-in) and
+	// are not stored, logged or put in any report.
+	//
+	//	TRACEFALL_LLM_PROVIDER   "openai-compatible" (default) or "codex-cli"
+	//	  openai-compatible: TRACEFALL_LLM_API_KEY, TRACEFALL_LLM_MODEL,
+	//                       TRACEFALL_LLM_BASE_URL (default DeepSeek)
+	//	  codex-cli:         the Codex CLI signed in with a ChatGPT account;
+	//                       TRACEFALL_CODEX_BIN and TRACEFALL_LLM_MODEL optional
+	switch p := strings.ToLower(strings.TrimSpace(os.Getenv("TRACEFALL_LLM_PROVIDER"))); p {
+	case "codex-cli":
+		c := llm.NewCodexCLI(os.Getenv("TRACEFALL_CODEX_BIN"), os.Getenv("TRACEFALL_LLM_MODEL"))
 		if c.Configured() {
 			svc.SetLLM(c)
-			host, local := c.Destination()
-			slog.Info("language-model summaries available", "host", host, "local", local, "model", c.ModelName())
+			host, _ := c.Destination()
+			slog.Info("language-model summaries available through the Codex CLI", "destination", host, "model", c.ModelName())
 		} else {
-			slog.Warn("TRACEFALL_LLM_API_KEY is set but TRACEFALL_LLM_MODEL is not: summaries are not available")
+			slog.Warn("TRACEFALL_LLM_PROVIDER=codex-cli but the Codex CLI is not found or not signed in: summaries are not available")
 		}
+	case "", "openai-compatible":
+		if key := os.Getenv("TRACEFALL_LLM_API_KEY"); key != "" {
+			c := llm.New(os.Getenv("TRACEFALL_LLM_BASE_URL"), key, os.Getenv("TRACEFALL_LLM_MODEL"))
+			if c.Configured() {
+				svc.SetLLM(c)
+				host, local := c.Destination()
+				slog.Info("language-model summaries available", "host", host, "local", local, "model", c.ModelName())
+			} else {
+				slog.Warn("TRACEFALL_LLM_API_KEY is set but TRACEFALL_LLM_MODEL is not: summaries are not available")
+			}
+		}
+	default:
+		slog.Warn("TRACEFALL_LLM_PROVIDER is not recognised: summaries are not available", "value", p)
 	}
 
 	// Server-side pipeline: work a previous process left running is put

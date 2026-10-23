@@ -193,7 +193,7 @@ type Service struct {
 	enrich *enrichManager
 	// llm drafts summaries; nil or key-less means drafting is not configured.
 	// narr holds the state of requests in progress, in memory only.
-	llm  *llm.Client
+	llm  llm.Chatter
 	narr *narrativeManager
 	// actor is the identity behind the CURRENT request, set by
 	// WithActor on a per-request copy. The shared Service always has the
@@ -267,6 +267,7 @@ func NewService(s *store.Store, files *casefiles.Store) *Service {
 		heavy: gate.New(DefaultHeavyOps), imports: gate.New(DefaultImports),
 		enrich: newEnrichManager(),
 		narr:   newNarrativeManager(),
+		llm:    llm.None{},
 	}
 }
 

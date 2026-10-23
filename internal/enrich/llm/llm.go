@@ -50,6 +50,38 @@ type RateLimitError struct{ RetryAfter time.Duration }
 
 func (e *RateLimitError) Error() string { return "llm: rate limit hit" }
 
+// Chatter is anything that can turn messages into a model's answer: a chat
+// completions endpoint (Client), or the Codex CLI signed in with a ChatGPT
+// account (CodexCLI). The rest of the program depends on this, not on either.
+type Chatter interface {
+	// Chat sends the messages and returns the answer.
+	Chat(ctx context.Context, msgs []Message) (Result, error)
+	// Configured reports whether anything can be sent at all.
+	Configured() bool
+	// Destination says where text goes and whether that is this machine.
+	Destination() (host string, local bool)
+	// ModelName is the model asked, or a description when it is the provider's default.
+	ModelName() string
+	// Notice is a sentence about how this provider handles what it receives,
+	// shown to the analyst before they acknowledge sending anything. May be empty.
+	Notice() string
+}
+
+// None is the Chatter of a server with no model configured.
+type None struct{}
+
+func (None) Chat(context.Context, []Message) (Result, error) { return Result{}, ErrNotConfigured }
+func (None) Configured() bool                                { return false }
+func (None) Destination() (string, bool)                     { return "", false }
+func (None) ModelName() string                               { return "" }
+func (None) Notice() string                                  { return "" }
+
+// Notice: a chat completions endpoint has no general statement to make about
+// its provider's data handling; the analyst has to know their provider.
+func (c *Client) Notice() string { return "" }
+
+var _ Chatter = (*Client)(nil)
+
 // Message is one chat message.
 type Message struct {
 	Role    string `json:"role"`
