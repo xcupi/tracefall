@@ -33,25 +33,26 @@ func TestVTAllowance_DayIsRollingAndMonthIsTheCalendarMonthInUTC(t *testing.T) {
 	record(t, svc, time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC), 5)     // first instant of the month
 	record(t, svc, now.Add(-25*time.Hour), 2)                          // this month, not today
 	record(t, svc, now.Add(-time.Hour), 3)                             // today
+	record(t, svc, now.Add(-23*time.Hour), 1)                          // still inside the rolling 24 hours
 	al, err := svc.vtAllowance(now)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if al.dailyUsed != 3 || al.monthlyUsed != 10 || al.remaining != 7 {
-		t.Errorf("allowance = %+v; want day 3, month 10 (the February requests do not count), remaining 7", al)
+	if al.dailyUsed != 4 || al.monthlyUsed != 11 || al.remaining != 6 {
+		t.Errorf("allowance = %+v; want day 4 (a request 23 hours ago is inside the day), month 11 (the February requests do not count), remaining 6", al)
 	}
 	// the month is what limits when it is the tighter one
-	withLimits(t, 10, 12)
+	withLimits(t, 10, 13)
 	al, _ = svc.vtAllowance(now)
 	if al.remaining != 2 || al.limiting() != "month" || al.err() != ErrEnrichMonthlyLimit {
 		t.Errorf("allowance = %+v limiting %s", al, al.limiting())
 	}
-	withLimits(t, 4, 100)
+	withLimits(t, 5, 100)
 	al, _ = svc.vtAllowance(now)
 	if al.remaining != 1 || al.limiting() != "day" || al.err() != ErrEnrichDailyLimit {
 		t.Errorf("allowance = %+v limiting %s", al, al.limiting())
 	}
-	withLimits(t, 2, 100)
+	withLimits(t, 3, 100)
 	if al, _ = svc.vtAllowance(now); al.remaining != 0 {
 		t.Errorf("an overdrawn allowance must read as 0 remaining, got %d", al.remaining)
 	}
