@@ -569,6 +569,11 @@ func TestNarrative_AnyProviderWorksAndTheModelThatAnsweredIsRecorded(t *testing.
 	if len(cs.seen) != 1 || strings.Contains(strings.ToLower(cs.seen[0]), "alice") {
 		t.Errorf("the provider received %d request(s) / a name", len(cs.seen))
 	}
+	for _, a := range auditActions(t, svc, id) {
+		if a.Action == model.AuditNarrativeFinished && strings.Contains(a.Summary, "0 prompt") {
+			t.Errorf("the audit entry reports tokens the provider never reported: %q", a.Summary)
+		}
+	}
 	if st.Latest.PromptTokens != 0 || st.Latest.CompletionTokens != 0 {
 		t.Errorf("tokens a provider does not report are not invented: %+v", st.Latest)
 	}

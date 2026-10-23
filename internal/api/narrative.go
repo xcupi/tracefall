@@ -331,8 +331,10 @@ func (s *Service) runNarrative(ctx context.Context, caseID string, pr *narrative
 		run.mu.Unlock()
 		run.cancel()
 		s.audit(caseID, model.AuditNarrativeFinished, model.TargetCase, caseID, fmt.Sprintf(
-			"Summary request %s: %d sentence(s) kept, %d dropped by validation, %d prompt and %d completion tokens.%s",
-			state, len(sentencesOf(n)), n.Rejected, n.PromptTokens, n.CompletionTokens, map[bool]string{true: " " + reason + ".", false: ""}[reason != ""]))
+			"Summary request %s: %d sentence(s) kept, %d dropped by validation.%s%s",
+			state, len(sentencesOf(n)), n.Rejected,
+			map[bool]string{true: fmt.Sprintf(" %d prompt and %d completion tokens.", n.PromptTokens, n.CompletionTokens), false: ""}[n.PromptTokens > 0 || n.CompletionTokens > 0],
+			map[bool]string{true: " " + reason + ".", false: ""}[reason != ""]))
 	}
 
 	msgs := []llm.Message{{Role: "system", Content: pr.System}, {Role: "user", Content: pr.User}}
