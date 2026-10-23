@@ -112,7 +112,7 @@ func (e Event) ComputeDedupHash() string {
 	// have no process name, so rows tie on type, time and user. The row's table
 	// and AutoIncId (the source reference) identify it, and they are the same
 	// when the same database is collected again.
-	if e.ArtifactType == ArtifactSRUM {
+	if e.ArtifactType == ArtifactSRUM || e.ArtifactType == ArtifactWebCache {
 		parts = append(parts, e.SourceReference)
 	}
 	// Most Extra fields are interpretation or renderer metadata, not identity.

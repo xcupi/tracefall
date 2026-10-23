@@ -218,8 +218,29 @@ func Build(tables []Table, o Options) []byte {
 		recs = append(recs, Record{Fixed: fx, Var: v, Key: be32(uint32(i))})
 	}
 	cp := &page{no: 4, flags: flagRoot | flagLeaf, fdp: 1}
+	var cents []entry
 	for i, r := range recs {
-		cp.entries = append(cp.entries, entry{key: r.Key, data: b.encodeRecord(catCols, r), defunct: rows[i].dropped})
+		cents = append(cents, entry{key: r.Key, data: b.encodeRecord(catCols, r), defunct: rows[i].dropped})
+	}
+	// a catalog that does not fit one page hangs leaf pages under page 4
+	per := (b.ps - b.hdr) / 90
+	if len(cents) <= per {
+		cp.entries = cents
+	} else {
+		cp.flags = flagRoot | flagParent
+		var prev *page
+		for i := 0; i < len(cents); i += per {
+			j := i + per
+			if j > len(cents) {
+				j = len(cents)
+			}
+			lp := b.leafPage(1, append([]entry(nil), cents[i:j]...))
+			if prev != nil {
+				prev.next, lp.prev = lp.no, prev.no
+			}
+			prev = lp
+			cp.entries = append(cp.entries, entry{key: cents[j-1].key, data: le32(lp.no)})
+		}
 	}
 	b.pages[4] = cp
 	if o.Shadow || o.BrokenCatalog {

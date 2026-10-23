@@ -345,6 +345,11 @@ const (
 	// much work in the interval ending at its timestamp; it does not show what
 	// the application did.
 	ArtifactSRUM = "srum_db"
+	// ArtifactWebCache is the Internet Explorer / Edge Legacy WebCache
+	// database (WebCacheV01.dat, an ESE database). Its History containers
+	// hold one record per URL with the last access time and an access count,
+	// not one record per visit; its Content containers hold cache entries.
+	ArtifactWebCache = "webcache_db"
 	// ArtifactNetworkCapture is a packet capture (pcap or pcapng). Its
 	// events are stamped by the CAPTURING machine's clock, not by any host
 	// that appears in it; the two can differ (see package clockskew).

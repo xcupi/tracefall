@@ -1043,8 +1043,9 @@ than assumed:
   and emitting an event per key would bury an investigator.
 - **Other ESE / JET databases.** Tracefall has an ESE reader (`internal/ese`)
   and reads **SRUM** (`SRUDB.dat`) with it. `WebCacheV01.dat` (Internet
-  Explorer and Edge Legacy history), `Windows.edb`, the BITS database and
-  `ntds.dit` are opened by the reader but their tables are not interpreted.
+  Explorer and Edge Legacy history and cache) is read too. `Windows.edb`, the
+  BITS database and `ntds.dit` are opened by the reader but their tables are
+  not interpreted.
   The reader's scope, validation and limits are in `docs/evidence-triage.md`,
   "ESE databases".
 - **WMI repository**, **`$Secure` / `$Bitmap` / `$Quota` / `$ObjId` /

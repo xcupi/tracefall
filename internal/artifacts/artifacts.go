@@ -442,6 +442,11 @@ var supportedTypeInfo = map[string]typeInfo{
 		why:  "Windows records, about once an hour, what each application and service used: CPU cycles, foreground time, disk I/O and bytes sent and received per network interface. It shows that a program ran and how much data it moved, including programs that left no other trace.",
 		note: "A row shows an application was active and what it used in the interval ending at the row's time; it does not show what it did, and the interval is not the moment of any single action. Applications and users are named by the database's own id map; an id with no map entry is shown as an id. Only the application resource, network usage, network connectivity and push notification tables are interpreted; the other tables are counted and named. A database copied from a running system can lack the newest records, which are still in the SRU log files.",
 	},
+	model.ArtifactWebCache: {
+		label: "IE / Edge Legacy web cache (WebCache)", family: FamilyBrowser, priority: PriorityMedium,
+		why:  "Internet Explorer and Edge Legacy keep browsing history and a cache index in one ESE database: the URLs visited, when they were last accessed, how often, and the resources cached.",
+		note: "A history record is one URL with its last access time and an access count, not one record per visit. A cache record shows that a copy was held, not that the user chose to load it. Cookie containers are deliberately not read. The History and cache containers are interpreted; every other container (DOM storage, background transfer, ...) is counted and named in the parse notes.",
+	},
 	model.ArtifactIISLog: {
 		label: "IIS web log (W3C)", family: FamilyLog, priority: PriorityHigh,
 		why:  "Records every request IIS answered, with the source address, URL, query, user and status -- the trail of web exploitation and web-shell use on a Windows server.",
@@ -1016,9 +1021,9 @@ var unsupportedRules = []unsupportedRule{
 	{
 		label: "IE / Edge Legacy web cache (WebCacheV01.dat)", family: FamilyBrowser, priority: PriorityMedium,
 		why:           "Holds Internet Explorer and Edge Legacy browsing history -- the same class of evidence as any other browser history.",
-		reason:        "WebCacheV01.dat is an ESE database. Tracefall opens ESE but does not interpret the WebCache tables, so IE and Edge Legacy history is not extracted.",
+		reason:        "A WebCacheV01.dat is read when it is an ESE database; this file is not (or is the old index.dat format), so IE history is not extracted.",
 		parsedInstead: browserParsedInstead,
-		notParsed:     []string{"Internet Explorer / Edge Legacy WebCacheV01.dat (ESE database)"},
+		notParsed:     []string{"Internet Explorer index.dat (legacy history format)"},
 		match:         baseIs("webcachev01.dat", "index.dat"),
 	},
 	{

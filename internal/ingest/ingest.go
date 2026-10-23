@@ -67,6 +67,7 @@ import (
 	"tracefall/internal/parsers/usnjrnl"
 	"tracefall/internal/parsers/volatility"
 	"tracefall/internal/parsers/webaccess"
+	"tracefall/internal/parsers/webcache"
 	"tracefall/internal/parsers/wtmp"
 	"tracefall/internal/regf"
 )
@@ -121,6 +122,7 @@ func Registry() []parsers.ArtifactParser {
 		// Name-claimed by folder and file name, and confirmed by their own header.
 		cryptneturl.New(),
 		srum.New(),
+		webcache.New(),
 		defendercmd.New(),
 		// Packet captures: claimed by extension and confirmed by their magic
 		// number, and also found by magic number under any name.

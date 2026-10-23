@@ -117,6 +117,7 @@ what the binary can actually parse:
 | `cryptnet_url_cache` | CryptoAPI URL cache (CryptnetUrlCache) | Execution | High | `cryptneturl@1` |
 | `defender_cmd_log` | Defender command-line log (MpCmdRun.log) | Execution | High | `defendercmd@1` |
 | `srum_db` | System Resource Usage Monitor (SRUM) | Execution | High | `srum@1` |
+| `webcache_db` | IE / Edge Legacy web cache (WebCache) | Browser | Medium | `webcache@1` |
 | `package_log` | Package log (dpkg) | Log | Medium | `packagelog@1` |
 | `network_capture` | Network capture (pcap) | Network | High | `netcapture@1` |
 | `journal` | Systemd journal | Log | Medium | `journal@1` |
@@ -166,7 +167,7 @@ claim a file — see `parsers.ContentDetector`.)
 | Antimalware detection log | High | No antimalware log parser. |
 | Web server log (IIS / W3C) | High | No web server log parser. |
 | Page / swap file | High | No memory analysis. |
-| Windows Search index (`Windows.edb`) | Medium | An ESE database. The ESE reader opens it; the Windows Search tables are not interpreted. |
+| Windows Search index (`Windows.edb`) | Medium | An ESE database. The ESE reader opens it; the Windows Search tables are not interpreted, and no real `Windows.edb` was available to validate an interpretation against. |
 | Thumbnail cache | Medium | No thumbcache parser. |
 | RDP bitmap cache | Medium | No RDP bitmap cache parser. |
 | Event trace log (`.etl`) | Medium | No ETL parser. |
@@ -174,7 +175,7 @@ claim a file — see `parsers.ContentDetector`.)
 | Host firewall log | Medium | No firewall log parser. |
 | Crash dump | Medium | No memory analysis. |
 | NTFS metadata files (`$Secure`, `$Bitmap`, `$Boot`, …) | Medium | The `$MFT`, `$UsnJrnl` and `$LogFile` *are* parsed; these other system files are not. |
-| IE / Edge Legacy web cache (`WebCacheV01.dat`) | Medium | An ESE database. The ESE reader opens it; the WebCache tables are not interpreted. |
+| IE / Edge Legacy web cache (`WebCacheV01.dat`) | Medium | Only a file of that name that is not an ESE database, or the old `index.dat`, lands here; a real WebCache is read (see below). |
 | Browser cookie store | Medium | No cookie-store parser. Cookies are never extracted. |
 | Chromium blockfile auxiliary file | Low | `data_0`: rankings. Use times, but no cache key. |
 | Chromium blockfile payload file | Low | `data_2` / `data_3`: stream payloads. Metadata is in `data_1`. |
@@ -1806,6 +1807,56 @@ connected seconds all equal a separate pass with dissect and Python. In the same
 file 1,526 records in two uninterpreted tables and 23 deleted records were
 counted in the notes. There is no rule over SRUM yet; the sample came from an
 ordinary system and holds no case a rule could be checked against.
+
+### IE / Edge Legacy WebCache (`webcache@1`)
+
+Reads `WebCacheV01.dat` (and `WebCacheV24.dat`), an ESE database. `Containers`
+names the containers and each has a table `Container_<id>`.
+
+| Container | Event | What a record is |
+|---|---|---|
+| `History`, `MSHist<period>` | `browser_visit` | one URL with its last access time and an access count |
+| `Content` | `browser_cache_entry` | one cache entry: URL, file name, size, times, HTTP status line and content type |
+
+A history record is **not** one visit: a URL visited five times is one record
+with `access_count: 5` and the time of the last access. The event time is that
+`AccessedTime`. `record_kind` says what the record is: `url`, or `daily_host` for
+the daily history's host summaries (`:Host: example.com`), whose text is the
+host and not a URL. The user is the name before the `@` in the record, or for
+cache entries the profile in the container's directory.
+
+The history `ModifiedTime` is not used as a time. In the validation sample it
+differs from the access time by exactly three hours, which is a local-time
+reading, so it is kept as stored in `modified_time_raw`. For cache entries
+`ModifiedTime` is kept as `modified_time`.
+
+Not read:
+
+- **Cookie containers**, by design, as for every browser in Tracefall. The
+  number of cookie records is in the parse notes.
+- Every other container (DOM storage, background transfer, ...) is counted and
+  named in the notes ("container DOMStore (id 4): 1 records not interpreted").
+- Request headers, and response headers beyond the status line and content type:
+  they can carry cookies and tokens. The raw record kept with an event omits them.
+- Deleted records still in the file are not emitted; their number is noted.
+- A cache entry shows that a copy was held. It does not show that the user chose
+  to load it, and the cached body is not read.
+
+A WebCache without a `Containers` table (the system profile's in the sample) is
+valid and yields no events, with a note saying so. A `WebCacheV01.dat` that is
+not an ESE database, and the old `index.dat`, are not read.
+
+Validation. On the `WebCacheV01.dat` of a real Windows 10 collection (SHA-256
+pinned in `TestParse_RealWebCache`, set `TRACEFALL_REAL_WEBCACHE`) the parser
+emitted 79 events: 62 URL records, 2 daily-host records and 15 cache entries.
+Per container the record count, access-count total, file-size total and the
+first and last access time (to the microsecond), the 9 distinct hosts, the one
+user, the status lines and content types of the 13 cached responses that carry
+HTTP headers all equal a separate pass with dissect and Python. The other 6
+records (DOM storage and background transfer) are in the notes. That database
+was copied after a dirty shutdown, and the notes say so; changes still in its
+transaction log are not in it. No rule reads these events beyond the existing
+browser ones.
 
 ### Not read yet
 

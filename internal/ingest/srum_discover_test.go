@@ -38,7 +38,7 @@ func TestDiscover_SRUDBIsReadOnlyWhenItIsAnESEDatabase(t *testing.T) {
 	if f := by["Other/sru/SRUDB.dat"]; f.Parser == "srum@1" || f.Supported {
 		t.Errorf("a file named SRUDB.dat that is not ESE was claimed: %+v", f)
 	}
-	if f := by["Users/a/AppData/Local/Microsoft/Windows/WebCache/WebCacheV01.dat"]; f.Parser == "srum@1" || f.Supported {
+	if f := by["Users/a/AppData/Local/Microsoft/Windows/WebCache/WebCacheV01.dat"]; f.Parser == "srum@1" {
 		t.Errorf("another ESE database was read as SRUM: %+v", f)
 	}
 }

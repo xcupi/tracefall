@@ -887,6 +887,7 @@ const ARTIFACT_TYPE_LABELS = {
   web_access_log: "Web server access log",
   cryptnet_url_cache: "CryptoAPI URL cache (CryptnetUrlCache)",
   srum_db: "System Resource Usage Monitor (SRUM)",
+  webcache_db: "IE / Edge Legacy web cache (WebCache)",
   defender_cmd_log: "Defender command-line log (MpCmdRun.log)",
   iis_w3c_log: "IIS web log (W3C)",
   container_json_log: "Container log (Docker json-file)",
