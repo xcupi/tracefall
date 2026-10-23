@@ -39,11 +39,23 @@ var (
 	ErrEnrichRunning = errors.New("a VirusTotal lookup for this case is already running")
 	// ErrEnrichDailyLimit: the day's request allowance is used up.
 	ErrEnrichDailyLimit = errors.New("the VirusTotal daily request allowance is used up")
+	// ErrEnrichMonthlyLimit: the month's request allowance is used up.
+	ErrEnrichMonthlyLimit = errors.New("the VirusTotal monthly request allowance is used up")
+)
+
+// The free API's allowances. They are variables only so that tests can use
+// small ones; nothing else changes them.
+var (
+	// vtDailyLimit is counted over the last 24 hours, which is never more
+	// generous than a reset at midnight.
+	vtDailyLimit = 500
+	// vtMonthlyLimit is counted from the first of the calendar month, UTC.
+	// That is an assumption about when the service resets; the service's own
+	// answer when the quota is gone still stops a run (see runVirusTotal).
+	vtMonthlyLimit = 15500
 )
 
 const (
-	// vtDailyLimit is the free API's allowance per day.
-	vtDailyLimit = 500
 	// vtRetryCap bounds how long a rate-limit answer is waited out.
 	vtRetryCap = 2 * time.Minute
 	// vtMaxEventRefs bounds the events remembered for one hash.
@@ -192,15 +204,20 @@ func newEnrichManager() *enrichManager { return &enrichManager{runs: map[string]
 
 // VTStatus is what the API reports about VirusTotal for a case.
 type VTStatus struct {
-	Configured      bool         `json:"configured"`
-	EgressLevel     string       `json:"egress_level"`
-	Allowed         bool         `json:"allowed"`
-	Candidates      int          `json:"candidates"`
-	AlreadyAnswered int          `json:"already_answered"`
-	Pending         int          `json:"pending"`
-	DailyUsed       int          `json:"daily_used"`
-	DailyLimit      int          `json:"daily_limit"`
-	Run             *VTRunStatus `json:"run,omitempty"`
+	Configured      bool   `json:"configured"`
+	EgressLevel     string `json:"egress_level"`
+	Allowed         bool   `json:"allowed"`
+	Candidates      int    `json:"candidates"`
+	AlreadyAnswered int    `json:"already_answered"`
+	Pending         int    `json:"pending"`
+	DailyUsed       int    `json:"daily_used"`
+	DailyLimit      int    `json:"daily_limit"`
+	MonthlyUsed     int    `json:"monthly_used"`
+	MonthlyLimit    int    `json:"monthly_limit"`
+	// Remaining is how many more lookups the allowances permit right now:
+	// the smaller of what is left today and what is left this month.
+	Remaining int          `json:"remaining"`
+	Run       *VTRunStatus `json:"run,omitempty"`
 }
 
 func answered(e model.Enrichment) bool {
@@ -235,10 +252,11 @@ func (s *Service) VirusTotalStatus(caseID string) (VTStatus, error) {
 			st.Pending++
 		}
 	}
-	st.DailyUsed, err = s.store.CountEnrichmentRequestsSince(model.EnrichmentVirusTotal, time.Now().UTC().Add(-24*time.Hour))
+	al, err := s.vtAllowance(time.Now().UTC())
 	if err != nil {
 		return VTStatus{}, err
 	}
+	st.DailyUsed, st.DailyLimit, st.MonthlyUsed, st.MonthlyLimit, st.Remaining = al.dailyUsed, vtDailyLimit, al.monthlyUsed, vtMonthlyLimit, al.remaining
 	s.enrich.mu.Lock()
 	run := s.enrich.runs[caseID]
 	s.enrich.mu.Unlock()
@@ -289,20 +307,19 @@ func (s *Service) StartVirusTotal(caseID string) (VTStatus, error) {
 		s.enrich.mu.Unlock()
 		return VTStatus{}, ErrEnrichRunning
 	}
-	used, err := s.store.CountEnrichmentRequestsSince(model.EnrichmentVirusTotal, time.Now().UTC().Add(-24*time.Hour))
+	al, err := s.vtAllowance(time.Now().UTC())
 	if err != nil {
 		s.enrich.mu.Unlock()
 		return VTStatus{}, err
 	}
-	remaining := vtDailyLimit - used
-	if len(pending) > 0 && remaining <= 0 {
+	if len(pending) > 0 && al.remaining <= 0 {
 		s.enrich.mu.Unlock()
-		return VTStatus{}, ErrEnrichDailyLimit
+		return VTStatus{}, al.err()
 	}
 	reason := ""
-	if len(pending) > remaining && remaining > 0 {
-		pending = pending[:remaining]
-		reason = "limited to the day's remaining allowance; start again later for the rest"
+	if len(pending) > al.remaining {
+		pending = pending[:al.remaining]
+		reason = "limited to the " + al.limiting() + "'s remaining allowance; start again later for the rest"
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	run := &vtRun{cancel: cancel, st: VTRunStatus{State: "running", Total: len(pending), StartedAt: time.Now().UTC().Format(time.RFC3339), Reason: reason}}
@@ -357,6 +374,15 @@ func (s *Service) runVirusTotal(ctx context.Context, caseID string, pending []VT
 	}
 	consecutive := 0
 	for _, c := range pending {
+		// Re-check before every request: another case's run, or the retry
+		// below, may have used the allowance since this run began.
+		if al, aerr := s.vtAllowance(time.Now().UTC()); aerr != nil {
+			finish("stopped", "could not read the request allowance")
+			return
+		} else if al.remaining <= 0 {
+			finish("stopped", "the "+al.limiting()+" request allowance is used up")
+			return
+		}
 		res, err := s.vtLookup(ctx, c.Hash)
 		var qe *virustotal.QuotaError
 		switch {
@@ -379,6 +405,10 @@ func (s *Service) runVirusTotal(ctx context.Context, caseID string, pending []VT
 				finish("cancelled", "")
 				return
 			case <-time.After(wait):
+			}
+			if al, aerr := s.vtAllowance(time.Now().UTC()); aerr != nil || al.remaining <= 0 {
+				finish("stopped", "the request allowance is used up")
+				return
 			}
 			res, err = s.vtLookup(ctx, c.Hash)
 			if errors.As(err, &qe) {
@@ -434,7 +464,54 @@ func (s *Service) runVirusTotal(ctx context.Context, caseID string, pending []VT
 func (s *Service) vtLookup(parent context.Context, hash string) (virustotal.Result, error) {
 	ctx, cancel := context.WithTimeout(parent, 3*time.Minute)
 	defer cancel()
+	// Counted when it goes out, not when it is answered: the service counts a
+	// request that failed or found nothing, and a run cut short still used it.
+	if err := s.store.RecordProviderRequest(model.EnrichmentVirusTotal, time.Now().UTC()); err != nil {
+		return virustotal.Result{}, err
+	}
 	return s.vt.Lookup(ctx, hash)
+}
+
+// vtAllowances is where the key's request allowances stand.
+type vtAllowances struct {
+	dailyUsed, monthlyUsed int
+	remaining              int
+}
+
+// vtAllowance counts the requests made with the key, from every case.
+func (s *Service) vtAllowance(now time.Time) (vtAllowances, error) {
+	d, err := s.store.CountProviderRequestsSince(model.EnrichmentVirusTotal, now.Add(-24*time.Hour))
+	if err != nil {
+		return vtAllowances{}, err
+	}
+	monthStart := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
+	m, err := s.store.CountProviderRequestsSince(model.EnrichmentVirusTotal, monthStart)
+	if err != nil {
+		return vtAllowances{}, err
+	}
+	rem := vtDailyLimit - d
+	if r := vtMonthlyLimit - m; r < rem {
+		rem = r
+	}
+	if rem < 0 {
+		rem = 0
+	}
+	return vtAllowances{dailyUsed: d, monthlyUsed: m, remaining: rem}, nil
+}
+
+// limiting names the allowance that is the tighter one.
+func (a vtAllowances) limiting() string {
+	if vtMonthlyLimit-a.monthlyUsed <= vtDailyLimit-a.dailyUsed {
+		return "month"
+	}
+	return "day"
+}
+
+func (a vtAllowances) err() error {
+	if a.limiting() == "month" {
+		return ErrEnrichMonthlyLimit
+	}
+	return ErrEnrichDailyLimit
 }
 
 // safeEnrichError is a reason that is safe to store and show.

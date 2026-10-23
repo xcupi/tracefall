@@ -443,19 +443,21 @@ func TestVirusTotal_OneRunAtATimeAndTheDailyAllowance(t *testing.T) {
 	}
 	waitRun(t, svc, id)
 
-	// the day's allowance, used up by answers from any case
+	// the day's allowance, used up by requests made for any case
 	id2 := caseWithHashes2(t, svc, mux)
 	setLevel(t, mux, id2, "hashes")
+	old := vtDailyLimit
+	vtDailyLimit = 5
+	defer func() { vtDailyLimit = old }()
 	for i := 0; i < vtDailyLimit; i++ {
-		if err := svc.store.UpsertEnrichment(model.Enrichment{ID: "x" + string(rune(i+1000)) + id2, CaseID: id, Provider: model.EnrichmentVirusTotal, IndicatorType: "md5",
-			Indicator: strings.Repeat("0", 31) + string(rune('a'+i%26)) + string(rune('a'+i/26%26)) + strings.Repeat("1", 0), Status: model.EnrichmentNotFound, FetchedAt: time.Now().UTC()}); err != nil {
+		if err := svc.store.RecordProviderRequest(model.EnrichmentVirusTotal, time.Now().UTC()); err != nil {
 			t.Fatal(err)
 		}
 	}
 	before := stub.count()
 	rec := doJSON(t, mux, "POST", "/api/cases/"+id2+"/enrich/virustotal", nil, nil)
-	if rec.Code != http.StatusConflict || stub.count() != before {
-		t.Errorf("status = %d, extra requests = %d: with the allowance used up nothing may be sent", rec.Code, stub.count()-before)
+	if rec.Code != http.StatusConflict || stub.count() != before || !strings.Contains(rec.Body.String(), "daily") {
+		t.Errorf("status = %d body %s, extra requests = %d: with the allowance used up nothing may be sent", rec.Code, rec.Body.String(), stub.count()-before)
 	}
 }
 

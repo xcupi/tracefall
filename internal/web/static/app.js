@@ -5453,7 +5453,7 @@ async function renderExternalTab(content, caseId, refresh) {
   const st = vt.status;
   const run = st.run;
   const running = run && run.state === "running";
-  const canStart = st.allowed && st.configured && !running && st.pending > 0 && st.daily_used < st.daily_limit;
+  const canStart = st.allowed && st.configured && !running && st.pending > 0 && st.remaining > 0;
 
   const options = eg.options
     .map(
@@ -5472,7 +5472,10 @@ async function renderExternalTab(content, caseId, refresh) {
   else if (running) why = "A lookup is running.";
   else if (st.candidates === 0) why = "No file hashes were found in this case's events.";
   else if (st.pending === 0) why = "Every hash has already been answered.";
-  else if (st.daily_used >= st.daily_limit) why = "The daily request allowance is used up.";
+  else if (st.remaining <= 0)
+    why = st.monthly_limit - st.monthly_used <= st.daily_limit - st.daily_used
+      ? "The monthly request allowance is used up."
+      : "The daily request allowance is used up.";
 
   const runLine = run
     ? `<p class="small">Last run: <strong>${esc(run.state)}</strong> &middot; ${run.done} of ${run.total} done
@@ -5517,7 +5520,7 @@ async function renderExternalTab(content, caseId, refresh) {
 
       <h3>VirusTotal (file hashes only)</h3>
       <p class="small">${st.candidates} file hash(es) in this case's events &middot; ${st.already_answered} answered &middot; ${st.pending} waiting.
-        Free-key allowance used in the last 24 hours: ${st.daily_used} of ${st.daily_limit}. Lookups are spaced to stay under
+        Free-key allowance: ${st.daily_used} of ${st.daily_limit} used in the last 24 hours, ${st.monthly_used} of ${st.monthly_limit} this calendar month (UTC). Lookups are spaced to stay under
         4 per minute, so ${st.pending} hash(es) take about ${Math.ceil((st.pending * 15.5) / 60)} minute(s).</p>
       <p class="small muted">Only the hash is sent: no file, file name, path, host, user or case detail. VirusTotal's answer is an
         outside opinion, not evidence: it is kept apart from the findings and never changes one.

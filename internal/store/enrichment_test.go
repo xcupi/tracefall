@@ -45,28 +45,34 @@ func TestEnrichments_UpsertReplacesTheSameIndicatorOnly(t *testing.T) {
 	}
 }
 
-func TestEnrichments_DailyCountIsAcrossCasesAndWindowed(t *testing.T) {
+func TestProviderRequests_CountedAcrossCasesWindowedAndKeptWhenACaseIsDeleted(t *testing.T) {
 	s := openTest(t)
 	seedCaseAndSourceFile(t, s)
 	now := time.Date(2026, 3, 14, 12, 0, 0, 0, time.UTC)
-	if err := s.CreateCase(model.Case{ID: "case-2", Name: "second", Status: model.CaseStatusCreated, CreatedAt: now, UpdatedAt: now}); err != nil {
-		t.Fatal(err)
-	}
-	old := enrichment("o", "old", model.EnrichmentFound)
-	old.FetchedAt = now.Add(-30 * time.Hour)
-	recent := enrichment("r", "recent", model.EnrichmentFound)
-	recent.FetchedAt = now.Add(-2 * time.Hour)
-	other := enrichment("x", "other", model.EnrichmentNotFound)
-	other.CaseID = "case-2"
-	other.FetchedAt = now.Add(-time.Hour)
-	for _, e := range []model.Enrichment{old, recent, other} {
-		if err := s.UpsertEnrichment(e); err != nil {
+	for _, at := range []time.Time{now.Add(-30 * time.Hour), now.Add(-2 * time.Hour), now.Add(-time.Hour), now} {
+		if err := s.RecordProviderRequest(model.EnrichmentVirusTotal, at); err != nil {
 			t.Fatal(err)
 		}
 	}
-	n, err := s.CountEnrichmentRequestsSince(model.EnrichmentVirusTotal, now.Add(-24*time.Hour))
-	if err != nil || n != 2 {
-		t.Errorf("count = %d, %v; want 2 (the 30-hour-old answer is outside the day, the other case's counts)", n, err)
+	if err := s.RecordProviderRequest("someone-else", now); err != nil {
+		t.Fatal(err)
+	}
+	n, err := s.CountProviderRequestsSince(model.EnrichmentVirusTotal, now.Add(-24*time.Hour))
+	if err != nil || n != 3 {
+		t.Errorf("last 24 hours = %d, %v; want 3 (the 30-hour-old request is outside, the other provider's is not counted)", n, err)
+	}
+	if n, _ := s.CountProviderRequestsSince(model.EnrichmentVirusTotal, now.Add(-48*time.Hour)); n != 4 {
+		t.Errorf("last 48 hours = %d, want 4", n)
+	}
+	// the allowance is the key's: deleting the case must not give requests back
+	if err := s.UpsertEnrichment(enrichment("a", "aaa", model.EnrichmentFound)); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DeleteCase("case-1"); err != nil {
+		t.Fatal(err)
+	}
+	if n, _ := s.CountProviderRequestsSince(model.EnrichmentVirusTotal, now.Add(-48*time.Hour)); n != 4 {
+		t.Errorf("after deleting the case %d requests are counted, want 4: a deleted case gave requests back", n)
 	}
 }
 

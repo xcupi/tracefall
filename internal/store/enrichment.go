@@ -51,11 +51,19 @@ func (s *Store) ListEnrichments(caseID, provider string) ([]model.Enrichment, er
 	return out, rows.Err()
 }
 
-// CountEnrichmentRequestsSince counts answers a provider gave, across all
-// cases, since t. It is how a daily request limit is kept across restarts.
-func (s *Store) CountEnrichmentRequestsSince(provider string, t time.Time) (int, error) {
+// RecordProviderRequest notes that a request was made to an outside service.
+// It is called when the request is about to go out, whatever its outcome:
+// the service counts a request that failed or found nothing all the same.
+func (s *Store) RecordProviderRequest(provider string, at time.Time) error {
+	_, err := s.db.Exec(`INSERT INTO provider_requests (provider, at) VALUES (?, ?)`, provider, fmtTime(at))
+	return err
+}
+
+// CountProviderRequestsSince counts the requests made to a service, from any
+// case, at or after t. Deleting a case does not change it.
+func (s *Store) CountProviderRequestsSince(provider string, t time.Time) (int, error) {
 	var n int
-	err := s.db.QueryRow(`SELECT COUNT(*) FROM enrichments WHERE provider = ? AND fetched_at >= ?`, provider, fmtTime(t)).Scan(&n)
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM provider_requests WHERE provider = ? AND at >= ?`, provider, fmtTime(t)).Scan(&n)
 	return n, err
 }
 

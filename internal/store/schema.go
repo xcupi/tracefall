@@ -477,6 +477,17 @@ CREATE TABLE IF NOT EXISTS enrichments (
 );
 CREATE INDEX IF NOT EXISTS idx_enrichments_fetched ON enrichments(provider, fetched_at);
 
+-- One row per request made to an outside service, kept for the service's
+-- request allowance. It belongs to no case on purpose: the allowance is the
+-- key's, so deleting a case must not give requests back. Rows hold the
+-- provider and the time only; nothing about what was asked.
+CREATE TABLE IF NOT EXISTS provider_requests (
+	id       INTEGER PRIMARY KEY AUTOINCREMENT,
+	provider TEXT NOT NULL,
+	at       TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_provider_requests ON provider_requests(provider, at);
+
 CREATE TABLE IF NOT EXISTS upload_sessions (
 	id            TEXT PRIMARY KEY,
 	case_id       TEXT NOT NULL REFERENCES cases(id),

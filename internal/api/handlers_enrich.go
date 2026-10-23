@@ -79,7 +79,7 @@ func (h *handlers) startVirusTotal(w http.ResponseWriter, r *http.Request) {
 	case errors.Is(err, ErrEnrichNotConfigured):
 		writeError(w, http.StatusNotImplemented, err.Error())
 		return
-	case errors.Is(err, ErrEnrichRunning), errors.Is(err, ErrEnrichDailyLimit):
+	case errors.Is(err, ErrEnrichRunning), errors.Is(err, ErrEnrichDailyLimit), errors.Is(err, ErrEnrichMonthlyLimit):
 		writeError(w, http.StatusConflict, err.Error())
 		return
 	}
