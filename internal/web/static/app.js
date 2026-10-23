@@ -4737,9 +4737,9 @@ function renderOverviewTab(content, caseId) {
       <div id="tab-lock-banner"></div>
       <div id="add-evidence-form" class="add-evidence-form hidden">
         <h3>Upload evidence</h3>
-        <p class="muted small">Upload a disk image (a raw/dd file or a single-file E01 with NTFS volumes; Tracefall finds the partitions and reads the artifacts inside), a ZIP archive of a KAPE triage collection, or a single AD1 forensic image (FTK Imager's logical/custom-content format, detected from the file's contents, not just its <code>.ad1</code> extension). Tracefall safely inspects it and catalogs every file inside. By default, it imports all supported files and runs analysis automatically; turn off the automatic option below if you want to review/select files manually. Unsupported files and parse failures remain clearly reported.</p>
+        <p class="muted small">Upload a disk image (raw/DD, E01, VHD, VHDX or VMDK), an AD1 logical image, a ZIP of a KAPE collection, or a memory image for Volatility analysis. Disk readers support NTFS, FAT/exFAT and ext2/3/4. Formats are checked from their contents, not just their extension. By default, supported artifacts are imported and analysed automatically. Unsupported files, missing dependencies and parse failures are reported; a successful upload does not mean every artifact was analysed.</p>
         <div class="row">
-          <input type="file" id="upload-file" accept=".zip,.ad1,.e01,.dd,.raw,.img,.001,.vmem,.mem,.dmp,.lime,application/zip" />
+          <input type="file" id="upload-file" accept=".zip,.ad1,.e01,.dd,.raw,.img,.001,.vhd,.vhdx,.vmdk,.vmem,.mem,.dmp,.dump,.lime,application/zip" />
           <button id="upload-btn">Upload Evidence</button>
         </div>
         <label class="small" for="upload-auto-analyze"><input type="checkbox" id="upload-auto-analyze" checked /> Automatically import all supported files and run analysis after upload</label>
@@ -4748,9 +4748,9 @@ function renderOverviewTab(content, caseId) {
 
         <details style="margin-top:16px">
           <summary class="muted small" style="cursor:pointer">Advanced: ingest from a local path instead</summary>
-          <p class="muted small">For local/dev use, when the evidence is already on the machine running Tracefall: point this at a KAPE-style directory (e.g. the bundled synthetic dataset at <code>testdata/synthetic_case</code>), or directly at a single AD1 file (e.g. <code>DiskDrigger.ad1</code>) -- detected the same way an upload is.</p>
+          <p class="muted small">For evidence already on the Tracefall server, enter an allowed directory or image path. VHD/VHDX and VMDK images with companion files should be imported from a directory containing all required files. The server must allow access to that location.</p>
           <div class="row">
-            <div style="flex:1"><input id="ingest-path" placeholder="/path/to/evidence or /path/to/image.ad1" value="testdata/synthetic_case" /></div>
+            <div style="flex:1"><input id="ingest-path" placeholder="/path/to/evidence or /path/to/image.vhdx" /></div>
             <button id="ingest-btn" class="secondary">Discover</button>
           </div>
           <div id="ingest-error"></div>
@@ -5444,11 +5444,57 @@ const STATUS_LABELS = {
 // ---------------------------------------------------------------------
 // The summary section of the Outside services tab. Plain strings in, HTML out;
 // every value that came from the server or from a model is escaped.
+function externalCitation(kind, id) {
+  if (kind !== "finding" && kind !== "event") return "";
+  return `<button type="button" class="source-link" data-source-kind="${kind}" data-source-id="${esc(id)}" title="Open ${kind}: ${esc(id)}">${kind} ${esc(String(id).slice(0, 12))}</button>`;
+}
+
+// The dialog lives outside the refreshed status cards. Reading a source must
+// not be interrupted by a background lookup finishing.
+function wireExternalCitations(root, caseId) {
+  root.querySelectorAll(".source-link").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const kind = button.dataset.sourceKind;
+      const id = button.dataset.sourceId;
+      const dialog = document.createElement("dialog");
+      dialog.className = "external-source-dialog";
+      dialog.setAttribute("aria-label", `${kind} source`);
+      dialog.innerHTML = `<div class="row between"><h2>${esc(kind)} source</h2><button type="button" class="btn-secondary" autofocus>Close</button></div>
+        <p class="mono small source-id">${esc(id)}</p><div class="external-source-body" role="status">Loading source…</div>`;
+      document.body.appendChild(dialog);
+      dialog.querySelector("button").addEventListener("click", () => dialog.close());
+      dialog.addEventListener("close", () => {
+        dialog.remove();
+        // A status refresh may have replaced the original citation button.
+        const target = button.isConnected ? button : Array.from(document.querySelectorAll("#ext-root .source-link")).find((el) => el.dataset.sourceKind === kind && el.dataset.sourceId === id);
+        if (target) target.focus({ preventScroll: true });
+      }, { once: true });
+      dialog.showModal();
+      const body = dialog.querySelector(".external-source-body");
+      if (kind === "event") {
+        await loadProvenanceInto(caseId, id, body);
+      } else {
+        try {
+          const finding = await api(`/cases/${caseId}/findings/${encodeURIComponent(id)}`);
+          if (!dialog.isConnected) return;
+          body.innerHTML = `<h3>${esc(finding.title)}</h3><p>${esc(finding.description || "")}</p>
+            ${renderSeverityExplanation(finding.severity_explanation)}
+            <h3>Supporting events</h3><div class="source-links">${(finding.supporting_event_ids || []).map((eid) => externalCitation("event", eid)).join(" ") || "No supporting event references recorded."}</div>`;
+          wireExternalCitations(body, caseId);
+          mountFindingProvenance(body, caseId, id);
+        } catch (e) {
+          body.textContent = "Source unavailable: " + (e.message || String(e));
+        }
+      }
+    });
+  });
+}
+
 function renderNarrativeSection(nv) {
   const run = nv.run;
   const running = run && run.state === "running";
   let why = "";
-  if (!nv.configured) why = "No language model is configured on this server (set TRACEFALL_LLM_API_KEY and TRACEFALL_LLM_MODEL).";
+  if (!nv.configured) why = "No language model is configured. Use an API provider, or set TRACEFALL_LLM_PROVIDER=codex-cli on the server and sign in to the Codex CLI with ChatGPT. See setup instructions.";
   else if (!nv.allowed) why = "This case's level does not allow facts to be sent to another machine. Choose \"pseudonymized\" above.";
   else if (nv.findings === 0) why = "The case has no findings yet: run the analysis first.";
   else if (running) why = "A summary is being drafted.";
@@ -5462,8 +5508,8 @@ function renderNarrativeSection(nv) {
   if (l) {
     const items = (l.sentences || [])
       .map((x) => {
-        const cites = (x.cites || []).map((c) => (c.kind === "finding" ? "finding " : "event ") + String(c.id).replace(/^(finding|event)-/, "").slice(0, 8)).join("; ");
-        return `<li>${esc(x.text)} <span class="mono small muted">[${esc(cites)}]</span></li>`;
+        const cites = (x.cites || []).map((c) => externalCitation(c.kind, c.id)).join(" ");
+        return `<li>${esc(x.text)} <span class="source-links">${cites}</span></li>`;
       })
       .join("");
     const reasons = l.reasons ? Object.entries(l.reasons).map(([k, v]) => `${esc(k)} (${v})`).join("; ") : "";
@@ -5483,22 +5529,28 @@ function renderNarrativeSection(nv) {
         }
         <p class="small mono muted" style="word-break:break-all">SHA-256 of what was sent: ${esc(l.payload_sha256)}</p>
         <p><button type="button" class="btn-secondary" id="nv-payload">Show exactly what was sent</button></p>
-        <pre id="nv-payload-box" class="small" hidden style="white-space:pre-wrap;max-height:24em;overflow:auto"></pre>
+        <pre id="nv-payload-box" data-hash="${esc(l.payload_sha256)}" tabindex="0" aria-label="Exact payload sent to the model" class="small" hidden style="white-space:pre-wrap;max-height:24em;overflow:auto"></pre>
       </div>`;
   }
   return `
-    <h3 style="margin-top:var(--space-5)">Summary drafted by a language model</h3>
+    <h3>AI summary <span class="external-optional">Optional</span></h3>
     <p class="small muted">Optional. A model drafts a short summary of the findings; the findings themselves never come from it.
       Where it goes: ${where}.</p>
+    ${!nv.configured ? `<details id="nv-setup" class="external-details"><summary>Set up a language model</summary>
+      <p><strong>API provider:</strong> set <code>TRACEFALL_LLM_API_KEY</code> and <code>TRACEFALL_LLM_MODEL</code> on the server; optionally set <code>TRACEFALL_LLM_BASE_URL</code>.</p>
+      <p><strong>ChatGPT account:</strong> sign in with the official Codex CLI as the server user, then set <code>TRACEFALL_LLM_PROVIDER=codex-cli</code>. Optionally set <code>TRACEFALL_CODEX_BIN</code> and <code>TRACEFALL_LLM_MODEL</code>. Restart Tracefall after changing server settings. Credentials are never entered into this page.</p>
+      </details>` : ""}
+    <details id="nv-privacy" class="external-details"><summary>What leaves this server?</summary>
     <p class="small"><strong>What is sent:</strong> finding titles, rules, severities, ATT&amp;CK ids, times, and for the events they cite:
       type, process names, command lines, paths and addresses, with every name, address, identifier and hash replaced by a token
       only this server can reverse, and secrets removed. <strong>Never sent:</strong> file contents, SQL statements, cookies, the case name or
-      description, notes, evidence file names. Times, process names and the shape of the activity are sent as they are.</p>
+      description, notes, evidence file names. Times, process names and the shape of the activity are sent as they are. Pseudonymized does not mean anonymous.</p>
+    </details>
     ${
       nv.configured && !nv.local
-        ? `<p class="small"><label><input type="checkbox" id="nv-ack"> I have checked this provider's terms for the data it will receive
-             (a free tier may use what it receives to train its models).</label></p>
-           ${nv.notice ? `<p class="small"><strong>Read this first:</strong> ${esc(nv.notice)}</p>` : ""}`
+        ? `${nv.notice ? `<p class="external-notice small"><strong>Before sending:</strong> ${esc(nv.notice)}</p>` : ""}
+           <p class="small"><label><input type="checkbox" id="nv-ack"> I have reviewed what will be sent and this provider's terms, and authorize this request
+             (some providers may use it to train models).</label></p>`
         : ""
     }
     <p>
@@ -5554,15 +5606,51 @@ function wireNarrativeSection(content, caseId, nv, say) {
     });
 }
 
+// Capture at response time, not request time: the analyst may interact while
+// status is loading. Consent never follows a different provider or policy.
+function captureExternalState(root, consentKey) {
+  if (!root || root.dataset.consentKey !== consentKey) return null;
+  const box = root.querySelector("#nv-payload-box");
+  const active = document.activeElement;
+  return {
+    ack: !!root.querySelector("#nv-ack")?.checked,
+    openDetails: Array.from(root.querySelectorAll("details[id]")).filter((d) => d.open).map((d) => d.id),
+    payload: box && !box.hidden ? { hash: box.dataset.hash, text: box.textContent, scrollTop: box.scrollTop } : null,
+    focusId: root.contains(active) ? active.id : "",
+    focusSource: root.contains(active) && active.dataset?.sourceId ? { kind: active.dataset.sourceKind, id: active.dataset.sourceId } : null,
+  };
+}
+
+function restoreExternalState(root, state) {
+  if (!state) return;
+  const ack = root.querySelector("#nv-ack");
+  if (ack) { ack.checked = state.ack; ack.dispatchEvent(new Event("change")); }
+  root.querySelectorAll("details[id]").forEach((d) => { d.open = state.openDetails.includes(d.id); });
+  const box = root.querySelector("#nv-payload-box");
+  if (box && state.payload && box.dataset.hash === state.payload.hash) {
+    box.textContent = state.payload.text;
+    box.hidden = false;
+    box.scrollTop = state.payload.scrollTop;
+  }
+  let focused = state.focusId ? Array.from(root.querySelectorAll("[id]")).find((el) => el.id === state.focusId) : null;
+  if (!focused && state.focusSource) focused = Array.from(root.querySelectorAll(".source-link")).find((el) => el.dataset.sourceKind === state.focusSource.kind && el.dataset.sourceId === state.focusSource.id);
+  if (focused && !focused.disabled) focused.focus({ preventScroll: true });
+}
+
 async function renderExternalTab(content, caseId, refresh) {
   // A refresh while a run is going keeps the page as it is until the new one
   // is ready: no "Loading..." flash, and the scroll position stays.
+  const previousRoot = document.getElementById("ext-root");
   if (!refresh) content.innerHTML = `<p class="empty">Loading...</p>`;
   const [eg, vt, nv] = await Promise.all([
     api(`/cases/${caseId}/egress`),
     api(`/cases/${caseId}/enrich/virustotal`),
     api(`/cases/${caseId}/enrich/narrative`),
   ]);
+  // A response from a page we left must not repaint the next tab.
+  if (!content.isConnected || (refresh && document.getElementById("ext-root") !== previousRoot)) return;
+  const consentKey = JSON.stringify([caseId, eg.level, nv.destination, nv.model, nv.local]);
+  const state = refresh ? captureExternalState(previousRoot, consentKey) : null;
   const st = vt.status;
   const run = st.run;
   const running = run && run.state === "running";
@@ -5614,10 +5702,11 @@ async function renderExternalTab(content, caseId, refresh) {
         if (x.threat_label) verdict += `<div class="muted small">${esc(x.threat_label)}</div>`;
       }
       return `<tr>
-        <td class="mono small" style="word-break:break-all">${esc(r.indicator_type)}<br>${esc(r.indicator)}</td>
-        <td class="small">${verdict}</td>
-        <td class="mono small">${esc((r.source_event_ids || []).slice(0, 3).join(", "))}${(r.source_event_ids || []).length > 3 ? " (+" + ((r.source_event_ids || []).length - 3) + " more)" : ""}</td>
-        <td class="mono small">${esc(fmtTime(r.fetched_at))}</td>
+        <td data-label="Hash" class="mono small" style="word-break:break-all">${esc(r.indicator_type)}<br>${esc(r.indicator)}</td>
+        <td data-label="VirusTotal answer" class="small">${verdict}</td>
+        <td data-label="Seen in events" class="small source-links">${(r.source_event_ids || []).slice(0, 3).map((id) => externalCitation("event", id)).join(" ")}
+          ${(r.source_event_ids || []).length > 3 ? `<details id="vt-sources-${esc(r.indicator_type)}-${esc(r.indicator)}"><summary>${r.source_event_ids.length - 3} more supporting events</summary>${r.source_event_ids.slice(3).map((id) => externalCitation("event", id)).join(" ")}</details>` : ""}</td>
+        <td data-label="Checked" class="mono small">${esc(fmtTime(r.fetched_at))}</td>
       </tr>`;
     })
     .join("");
@@ -5629,14 +5718,19 @@ async function renderExternalTab(content, caseId, refresh) {
       <p class="muted small">Analysis never needs these. What is sent is decided here, per case, and every change and every
         transmission is written to the audit history.</p>
 
-      <h3>How much of this case may leave the server</h3>
+      <div class="external-grid">
+      <section class="panel external-card" id="external-policy" aria-labelledby="external-policy-title">
+      <h3 id="external-policy-title">Data policy</h3>
+      <p class="small muted">Per case. Changing permission does not start a lookup or send facts.</p>
       <div id="egress-options">${options}</div>
       <p id="egress-msg" class="small" role="status"></p>
 
-      <h3>VirusTotal (file hashes only)</h3>
+      </section>
+      <section class="panel external-card" id="external-vt" aria-labelledby="external-vt-title">
+      <h3 id="external-vt-title">VirusTotal <span class="external-optional">Optional · hashes only</span></h3>
       <p class="small">${st.candidates} file hash(es) in this case's events &middot; ${st.already_answered} answered &middot; ${st.pending} waiting.
-        Free-key allowance: ${st.daily_used} of ${st.daily_limit} used in the last 24 hours, ${st.monthly_used} of ${st.monthly_limit} this calendar month (UTC). Lookups are spaced to stay under
-        4 per minute, so ${st.pending} hash(es) take about ${Math.ceil((st.pending * 15.5) / 60)} minute(s).</p>
+        </p><details id="vt-allowance" class="external-details"><summary>Quota and estimated duration</summary><p class="small">Free-key allowance: ${st.daily_used} of ${st.daily_limit} used in the last 24 hours, ${st.monthly_used} of ${st.monthly_limit} this calendar month (UTC). Lookups are spaced to stay under
+        4 per minute, so ${st.pending} hash(es) take about ${Math.ceil((st.pending * 15.5) / 60)} minute(s).</p></details>
       <p class="small muted">Only the hash is sent: no file, file name, path, host, user or case detail. VirusTotal's answer is an
         outside opinion, not evidence: it is kept apart from the findings and never changes one.
         &ldquo;Not known&rdquo; means VirusTotal has not been given that file, not that it is safe.</p>
@@ -5654,11 +5748,16 @@ async function renderExternalTab(content, caseId, refresh) {
               <tbody>${rows}</tbody></table></div>`
           : `<p class="empty">No VirusTotal answers stored for this case.</p>`
       }
+      </section>
+      <section class="panel external-card" id="external-llm" aria-label="AI summary">
       ${renderNarrativeSection(nv)}
+      </section>
+      </div>
     </div>`;
 
   if (refresh) window.scrollTo(0, scrollY);
   const root = document.getElementById("ext-root");
+  root.dataset.consentKey = consentKey;
   const say = (id, text, bad) => {
     const el = document.getElementById(id);
     if (!el) return;
@@ -5700,6 +5799,8 @@ async function renderExternalTab(content, caseId, refresh) {
     });
 
   wireNarrativeSection(content, caseId, nv, say);
+  wireExternalCitations(root, caseId);
+  restoreExternalState(root, state);
 
   // While a run is going, refresh. Stop as soon as the analyst leaves the
   // page: the root this render created is no longer the one on screen.
