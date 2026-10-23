@@ -356,3 +356,64 @@ func TestValidate_TheDraftNeverContainsTheCitationSyntax(t *testing.T) {
 		t.Errorf("an id in the middle of a sentence was accepted: %+v", d)
 	}
 }
+
+func TestValidate_TheBulletIsNotPartOfTheSentence(t *testing.T) {
+	pr, host, _, _ := answerFor(t)
+	d, err := pr.Validate("1. First on " + host + ". [F1]\n* Second one. [F2]\n- Third one. [E1]\n• Fourth one. [E2]")
+	if err != nil || len(d.Sentences) != 4 {
+		t.Fatalf("%v %+v", err, d)
+	}
+	for _, s := range d.Sentences {
+		if strings.HasPrefix(s.Text, "1.") || strings.HasPrefix(s.Text, "*") || strings.HasPrefix(s.Text, "-") || strings.HasPrefix(s.Text, "•") {
+			t.Errorf("a bullet stayed in the text: %q", s.Text)
+		}
+	}
+}
+
+func TestValidate_ANumberWrittenWithoutItsLeadingZeroIsTheSameNumber(t *testing.T) {
+	pr, host, _, _ := answerFor(t)
+	// the facts hold 2026-03-14T09:30:00Z; "9:30" and "14" are the same numbers
+	d, err := pr.Validate("Activity on " + host + " began at 9:30 on the 14th. [E1]")
+	if err != nil || len(d.Sentences) != 1 {
+		t.Errorf("%v %+v", err, d)
+	}
+	if d, _ := pr.Validate("It began at 9:45. [E1]\nIt was 8 events. [F1]"); len(d.Sentences) != 0 {
+		t.Errorf("numbers that are not in the facts were accepted: %+v", d)
+	}
+}
+
+func TestPrepare_TheTotalNumberOfEventsIsBounded(t *testing.T) {
+	var fs []model.Finding
+	evs := map[string]model.Event{}
+	for i := 0; i < 25; i++ {
+		var ids []string
+		for j := 0; j < 6; j++ {
+			id := fmt.Sprintf("e-%02d-%d", i, j)
+			ids = append(ids, id)
+			evs[id] = ev(id, func(e *model.Event) { e.Timestamp = t0.Add(time.Duration(i*10+j) * time.Second) })
+		}
+		fs = append(fs, fi(fmt.Sprintf("f-%02d", i), "high", ids...))
+	}
+	pr := mustPrepare(t, Input{Findings: fs, Events: evs})
+	if len(pr.EventIDs) != DefaultLimits.MaxEvents {
+		t.Errorf("%d events included, want %d", len(pr.EventIDs), DefaultLimits.MaxEvents)
+	}
+	if !strings.Contains(pr.User, "events_included=120") {
+		t.Errorf("the count is not stated")
+	}
+}
+
+func TestPrepare_TimesAreSentInUTC(t *testing.T) {
+	in := basicInput()
+	zone := time.FixedZone("x", 7*3600)
+	e := in.Events["e-1"]
+	e.Timestamp = time.Date(2026, 3, 14, 16, 30, 0, 0, zone) // 09:30 UTC
+	in.Events["e-1"] = e
+	f := in.Findings[0]
+	f.FirstSeen = e.Timestamp
+	in.Findings[0] = f
+	pr := mustPrepare(t, in)
+	if !strings.Contains(pr.User, "2026-03-14T09:30:00Z") || strings.Contains(pr.User, "+07:00") || strings.Contains(pr.User, "16:30") {
+		t.Errorf("times are not UTC:\n%s", pr.User)
+	}
+}
