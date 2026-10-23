@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 	"tracefall/internal/enrich/virustotal"
+	"tracefall/internal/model"
 )
 
 func extSection(t *testing.T, html string) string {
@@ -225,5 +226,31 @@ func TestReport_AFailedRequestIsStatedInTheReport(t *testing.T) {
 	}
 	if strings.Contains(string(b.HTML), "No artificial intelligence or large language model was used") {
 		t.Errorf("data was sent to a model; the report must not claim none was used")
+	}
+}
+
+func TestReport_AppendixEFlagsAStaleDraftAndStatesAFailureReason(t *testing.T) {
+	mux, svc := newTestRouterWithService(t)
+	stub := newLLMStub(t, svc, false)
+	id := caseWithFindings(t, svc, mux, nil)
+	setLevel(t, mux, id, "pseudonymized")
+	startNarr(t, mux, id, true)
+	waitNarr(t, svc, id)
+	more := model.Finding{ID: "fnd-3", CaseID: id, RuleID: "r", Title: "Another", Severity: "critical", Confidence: "high", Description: "d",
+		SupportingEvents: []string{"ev-1"}, FirstSeen: time.Now().UTC(), LastSeen: time.Now().UTC(), CreatedAt: time.Now().UTC()}
+	if err := svc.store.SaveFindings([]model.Finding{more}); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := svc.buildReport(id, time.Date(2026, 3, 14, 12, 0, 0, 0, time.UTC))
+	if !strings.Contains(appendixEOf(t, string(b.HTML)), "The findings of this case changed after this draft was written.") {
+		t.Errorf("a stale draft is not flagged in the report")
+	}
+	// a failed request states why
+	stub.answer = func(string) (int, string) { return 500, `{"error":{"message":"overloaded"}}` }
+	startNarr(t, mux, id, true)
+	waitNarr(t, svc, id)
+	b, _ = svc.buildReport(id, time.Date(2026, 3, 14, 12, 0, 0, 0, time.UTC))
+	if h := appendixEOf(t, string(b.HTML)); !strings.Contains(h, "HTTP 500") {
+		t.Errorf("the failure reason is not in the report:\n%s", h)
 	}
 }

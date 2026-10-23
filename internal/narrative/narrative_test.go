@@ -461,3 +461,16 @@ func TestPrepare_LearningFromShapesDoesNotLoopAndGivesTheSameRequestEachTime(t *
 		t.Errorf("not deterministic")
 	}
 }
+
+func TestPrepare_TheDomainOfAnEmailAddressIsLearnedForProse(t *testing.T) {
+	in := Input{
+		Findings: []model.Finding{{ID: "f-1", CaseID: "case-1", RuleID: "r", Title: "t", Severity: "high", Confidence: "m",
+			Description: "Mail went out through the lab9.corpx relay.", SupportingEvents: []string{"e-1"}, FirstSeen: t0, LastSeen: t0}},
+		Events: map[string]model.Event{"e-1": {ID: "e-1", CaseID: "case-1", Timestamp: t0, EventType: "x", ArtifactType: "a", CommandLine: "mail carol@lab9.corpx"}},
+	}
+	// ".corpx" is no ending a shape recognises, so no pattern finds the domain in prose; only the e-mail address teaches it
+	pr := mustPrepare(t, in)
+	if strings.Contains(strings.ToLower(pr.User), "lab9.corpx") {
+		t.Errorf("the domain of an e-mail address leaked in prose:\n%s", pr.User)
+	}
+}
