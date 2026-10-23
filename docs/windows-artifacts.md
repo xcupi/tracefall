@@ -1041,21 +1041,12 @@ than assumed:
 - **Broad registry parsing.** The hive reader extracts a fixed, targeted
   set of locations. A SOFTWARE hive holds hundreds of thousands of keys,
   and emitting an event per key would bury an investigator.
-- **SRUM** (`SRUDB.dat`) and every other **ESE / JET database** —
-  including `WebCacheV01.dat` (Internet Explorer and Edge Legacy
-  history) and `Windows.edb`. Tracefall has **no ESE reader**.
-
-  This is the largest remaining gap and it is deliberate. ESE is a full
-  database engine — paged B-trees, a catalog of table and column
-  definitions, tagged and multi-valued columns, long-value trees and
-  compressed pages. A reader that handled the easy pages and guessed at
-  the rest would return *plausible but wrong* rows, which for a resource
-  that attributes network bytes to applications is worse than returning
-  nothing. Implementing SRUM means implementing ESE properly, and it is
-  scoped as its own piece of work rather than a corner of this one.
-
-  Parsing SRUM would **not** amount to generic ESE support, and this
-  page will say which schemas are read when it exists.
+- **Other ESE / JET databases.** Tracefall has an ESE reader (`internal/ese`)
+  and reads **SRUM** (`SRUDB.dat`) with it. `WebCacheV01.dat` (Internet
+  Explorer and Edge Legacy history), `Windows.edb`, the BITS database and
+  `ntds.dit` are opened by the reader but their tables are not interpreted.
+  The reader's scope, validation and limits are in `docs/evidence-triage.md`,
+  "ESE databases".
 - **WMI repository**, **`$Secure` / `$Bitmap` / `$Quota` / `$ObjId` /
   `$Reparse`** — classified honestly as recognized but unparsed.
 - **`Bags` view-settings subtree.** Tracefall reads `BagMRU`, which

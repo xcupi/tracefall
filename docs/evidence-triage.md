@@ -116,6 +116,7 @@ what the binary can actually parse:
 | `iis_w3c_log` | IIS web log (W3C) | Log | High | `iislog@1` |
 | `cryptnet_url_cache` | CryptoAPI URL cache (CryptnetUrlCache) | Execution | High | `cryptneturl@1` |
 | `defender_cmd_log` | Defender command-line log (MpCmdRun.log) | Execution | High | `defendercmd@1` |
+| `srum_db` | System Resource Usage Monitor (SRUM) | Execution | High | `srum@1` |
 | `package_log` | Package log (dpkg) | Log | Medium | `packagelog@1` |
 | `network_capture` | Network capture (pcap) | Network | High | `netcapture@1` |
 | `journal` | Systemd journal | Log | Medium | `journal@1` |
@@ -159,13 +160,13 @@ claim a file — see `parsers.ContentDetector`.)
 | WMI repository (`OBJECTS.DATA`) | **Critical** | No WMI repository parser. |
 | Memory image, full capture (`hiberfil.sys`, `memory.dmp`) | **Critical** | No memory analysis. |
 | Event Log, legacy `.evt` | **Critical** | Only the modern EVTX format is parsed. |
-| SRUM database | High | No ESE database parser — see the note below. |
+| SRUM database | High | Only a file named `SRUDB.dat` that is not an ESE database lands here; a real one is read (see SRUM below). |
 | PowerShell transcript | High | No transcript parser; console history *is* parsed. |
 | USB / device install log (SetupAPI) | High | No SetupAPI log parser. |
 | Antimalware detection log | High | No antimalware log parser. |
 | Web server log (IIS / W3C) | High | No web server log parser. |
 | Page / swap file | High | No memory analysis. |
-| Windows Search index (`Windows.edb`) | Medium | An ESE database. |
+| Windows Search index (`Windows.edb`) | Medium | An ESE database. The ESE reader opens it; the Windows Search tables are not interpreted. |
 | Thumbnail cache | Medium | No thumbcache parser. |
 | RDP bitmap cache | Medium | No RDP bitmap cache parser. |
 | Event trace log (`.etl`) | Medium | No ETL parser. |
@@ -173,7 +174,7 @@ claim a file — see `parsers.ContentDetector`.)
 | Host firewall log | Medium | No firewall log parser. |
 | Crash dump | Medium | No memory analysis. |
 | NTFS metadata files (`$Secure`, `$Bitmap`, `$Boot`, …) | Medium | The `$MFT`, `$UsnJrnl` and `$LogFile` *are* parsed; these other system files are not. |
-| IE / Edge Legacy web cache (`WebCacheV01.dat`) | Medium | An ESE database. Tracefall has no ESE parser. |
+| IE / Edge Legacy web cache (`WebCacheV01.dat`) | Medium | An ESE database. The ESE reader opens it; the WebCache tables are not interpreted. |
 | Browser cookie store | Medium | No cookie-store parser. Cookies are never extracted. |
 | Chromium blockfile auxiliary file | Low | `data_0`: rankings. Use times, but no cache key. |
 | Chromium blockfile payload file | Low | `data_2` / `data_3`: stream payloads. Metadata is in `data_1`. |
@@ -196,14 +197,7 @@ the hive by its REGF signature) and `ActivitiesCache.db` by
 *supported* while producing no events, which is the least useful
 combination for an analyst.
 
-**SRUM stays unparsed, and the reason is worth stating.** `SRUDB.dat` is
-an ESE/JET database — paged B-trees, a catalog of table and column
-definitions, tagged and multi-valued columns, long-value trees. A reader
-that handled the straightforward pages and guessed at the rest would
-return plausible-looking but wrong rows, and SRUM's rows attribute
-network bytes and resource usage to named applications. Wrong numbers
-there are worse than no numbers. The same gap covers `WebCacheV01.dat`
-and `Windows.edb`, which are also ESE.
+**SRUM is read, and the other ESE databases are not interpreted.** Tracefall has an ESE reader (`internal/ese`, see "ESE databases" below). `SRUDB.dat` has a parser on top of it. `WebCacheV01.dat` and `Windows.edb` are also ESE and the reader opens them, but nothing interprets their tables yet, so they stay in this table.
 
 ### ShellBags and UserAssist are no longer in this table
 
@@ -1692,13 +1686,135 @@ Limitations:
   absence of any instant equal a separate pass over the raw bytes); it contains
   only signature updates, so the rule is tested on constructed runs.
 
+### ESE databases (`internal/ese`)
+
+A reader for Extensible Storage Engine databases (`.edb`, `.dat`, `.dit`): the
+Windows Search index, SRUM, WebCache, the Active Directory database, BITS on
+Windows 10. It reads only. It never writes, repairs or replays a log.
+
+What it reads: format version 0x620; 2, 4, 8, 16 and 32 KiB pages; the catalog
+(with its shadow copy used when the primary is unreadable); B+trees including
+shared key prefixes; fixed, variable and tagged columns; multi-values; long
+values stored in the long value tree, reassembled from their segments; 7-bit
+and XPRESS column compression; text by code page (UTF-16 or single byte); JET
+date-times and FILETIMEs; and tables derived from a template table.
+
+What it reports rather than hides:
+
+- A record the engine has marked deleted but not yet reclaimed is returned with
+  `Defunct` set and counted apart from live records. Those records are evidence
+  of rows that existed; they are not live rows, and a parser chooses which it
+  wants.
+- An entry that cannot be taken apart (a record shorter than its own header, a
+  key whose shared prefix is missing) is counted as unreadable and not returned.
+  The engine leaves small stubs of deleted records behind; those are counted
+  separately from stubs of live ones.
+- The database state from the header (clean or dirty shutdown) and whether the
+  header's own checksum holds. A dirty database was copied while in use; its
+  newest changes are still in the transaction log (`.log`), which is not read.
+- A value that cannot be decoded (a long value whose segments do not add up to
+  its stated size, a compressed value that is not valid) fails that one value
+  and leaves the rest of the row.
+
+What it does not do:
+
+- XPRESS9 and XPRESS10 column compression is refused with that reason. Encrypted
+  columns are not decrypted. Secondary indexes are not used: tables are read in
+  primary key order.
+- Page checksums are not verified, so a page damaged in place is read as it is.
+  The structure checks (bounds, loops, sizes) are what stand between a damaged
+  page and wrong output; they refuse, they do not repair.
+- The earlier format versions, and streaming (`.stm`) files, are refused.
+- It does not replay the transaction log, so a dirty database is read as the
+  database file holds it.
+
+Validation. The reader was compared with two independent implementations,
+`libesedb` (through `pyesedb`) and `dissect.esedb`, on four databases of a real
+Windows 10 collection: `SRUDB.dat`, `WebCacheV01.dat`, `CacheStorage.edb` and
+`IndexedDB.edb` (75 tables, 6,078 readable records of which 6,000 are live).
+For every table the number of live records equals libesedb's; the bytes of every
+fixed and variable column of every readable record equal dissect's; and the
+decoded value of every tagged column outside the engine's own system tables
+equals dissect's (text with its terminating NULs removed). The test is
+`TestRealDatabases`, gated on `TRACEFALL_REAL_ESE_DIR`, with each file pinned by
+SHA-256 and a SHA-256 of the expected content per table taken from the other
+readers.
+
+Where the references disagree: libesedb returns 8 bytes for 34 long binary cells
+(33 in WebCache, 1 in IndexedDB) where dissect and this reader return the whole
+value (the first, 8,082 bytes). libesedb also fills a null fixed column with
+`0x2a` bytes where the other two report null. This reader follows dissect in
+both; neither point was adjudicated further.
+
+What the real samples do not exercise: that collection has no compressed column,
+no multi-valued column and no two-value column. Those paths are tested on
+databases built by `internal/ese/esegen` from the documented format, and the
+XPRESS vectors were produced by an independent encoder and decoded back by
+dissect before being used. A compressed or multi-valued column in a real
+database is therefore less proven than the rest. Windows Search (`Windows.edb`)
+uses both heavily.
+
+### System Resource Usage Monitor (`srum@1`)
+
+Reads `SRUDB.dat`. About once an hour Windows writes what each application and
+service used since the last write. A row shows that an application was running
+and what it used in the interval ending at the row's time; it does not show what
+the application did, and the interval is not the moment of any action.
+
+Four tables are interpreted, by the provider GUIDs that name them:
+
+| Table | Event | Fields |
+|---|---|---|
+| `{D10CA2FE-6FCF-4F6D-848E-B2E99266FA89}` | `srum_app_usage` | CPU cycles, foreground time, context switches, bytes and operations read and written, foreground and background |
+| `{973F5D5C-1D90-4944-BE8E-24B94231A174}` | `srum_network_usage` | bytes sent and received, interface (type, LUID), L2 profile |
+| `{DD6636C4-8929-4683-974E-22C046A43763}` | `srum_network_connection` | connect start (FILETIME), seconds connected, interface, L2 profile |
+| `{D10CA2FE-6FCF-4F6D-848E-B2E99266FA86}` | `srum_push_notification` | notification type, payload size, network type |
+
+Applications and users appear in the rows as numbers. `SruDbIdMapTable` names
+them: a path, a service, a package or a SID. A number the map does not hold, or
+holds with an empty value, is shown as a number with `app_resolved: false` and is
+never given a name. A path of the form `!!name!time!n` is a program SRUM could
+not tie to a file; only the name is taken from it and the text is kept as
+written. A user is a SID only when its map entry is of the SID type and the bytes
+form a well-formed SID.
+
+The timestamp is the JET date-time in the record (UTC). A value outside
+1995..2100 is not used: the event is undated and the stored bytes are kept in
+`timestamp_raw`.
+
+Limitations:
+
+- The other tables are counted and named in the parse notes, not interpreted. In
+  the validation sample these are the two timeline tables (`{5C8CF1C7-7257-4F13-B223-970EF5939312}`,
+  1,484 records, and `{7ACBBAA3-D029-4BE4-9A7A-0885927F1D8F}`, 42) and the energy
+  tables, which were empty.
+- Deleted records still in the file are not emitted; their number is in the notes.
+- The SRU log files are not read. A database copied from a running system can
+  lack its newest records, and the notes and every event say when the database
+  was not cleanly shut down.
+- Application names are as SRUM stored them (NT device paths such as
+  `\device\harddiskvolume3\...`); they are not mapped to drive letters.
+- Network profile ids are not resolved to network names.
+
+Validation. On the `SRUDB.dat` of a real Windows 10 collection (SHA-256 pinned in
+`TestParse_RealSRUDB`, set `TRACEFALL_REAL_SRUDB`), the parser emitted 780 events
+(657 application, 114 network usage, 4 connectivity, 5 push). Counts, distinct
+applications and users, resolved and unresolved ids, the time range
+(2023-07-12T06:19:00Z to 2023-07-14T10:37:00Z) and the sums of cycles, foreground
+time, bytes sent (5,801,645,464) and received (1,125,681,198), push payload and
+connected seconds all equal a separate pass with dissect and Python. In the same
+file 1,526 records in two uninterpreted tables and 23 deleted records were
+counted in the notes. There is no rule over SRUM yet; the sample came from an
+ordinary system and holds no case a rule could be checked against.
+
 ### Not read yet
 
 - **WMI repository** (`OBJECTS.DATA`, `INDEX.BTR`, `MAPPING*.MAP`). The sample
   repository held only class definitions and the default bindings, with no
   persistence instance to validate a reader against, so none was built.
 - **BITS** (`qmgr.db` and `qmgr*.dat`). The Windows 10 database is an ESE file and
-  Tracefall has no ESE reader.
+  the ESE reader opens it, but there was no real `qmgr.db` to validate an
+  interpretation of its tables against, so none was written.
 - **Windows Firewall log** (`pfirewall.log`) and **Defender MPLog**. No real
   sample was available.
 

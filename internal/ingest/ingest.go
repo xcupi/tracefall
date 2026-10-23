@@ -62,6 +62,7 @@ import (
 	recyclebincontentparser "tracefall/internal/parsers/recyclebincontent"
 	"tracefall/internal/parsers/registry"
 	"tracefall/internal/parsers/scheduledtasks"
+	"tracefall/internal/parsers/srum"
 	"tracefall/internal/parsers/syslog"
 	"tracefall/internal/parsers/usnjrnl"
 	"tracefall/internal/parsers/volatility"
@@ -119,6 +120,7 @@ func Registry() []parsers.ArtifactParser {
 		iislog.New(),
 		// Name-claimed by folder and file name, and confirmed by their own header.
 		cryptneturl.New(),
+		srum.New(),
 		defendercmd.New(),
 		// Packet captures: claimed by extension and confirmed by their magic
 		// number, and also found by magic number under any name.

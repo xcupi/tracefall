@@ -886,6 +886,7 @@ const ARTIFACT_TYPE_LABELS = {
   syslog: "System log (syslog)",
   web_access_log: "Web server access log",
   cryptnet_url_cache: "CryptoAPI URL cache (CryptnetUrlCache)",
+  srum_db: "System Resource Usage Monitor (SRUM)",
   defender_cmd_log: "Defender command-line log (MpCmdRun.log)",
   iis_w3c_log: "IIS web log (W3C)",
   container_json_log: "Container log (Docker json-file)",
@@ -975,6 +976,10 @@ const EVENT_CATEGORIES = {
   network_connection: "network",
   crypto_url_retrieval: "network",
   defender_command: "execution",
+  srum_app_usage: "execution",
+  srum_network_usage: "network",
+  srum_network_connection: "network",
+  srum_push_notification: "other",
   // Phase 4 additions.
   logon_explicit_credentials: "authentication",
   privileged_logon: "authentication",

@@ -338,6 +338,13 @@ const (
 	// ArtifactDefenderCmdLog is MpCmdRun.log, the Defender command-line tool's
 	// own log. It records each run with its command line.
 	ArtifactDefenderCmdLog = "defender_cmd_log"
+	// ArtifactSRUM is the System Resource Usage Monitor database (SRUDB.dat),
+	// an ESE database. Windows writes, about once an hour, what each
+	// application and service used in that interval: CPU, I/O, and bytes sent
+	// and received. A row shows that an application was running and doing that
+	// much work in the interval ending at its timestamp; it does not show what
+	// the application did.
+	ArtifactSRUM = "srum_db"
 	// ArtifactNetworkCapture is a packet capture (pcap or pcapng). Its
 	// events are stamped by the CAPTURING machine's clock, not by any host
 	// that appears in it; the two can differ (see package clockskew).
@@ -963,6 +970,19 @@ const (
 	// log recorded it: the command line, and the start and end it printed in
 	// the machine's local time.
 	EventDefenderCommand = "defender_command"
+	// EventSRUMAppUsage is one SRUM application resource record: CPU cycles,
+	// foreground time and disk I/O an application used in the interval ending
+	// at the record's time.
+	EventSRUMAppUsage = "srum_app_usage"
+	// EventSRUMNetworkUsage is bytes an application sent and received over one
+	// network interface in a SRUM interval.
+	EventSRUMNetworkUsage = "srum_network_usage"
+	// EventSRUMNetworkConnection is a network connection SRUM recorded: its
+	// start and how long it stayed connected.
+	EventSRUMNetworkConnection = "srum_network_connection"
+	// EventSRUMPushNotification is a push notification delivered to an
+	// application, with its payload size.
+	EventSRUMPushNotification = "srum_push_notification"
 	// EventServiceMessage is a service message a daemon wrote to the system
 	// log and that bears on security or integrity: a database running with
 	// a passwordless administrator account, corrupt tables, a server

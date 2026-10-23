@@ -108,6 +108,13 @@ func (e Event) ComputeDedupHash() string {
 	if e.ArtifactType == ArtifactGrafanaDB {
 		parts = append(parts, e.SourceReference)
 	}
+	// SRUM writes a row per application per interval, and services and packages
+	// have no process name, so rows tie on type, time and user. The row's table
+	// and AutoIncId (the source reference) identify it, and they are the same
+	// when the same database is collected again.
+	if e.ArtifactType == ArtifactSRUM {
+		parts = append(parts, e.SourceReference)
+	}
 	// Most Extra fields are interpretation or renderer metadata, not identity.
 	// Memory observations are the exception: a PID at snapshot time may own
 	// many regions, services and sockets. Include their explicit object fields

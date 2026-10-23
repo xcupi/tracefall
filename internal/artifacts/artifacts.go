@@ -437,6 +437,11 @@ var supportedTypeInfo = map[string]typeInfo{
 		why:  "Records each run of MpCmdRun.exe with its command line. MpCmdRun.exe -DownloadFile can fetch a file with a signed Microsoft binary.",
 		note: "Times are the machine's local time with no zone, so a run has no instant unless the collection's SYSTEM hive records the zone (then a UTC reading is derived with one fixed offset). Only English day and month names are read. Other Defender text logs (MPLog, MPDetection) are not read.",
 	},
+	model.ArtifactSRUM: {
+		label: "System Resource Usage Monitor (SRUM)", family: FamilyExecution, priority: PriorityHigh,
+		why:  "Windows records, about once an hour, what each application and service used: CPU cycles, foreground time, disk I/O and bytes sent and received per network interface. It shows that a program ran and how much data it moved, including programs that left no other trace.",
+		note: "A row shows an application was active and what it used in the interval ending at the row's time; it does not show what it did, and the interval is not the moment of any single action. Applications and users are named by the database's own id map; an id with no map entry is shown as an id. Only the application resource, network usage, network connectivity and push notification tables are interpreted; the other tables are counted and named. A database copied from a running system can lack the newest records, which are still in the SRU log files.",
+	},
 	model.ArtifactIISLog: {
 		label: "IIS web log (W3C)", family: FamilyLog, priority: PriorityHigh,
 		why:  "Records every request IIS answered, with the source address, URL, query, user and status -- the trail of web exploitation and web-shell use on a Windows server.",
@@ -904,7 +909,7 @@ var unsupportedRules = []unsupportedRule{
 	{
 		label: "SRUM database", family: FamilyExecution, priority: PriorityHigh,
 		why:    "Per-application network and resource usage over 30-60 days: what ran, and how much data it moved.",
-		reason: "The System Resource Usage Monitor database records per-application network and resource usage. Tracefall has no ESE database parser.",
+		reason: "A file named SRUDB.dat is read as the System Resource Usage Monitor database only when it starts with the ESE database header; this one does not, so it is not read.",
 		match:  baseIs("srudb.dat"),
 	},
 	{
@@ -955,7 +960,7 @@ var unsupportedRules = []unsupportedRule{
 	{
 		label: "Windows Search index (Windows.edb)", family: FamilyExecution, priority: PriorityMedium,
 		why:    "Indexes file names, paths and content, including for files since deleted -- useful corroboration, rarely primary.",
-		reason: "Windows.edb is an ESE database. Tracefall has no ESE parser.",
+		reason: "Windows.edb is an ESE database. Tracefall reads ESE databases but has no interpretation of the Windows Search tables yet.",
 		match:  baseIs("windows.edb"),
 	},
 	{
@@ -1011,7 +1016,7 @@ var unsupportedRules = []unsupportedRule{
 	{
 		label: "IE / Edge Legacy web cache (WebCacheV01.dat)", family: FamilyBrowser, priority: PriorityMedium,
 		why:           "Holds Internet Explorer and Edge Legacy browsing history -- the same class of evidence as any other browser history.",
-		reason:        "WebCacheV01.dat is an ESE (Extensible Storage Engine) database. Tracefall has no ESE parser, so Internet Explorer and Edge Legacy browsing history is not extracted.",
+		reason:        "WebCacheV01.dat is an ESE database. Tracefall opens ESE but does not interpret the WebCache tables, so IE and Edge Legacy history is not extracted.",
 		parsedInstead: browserParsedInstead,
 		notParsed:     []string{"Internet Explorer / Edge Legacy WebCacheV01.dat (ESE database)"},
 		match:         baseIs("webcachev01.dat", "index.dat"),
