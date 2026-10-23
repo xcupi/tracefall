@@ -192,21 +192,40 @@ func describeSpan(events []model.Event) string {
 	if len(events) == 0 {
 		return ""
 	}
-	first, last := events[0].Timestamp, events[0].Timestamp
+	var first, last time.Time
+	undated := 0
 	for _, e := range events {
-		if e.Timestamp.Before(first) {
+		if e.Timestamp.IsZero() {
+			undated++
+			continue
+		}
+		if first.IsZero() || e.Timestamp.Before(first) {
 			first = e.Timestamp
 		}
-		if e.Timestamp.After(last) {
+		if last.IsZero() || e.Timestamp.After(last) {
 			last = e.Timestamp
 		}
 	}
+	unknown := ""
+	if undated > 0 {
+		unknown = fmt.Sprintf("%d supporting event(s): time not recorded (a partial timestamp, if present, is not a complete instant); temporal order relative to other events is not established.", undated)
+	}
+	if first.IsZero() {
+		return unknown
+	}
+	if unknown != "" {
+		unknown = " " + unknown
+	}
 	const layout = "2006-01-02 15:04:05 UTC"
 	if first.Equal(last) {
-		return "At " + first.UTC().Format(layout) + "."
+		tie := ""
+		if len(events)-undated > 1 {
+			tie = " Dated supporting events share the same timestamp; their order is not established."
+		}
+		return "At " + first.UTC().Format(layout) + "." + tie + unknown
 	}
-	return fmt.Sprintf("From %s to %s (%s).",
-		first.UTC().Format(layout), last.UTC().Format(layout), humanDuration(last.Sub(first)))
+	return fmt.Sprintf("Dated supporting events: from %s to %s (%s).%s",
+		first.UTC().Format(layout), last.UTC().Format(layout), humanDuration(last.Sub(first)), unknown)
 }
 
 func humanDuration(d time.Duration) string {

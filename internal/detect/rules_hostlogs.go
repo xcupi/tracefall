@@ -410,7 +410,9 @@ func commandBasis(eventType string) (basis string, conf string) {
 	case model.EventSudoCommand:
 		return "sudo authorised the command; the log does not show that it ran or succeeded", model.ConfidenceLow
 	case model.EventBashHistoryCommand, model.EventPowerShellHistoryCommand:
-		return "the shell history shows the command was typed; it does not show that it ran or succeeded", model.ConfidenceLow
+		return "the shell history records the command; it does not show that it ran or succeeded", model.ConfidenceLow
+	case model.EventPowerShellScript:
+		return "the PowerShell script record contains the command; it does not show that the change took effect", model.ConfidenceMedium
 	case model.EventScheduledJobRun:
 		return "cron started the job; the log does not show its result", model.ConfidenceLow
 	case model.EventMemoryConsole:
@@ -517,12 +519,12 @@ func (r systemChangeCommand) Evaluate(events []model.Event) []model.Finding {
 		} else if st := first.Extra[partialtime.KeyStamp]; st != "" {
 			times = fmt.Sprintf(" first at %q (no year in the log)", st)
 		}
-		title := fmt.Sprintf("%s: %s", catTitle[k.category], strings.Join(details, "; "))
+		title := fmt.Sprintf("%s command evidence; intended effect: %q", catTitle[k.category], strings.Join(details, "; "))
 		if n := len(g.events); n > 1 {
 			title += fmt.Sprintf(" (x%d)", n)
 		}
 		desc := fmt.Sprintf(
-			"Account %q on host %s ran a command that %s, seen %d time(s)%s. Command: %s. Evidence basis: %s. "+
+			"Command evidence associated with account %q on host %s has the intended effect %q, seen %d time(s)%s. Command: %s. Evidence basis: %s. This evidence alone does not prove the change took effect. "+
 				"Administrators make these changes as routinely as attackers do, so this is a lead to compare with what was "+
 				"authorised on the host.",
 			orDash(k.user), orDash(k.host), strings.ToLower(strings.Join(details, "; ")), len(g.events), times,

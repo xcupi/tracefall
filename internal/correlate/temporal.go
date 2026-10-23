@@ -19,13 +19,16 @@ const (
 )
 
 // BuildTemporalClusters groups each host's events into bursts of activity
-// separated by gaps of at least temporalGap, and emits one correlation
+// separated by gaps greater than temporalGap, and emits one correlation
 // per burst that spans multiple artifact types -- a simple, explainable
 // heuristic for "these events likely belong to the same episode of
 // activity" without asserting any causal relationship between them.
 func BuildTemporalClusters(caseID string, refs []model.EventRef) []model.Correlation {
 	byHost := map[string][]model.EventRef{}
 	for _, e := range refs {
+		if e.Timestamp.IsZero() {
+			continue // Undated observations remain in the timeline, not timed bursts.
+		}
 		byHost[e.Host] = append(byHost[e.Host], e)
 	}
 
@@ -38,7 +41,12 @@ func BuildTemporalClusters(caseID string, refs []model.EventRef) []model.Correla
 	var out []model.Correlation
 	for _, host := range hosts {
 		hostEvents := byHost[host]
-		sort.Slice(hostEvents, func(i, j int) bool { return hostEvents[i].Timestamp.Before(hostEvents[j].Timestamp) })
+		sort.Slice(hostEvents, func(i, j int) bool {
+			if !hostEvents[i].Timestamp.Equal(hostEvents[j].Timestamp) {
+				return hostEvents[i].Timestamp.Before(hostEvents[j].Timestamp)
+			}
+			return hostEvents[i].ID < hostEvents[j].ID
+		})
 
 		var cluster []model.EventRef
 		flush := func() {
@@ -64,8 +72,8 @@ func BuildTemporalClusters(caseID string, refs []model.EventRef) []model.Correla
 				Type:   model.CorrelationTemporal,
 				Title:  fmt.Sprintf("Activity burst on %s (%d events)", host, len(cluster)),
 				Description: fmt.Sprintf(
-					"%d events across %d artifact type(s) occurred on host %s within a %s window, between %s and %s.",
-					len(cluster), len(artifacts), host, temporalGap, first.Timestamp.Format(time.RFC3339), last.Timestamp.Format(time.RFC3339)),
+					"%d events across %d artifact type(s) occurred on host %s over %s, between %s and %s; consecutive events are separated by no more than %s.",
+					len(cluster), len(artifacts), host, last.Timestamp.Sub(first.Timestamp), first.Timestamp.Format(time.RFC3339), last.Timestamp.Format(time.RFC3339), temporalGap),
 				EventIDs:  ids,
 				FirstSeen: first.Timestamp,
 				LastSeen:  last.Timestamp,

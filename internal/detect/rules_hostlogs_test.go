@@ -234,6 +234,35 @@ func cmdEvent(id, typ, user, cmd string) model.Event {
 	return model.Event{ID: id, CaseID: "case1", EventType: typ, Host: "host01", User: user, CommandLine: cmd}
 }
 
+func TestSystemChangeCommand_SourceClaimsDoNotProveEffects(t *testing.T) {
+	for _, tc := range []struct{ typ, basis, conf string }{
+		{model.EventBashHistoryCommand, "shell history records the command", model.ConfidenceLow},
+		{model.EventPowerShellHistoryCommand, "shell history records the command", model.ConfidenceLow},
+		{model.EventSudoCommand, "sudo authorised the command", model.ConfidenceLow},
+		{model.EventProcessCreate, "process that started", model.ConfidenceMedium},
+		{model.EventPowerShellScript, "script record contains the command", model.ConfidenceMedium},
+	} {
+		t.Run(tc.typ, func(t *testing.T) {
+			for _, cmd := range []string{"systemctl enable app.service", "ufw disable", "net user alice FakeSecret42 /add", "crontab -e"} {
+				got := systemChangeCommand{}.Evaluate([]model.Event{cmdEvent("e1", tc.typ, "alice", cmd)})
+				if len(got) != 1 {
+					t.Fatalf("%q: %+v", cmd, got)
+				}
+				f := got[0]
+				if !strings.Contains(f.Title, "intended effect:") || !strings.Contains(f.Description, tc.basis) || strings.Contains(f.Description, "ran a command") || !strings.Contains(f.Description, "does not prove the change took effect") {
+					t.Errorf("overstated %s: %s / %s", tc.typ, f.Title, f.Description)
+				}
+				if f.Confidence != tc.conf {
+					t.Errorf("confidence changed: %s", f.Confidence)
+				}
+				if strings.Contains(f.Title+f.Description, "FakeSecret42") {
+					t.Fatal("secret exposed")
+				}
+			}
+		})
+	}
+}
+
 func TestSystemChangeCommand(t *testing.T) {
 	ev := []model.Event{
 		cmdEvent("a1", model.EventSudoCommand, "alice", "/sbin/iptables -A INPUT -p tcp --dport 22 -j DROP"),

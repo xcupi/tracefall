@@ -32,8 +32,35 @@ func evAt(id string, offset time.Duration, mutate func(*model.Event)) model.Even
 	return e
 }
 
-// The single most important property: explaining a finding must not
-// alter its severity or confidence.
+func TestExplain_TiedTimesDoNotEstablishOrder(t *testing.T) {
+	events := []model.Event{evAt("b", 0, nil), evAt("a", 0, nil)}
+	got := describeSpan(events)
+	if !strings.Contains(got, "same timestamp") || !strings.Contains(got, "order is not established") || strings.Contains(got, "before") || strings.Contains(got, "after") {
+		t.Fatalf("tie not acknowledged: %s", got)
+	}
+	events[0], events[1] = events[1], events[0]
+	if describeSpan(events) != got {
+		t.Fatal("span depends on input order")
+	}
+}
+
+func TestExplain_UndatedSpanIsNotAZeroDate(t *testing.T) {
+	for _, events := range [][]model.Event{
+		{{ID: "u"}},
+		{{ID: "p", Extra: map[string]string{"timestamp_partial": "Mar 18 10:00:00"}}},
+		{{ID: "u"}, evAt("d", 0, nil), evAt("d2", time.Minute, nil)},
+	} {
+		got := describeSpan(events)
+		if strings.Contains(got, "0001") || !strings.Contains(got, "time not recorded") || !strings.Contains(got, "order") {
+			t.Errorf("dishonest unknown span: %s", got)
+		}
+		if len(events) > 1 && (!strings.Contains(got, "2026-01-15") || !strings.Contains(got, "1 minutes")) {
+			t.Errorf("known bounds lost: %s", got)
+		}
+	}
+}
+
+// Explaining a finding must not alter its severity or confidence.
 func TestExplain_DoesNotChangeTheFinding(t *testing.T) {
 	f := model.Finding{
 		RuleID: "new-registry-run-key", Severity: model.SeverityHigh, Confidence: model.ConfidenceMedium,
