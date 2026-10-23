@@ -459,6 +459,24 @@ CREATE TABLE IF NOT EXISTS pipeline_jobs (
 CREATE INDEX IF NOT EXISTS idx_pipeline_jobs_case ON pipeline_jobs(case_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_pipeline_jobs_queue ON pipeline_jobs(status, created_at);
 
+-- Answers from outside services about indicators read from evidence. Not
+-- evidence: nothing here changes an event or a finding. One row per
+-- (case, provider, indicator); a later answer replaces an earlier one.
+CREATE TABLE IF NOT EXISTS enrichments (
+	id               TEXT PRIMARY KEY,
+	case_id          TEXT NOT NULL REFERENCES cases(id),
+	provider         TEXT NOT NULL,
+	indicator_type   TEXT NOT NULL,
+	indicator        TEXT NOT NULL,
+	status           TEXT NOT NULL,
+	result_json      TEXT NOT NULL DEFAULT '{}',
+	error            TEXT NOT NULL DEFAULT '',
+	fetched_at       TEXT NOT NULL,
+	source_event_ids TEXT NOT NULL DEFAULT '[]',
+	UNIQUE (case_id, provider, indicator)
+);
+CREATE INDEX IF NOT EXISTS idx_enrichments_fetched ON enrichments(provider, fetched_at);
+
 CREATE TABLE IF NOT EXISTS upload_sessions (
 	id            TEXT PRIMARY KEY,
 	case_id       TEXT NOT NULL REFERENCES cases(id),

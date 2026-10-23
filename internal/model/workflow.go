@@ -185,6 +185,15 @@ const (
 	// (evidence_discovered, evidence_imported, analysis_completed...).
 	AuditPipelineQueued   = "pipeline_queued"
 	AuditPipelineFinished = "pipeline_finished"
+
+	// AuditEgressChanged records that an analyst changed how much of the case
+	// may leave the server (see internal/egress).
+	AuditEgressChanged = "egress_level_changed"
+	// AuditEnrichmentSent records that something WAS sent to an outside
+	// service, and exactly what class of thing and how much of it.
+	AuditEnrichmentSent = "enrichment_requested"
+	// AuditEnrichmentFinished records how an enrichment run ended.
+	AuditEnrichmentFinished = "enrichment_finished"
 )
 
 // ActorLocalUser is the only Actor value Tracefall currently produces --

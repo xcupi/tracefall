@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -234,6 +235,13 @@ func populate(t *testing.T, s *store.Store, caseID, name string, events int) {
 	if err := s.CreateUploadSession(model.UploadSession{
 		ID: caseID + "-up1", CaseID: caseID, Filename: "a.zip", Size: 1, Status: model.UploadOpen,
 		CreatedBy: "tester", CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// An outside service's answer about an indicator of this case.
+	if err := s.UpsertEnrichment(model.Enrichment{
+		ID: caseID + "-en1", CaseID: caseID, Provider: model.EnrichmentVirusTotal, IndicatorType: "sha256",
+		Indicator: strings.Repeat("a", 64), Status: model.EnrichmentNotFound, FetchedAt: now,
 	}); err != nil {
 		t.Fatal(err)
 	}

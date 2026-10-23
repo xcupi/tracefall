@@ -1515,6 +1515,10 @@ func (s *Store) DeleteCaseWithCounts(caseID string) (DeletedCaseCounts, error) {
 		// operational state about work on this case, and go with it.
 		`DELETE FROM pipeline_jobs WHERE case_id = ?`,
 		`DELETE FROM upload_sessions WHERE case_id = ?`,
+		// Outside services' answers about this case's indicators, and the
+		// egress level chosen for it, have no meaning without the case.
+		`DELETE FROM enrichments WHERE case_id = ?`,
+		`DELETE FROM app_settings WHERE key = 'egress:' || ?`,
 		`DELETE FROM cases WHERE id = ?`,
 	}
 	for _, stmt := range stmts {

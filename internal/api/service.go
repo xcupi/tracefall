@@ -43,6 +43,7 @@ import (
 	"tracefall/internal/casefiles"
 	"tracefall/internal/correlate"
 	"tracefall/internal/detect"
+	"tracefall/internal/enrich/virustotal"
 	"tracefall/internal/evtx"
 	"tracefall/internal/gate"
 	"tracefall/internal/ingest"
@@ -183,6 +184,12 @@ type Service struct {
 	// mem runs Volatility for memory images; nil means memory analysis is
 	// not configured. Set once at startup (SetMemoryRunner).
 	mem *memory.Runner
+	// vt looks file hashes up on VirusTotal; nil or key-less means lookups are
+	// not configured. Set once at startup (SetVirusTotal). See enrich.go.
+	vt *virustotal.Client
+	// enrich holds the state of running lookups, in memory only: the answers
+	// are in the database, the progress of a run is not worth persisting.
+	enrich *enrichManager
 	// actor is the identity behind the CURRENT request, set by
 	// WithActor on a per-request copy. The shared Service always has the
 	// zero value; only request-scoped copies carry an identity.
@@ -253,6 +260,7 @@ func NewService(s *store.Store, files *casefiles.Store) *Service {
 		jobs: newImportJobs(), throttle: newLoginGuard(),
 		deletions: newDeletionTracker(), pipe: newPipelineManager(),
 		heavy: gate.New(DefaultHeavyOps), imports: gate.New(DefaultImports),
+		enrich: newEnrichManager(),
 	}
 }
 
