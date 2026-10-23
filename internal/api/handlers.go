@@ -95,6 +95,12 @@ func NewRouterWithAuth(svc *Service, logger *slog.Logger, maxUploadBytes int64, 
 	// unchanged (scripted use, and every existing test), so this adds
 	// progress reporting without altering what already worked.
 	mux.HandleFunc("POST /api/cases/{id}/evidence/{collectionID}/import/start", h.startImport)
+	mux.HandleFunc("GET /api/admin/integrations/chatgpt", h.getChatGPTIntegration)
+	mux.HandleFunc("PUT /api/admin/integrations/chatgpt", h.selectChatGPTProvider)
+	mux.HandleFunc("DELETE /api/admin/integrations/chatgpt", h.disconnectChatGPTIntegration)
+	mux.HandleFunc("POST /api/admin/integrations/chatgpt/authorize", h.authorizeChatGPTIntegration)
+	mux.HandleFunc("POST /api/admin/integrations/chatgpt/cancel", h.cancelChatGPTIntegration)
+	mux.HandleFunc("POST /api/admin/integrations/chatgpt/verify", h.verifyChatGPTIntegration)
 	mux.HandleFunc("GET /api/admin/integrations/virustotal", h.getVTIntegration)
 	mux.HandleFunc("PUT /api/admin/integrations/virustotal", h.saveVTIntegration)
 	mux.HandleFunc("DELETE /api/admin/integrations/virustotal", h.removeVTIntegration)

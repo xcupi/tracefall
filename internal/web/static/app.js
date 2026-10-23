@@ -3685,9 +3685,94 @@ function renderVTIntegrationForm(st) {
   </section>`;
 }
 
+async function renderChatGPTIntegration(root) {
+  const content = root.querySelector("#chatgpt-settings-content");
+  let st, busy = false, timer;
+  const endpoint = "/admin/integrations/chatgpt";
+  const pending = () => ["authorizing", "waiting"].includes(st?.state);
+  const refresh = async (force = false) => {
+    if (!root.isConnected) return;
+    try {
+      const next = await api(endpoint);
+      if (!root.isConnected) return;
+      const changed = JSON.stringify(next) !== JSON.stringify(st);
+      st = next;
+      if (force || changed) mount();
+      if (pending()) timer = setTimeout(refresh, 1500);
+    } catch (e) {
+      if (root.isConnected) content.textContent = "Could not load ChatGPT settings: " + e.message;
+    }
+  };
+  const act = async (method, suffix, body) => {
+    if (busy) return;
+    busy = true; clearTimeout(timer); sync();
+    const msg = content.querySelector("#chatgpt-message");
+    msg.textContent = suffix === "/verify" ? "Sending the fixed synthetic request… this may use account quota." : "Updating isolated server integration…";
+    try {
+      await api(endpoint + suffix, { method, ...(body ? { body: JSON.stringify(body) } : {}) });
+      if (!root.isConnected) return;
+      busy = false; await refresh(true);
+    } catch (e) {
+      if (!root.isConnected) return;
+      busy = false;
+      await refresh(true);
+      const next = content.querySelector("#chatgpt-message");
+      if (next) { next.textContent = e.message || "Operation failed."; next.className = "field-error-box"; }
+    } finally { busy = false; if (root.isConnected) sync(); }
+  };
+  const sync = () => {
+    if (!st || !content.querySelector("#chatgpt-authorize")) return;
+    const blocked = busy || st.busy;
+    content.querySelector("#chatgpt-authorize").disabled = blocked || !st.available;
+    content.querySelector("#chatgpt-cancel").disabled = busy || !pending();
+    content.querySelector("#chatgpt-disconnect").disabled = blocked || !st.available || st.state === "not_connected";
+    content.querySelector("#chatgpt-provider").disabled = blocked || st.environment_managed;
+    content.querySelector("#chatgpt-provider-save").disabled = blocked || st.environment_managed;
+    const ack = content.querySelector("#chatgpt-verify-ack");
+    ack.disabled = blocked || st.state !== "signed_in";
+    content.querySelector("#chatgpt-verify").disabled = blocked || st.state !== "signed_in" || !ack.checked;
+  };
+  const mount = () => {
+    const labels = {not_connected:"Not connected", authorizing:"Preparing official authorization…", waiting:"Waiting for authorization", signed_in:"Signed in", cancelled:"Authorization cancelled", failed:"Authorization/status failed", expired:"Authorization expired"};
+    const code = st.state === "waiting" && st.authorization_url === "https://auth.openai.com/codex/device" && /^[A-Z0-9]{4}-[A-Z0-9]{4,6}$/.test(st.user_code || "");
+    content.innerHTML = `<section class="panel integration-settings" aria-labelledby="chatgpt-title">
+      <h2 id="chatgpt-title">ChatGPT / Codex</h2>
+      <p id="chatgpt-state" role="status"><strong>${labels[st.state] || "Status unavailable"}</strong>${st.request_verified ? " · Request verified" : " · Request not verified"}</p>
+      <p class="small">Uses the official Codex CLI device authorization. Sign in only on OpenAI's page. Tracefall has no password or token form. The server uses a dedicated Codex home; your personal Codex and Hermes sessions are not used or disconnected.</p>
+      ${code ? `<div class="external-notice"><p><a id="chatgpt-official-link" href="https://auth.openai.com/codex/device" target="_blank" rel="noopener noreferrer">Open official OpenAI authorization page</a></p><p>Enter this one-time code: <strong id="chatgpt-user-code">${esc(st.user_code)}</strong></p><p class="small">Expires by ${esc(st.expires_at)}. Continue only if you started this authorization here. Cancel if someone else gave you the code.</p></div>` : ""}
+      ${["failed", "expired", "cancelled"].includes(st.state) ? `<p class="field-error-box">${st.state === "expired" ? "The authorization deadline passed. Start again for a fresh code." : st.state === "cancelled" ? "The authorization process stopped. No code is retained." : "The CLI could not confirm authorization. Check the official CLI installation and network access, then retry. Raw CLI output is never shown."}</p>` : ""}
+      <div class="row"><button id="chatgpt-authorize" type="button">${st.state === "signed_in" ? "Authorize again" : "Authorize ChatGPT"}</button><button id="chatgpt-cancel" class="secondary" type="button">Cancel authorization</button><button id="chatgpt-disconnect" class="danger" type="button">Disconnect</button></div>
+      ${!st.available ? `<p class="field-error-box">Official Codex CLI or isolated integration storage is unavailable on this server. Ask the server administrator to install/configure it.</p>` : ""}
+      <p class="small muted">Signed in means only that <code>codex login status</code> reports a ChatGPT session. It does not prove token freshness, plan/model access, or a successful request. Authorize never sends case data or a model request.</p>
+      <h3>AI summary provider</h3>
+      <p class="small">Active selection: <strong id="chatgpt-effective-provider">${esc(st.effective_provider)}</strong>. Authorization alone does not select Codex. Each case still requires its egress policy and a fresh per-request acknowledgement.</p>
+      ${st.environment_managed ? `<p class="external-notice"><code>TRACEFALL_LLM_PROVIDER</code> overrides saved preferences. Change it in the server environment and restart to enable UI selection. Account authorization is separate from this override.</p>` : ""}
+      <label for="chatgpt-provider">Use for AI summaries</label>
+      <div class="row"><select id="chatgpt-provider">${[["none","Disabled"],["openai-compatible","API provider (server environment)"],["codex-cli","ChatGPT via Codex CLI"]].map(([v,label]) => `<option value="${v}" ${(st.preference || st.effective_provider) === v ? "selected" : ""}>${label}</option>`).join("")}</select><button id="chatgpt-provider-save" class="secondary" type="button">Save provider</button></div>
+      <p class="small muted">API credentials and model remain configured on the server. Selection sends no request and grants no case egress permission.</p>
+      <h3>Verify one synthetic request</h3>
+      <p class="small">Sends one fixed synthetic prompt to OpenAI through this isolated Codex session. <strong>No case data</strong> is sent. May consume account quota and is subject to account limits. A successful response marks only this request as verified; it does not verify future summaries or privacy/data-control settings.</p>
+      <p class="small"><label><input id="chatgpt-verify-ack" type="checkbox"> I authorize this external synthetic request and its quota usage.</label></p>
+      <button id="chatgpt-verify" class="secondary" type="button" disabled>Verify request</button>
+      <details><summary>Credential storage and provider privacy</summary><p class="small">The official CLI owns its credentials under the server data directory's <code>.integrations/codex</code>, outside cases, reports and database exports. Owner-only storage is <strong>not encryption</strong>. Administrators and server backups may retain credentials. Disconnect does not erase backups or snapshots. Verification is reset on authorization, disconnect, and server restart.</p><p class="small">${esc("This request goes to OpenAI through your ChatGPT account. This program cannot inspect your data-control settings. Check the provider's current terms and settings before authorizing case requests.")}</p></details>
+      <p id="chatgpt-message" class="small" role="status" aria-live="polite"></p>
+    </section>`;
+    content.querySelector("#chatgpt-authorize").onclick = () => act("POST", "/authorize");
+    content.querySelector("#chatgpt-cancel").onclick = () => act("POST", "/cancel");
+    content.querySelector("#chatgpt-disconnect").onclick = () => {
+      if (window.confirm("Disconnect the Tracefall ChatGPT session? This removes only its isolated CLI sign-in. Personal Codex/Hermes sessions and stored case drafts are unchanged. Backups are not erased.")) act("DELETE", "");
+    };
+    content.querySelector("#chatgpt-provider-save").onclick = () => act("PUT", "", {provider:content.querySelector("#chatgpt-provider").value});
+    content.querySelector("#chatgpt-verify-ack").onchange = sync;
+    content.querySelector("#chatgpt-verify").onclick = () => { if (content.querySelector("#chatgpt-verify-ack").checked) act("POST", "/verify", {acknowledge:true}); };
+    sync();
+  };
+  await refresh();
+}
+
 async function renderIntegrationSettings() {
   const app = document.getElementById("app");
-  app.innerHTML = `<div id="integration-settings-root"><p><a href="#/">All Cases</a> / Settings / Integrations</p><h1>Integrations</h1><div id="vt-settings-content">Loading configuration…</div></div>`;
+  app.innerHTML = `<div id="integration-settings-root"><p><a href="#/">All Cases</a> / Settings / Integrations</p><h1>Integrations</h1><div id="chatgpt-settings-content"></div><div id="vt-settings-content">Loading configuration…</div></div>`;
   const root = document.getElementById("integration-settings-root");
   const content = root.querySelector("#vt-settings-content");
   if (authState.enabled && authState.role !== "admin") {
@@ -3695,6 +3780,7 @@ async function renderIntegrationSettings() {
     return;
   }
   try {
+    renderChatGPTIntegration(root);
     let st = await api("/admin/integrations/virustotal");
     if (!root.isConnected) return;
     const mount = () => {
@@ -5612,7 +5698,7 @@ function renderNarrativeSection(nv) {
   const run = nv.run;
   const running = run && run.state === "running";
   let why = "";
-  if (!nv.configured) why = "No language model is configured. Use an API provider, or set TRACEFALL_LLM_PROVIDER=codex-cli on the server and sign in to the Codex CLI with ChatGPT. See setup instructions.";
+  if (!nv.configured) why = "No language model is configured. Open Settings → Integrations to authorize ChatGPT/Codex and select a provider, or configure the server API provider.";
   else if (!nv.allowed) why = "This case's level does not allow facts to be sent to another machine. Choose \"pseudonymized\" above.";
   else if (nv.findings === 0) why = "The case has no findings yet: run the analysis first.";
   else if (running) why = "A summary is being drafted.";
@@ -5656,7 +5742,7 @@ function renderNarrativeSection(nv) {
       Where it goes: ${where}.</p>
     ${!nv.configured ? `<details id="nv-setup" class="external-details"><summary>Set up a language model</summary>
       <p><strong>API provider:</strong> set <code>TRACEFALL_LLM_API_KEY</code> and <code>TRACEFALL_LLM_MODEL</code> on the server; optionally set <code>TRACEFALL_LLM_BASE_URL</code>.</p>
-      <p><strong>ChatGPT account:</strong> sign in with the official Codex CLI as the server user, then set <code>TRACEFALL_LLM_PROVIDER=codex-cli</code>. Optionally set <code>TRACEFALL_CODEX_BIN</code> and <code>TRACEFALL_LLM_MODEL</code>. Restart Tracefall after changing server settings. Credentials are never entered into this page.</p>
+      <p><strong>ChatGPT account:</strong> <a href="#/settings/integrations">Open Settings → Integrations</a> to authorize the official Codex CLI in isolated server storage and select <code>codex-cli</code>. Explicit <code>TRACEFALL_LLM_PROVIDER</code> overrides UI provider preferences. Authorizing sends no model request; case summaries still require their egress policy and per-request acknowledgement.</p>
       </details>` : ""}
     <details id="nv-privacy" class="external-details"><summary>What leaves this server?</summary>
     <p class="small"><strong>What is sent:</strong> finding titles, rules, severities, ATT&amp;CK ids, times, and for the events they cite:

@@ -92,6 +92,20 @@ Configuring a key does not grant case egress permission. Each case still default
 to `none`; explicitly select `hashes` (or a higher permitted level) in Outside
 services before starting case lookups. Deterministic analysis works without VT.
 
+## ChatGPT / Codex authorization and AI summary provider
+
+Open **Settings → Integrations → ChatGPT / Codex** to authorize the official
+Codex CLI in isolated server storage, explicitly select a summary provider, or
+acknowledge one fixed synthetic request for verification. Sign-in alone sends
+no model request, grants no case egress, and is not proof of model access.
+Personal Codex/Hermes credentials are not reused. Explicit
+`TRACEFALL_LLM_PROVIDER` overrides saved UI provider selection.
+
+See [ChatGPT integration](chatgpt-integration.md) for security/storage limits,
+status semantics, administrative API, provider precedence, and the synthetic-only
+browser/restart recipe. Deterministic analysis and the existing API-provider
+route remain available independently of ChatGPT authorization.
+
 ## Single-operator mode (default)
 
 ```bash

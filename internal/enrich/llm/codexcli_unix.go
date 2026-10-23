@@ -19,7 +19,7 @@ import (
 
 // The Codex CLI, signed in with a ChatGPT account, as a way to reach a model.
 //
-// This is the supported route to a ChatGPT subscription: the CLI does the
+// This uses the official CLI route for a ChatGPT account: the CLI does the
 // sign-in, keeps the credentials fresh and speaks to whatever endpoint OpenAI
 // currently uses, so this program never reads, copies or stores a token and
 // does not depend on an undocumented endpoint.
@@ -67,7 +67,7 @@ type CodexCLI struct {
 	Binary string
 	// Model is the model to ask. Empty means the CLI's own default.
 	Model string
-	// CodexHome is where the CLI keeps its sign-in; empty means $CODEX_HOME or ~/.codex.
+	// CodexHome must explicitly name isolated sign-in storage; empty is disabled.
 	CodexHome string
 	// Timeout bounds one request.
 	Timeout time.Duration
@@ -102,30 +102,20 @@ func isExecutable(p string) bool {
 }
 
 func (c *CodexCLI) codexHome() string {
-	if c.CodexHome != "" {
-		return c.CodexHome
+	if c == nil {
+		return ""
 	}
-	if h := os.Getenv("CODEX_HOME"); h != "" {
-		return h
-	}
-	if home, err := os.UserHomeDir(); err == nil {
-		return filepath.Join(home, ".codex")
-	}
-	return ""
+	return c.CodexHome
 }
 
-// Configured: the program exists and a sign-in is present. The sign-in file is
-// only checked for existing; it is never opened.
+// Configured checks bounded local CLI status in an explicit isolated home.
+// A signed-in status is not proof of token freshness or successful model access.
 func (c *CodexCLI) Configured() bool {
-	if c == nil || c.Binary == "" || !isExecutable(c.Binary) {
+	if c == nil || c.CodexHome == "" {
 		return false
 	}
-	h := c.codexHome()
-	if h == "" {
-		return false
-	}
-	st, err := os.Stat(filepath.Join(h, "auth.json"))
-	return err == nil && st.Mode().IsRegular()
+	st, err := c.LoginStatus(context.Background())
+	return err == nil && st == "signed_in"
 }
 
 // Destination: text goes to OpenAI, never to this machine.
@@ -150,7 +140,7 @@ func (c *CodexCLI) args(dir, out string) []string {
 	for _, f := range codexDisabledFeatures {
 		a = append(a, "--disable", f)
 	}
-	a = append(a, "-c", `approval_policy="never"`, "-c", `web_search="disabled"`)
+	a = append(a, "-c", `approval_policy="never"`, "-c", `web_search="disabled"`, "-c", `cli_auth_credentials_store="file"`, "-c", `forced_login_method="chatgpt"`)
 	if c.Model != "" {
 		a = append(a, "-m", c.Model)
 	}
@@ -161,9 +151,7 @@ func (c *CodexCLI) args(dir, out string) []string {
 // reach the network, and none of this server's own settings.
 func (c *CodexCLI) env() []string {
 	env := []string{"PATH=" + os.Getenv("PATH"), "LANG=C.UTF-8", "CODEX_HOME=" + c.codexHome(), "TMPDIR=" + os.TempDir()}
-	if h, err := os.UserHomeDir(); err == nil {
-		env = append(env, "HOME="+h)
-	}
+	env = append(env, "HOME="+c.codexHome())
 	for _, k := range []string{"HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", "https_proxy", "http_proxy", "no_proxy", "SSL_CERT_FILE", "SSL_CERT_DIR"} {
 		if v := os.Getenv(k); v != "" {
 			env = append(env, k+"="+v)
@@ -207,7 +195,20 @@ var codexModelRe = regexp.MustCompile(`(?m)^model:\s*(\S+)\s*$`)
 
 // Chat runs one request.
 func (c *CodexCLI) Chat(ctx context.Context, msgs []Message) (Result, error) {
-	if !c.Configured() {
+	if c == nil {
+		return Result{}, ErrNotConfigured
+	}
+	t := c.Timeout
+	if t <= 0 {
+		t = 5 * time.Minute
+	}
+	ctx, cancel := context.WithTimeout(ctx, t)
+	defer cancel()
+	status, statusErr := c.LoginStatus(ctx)
+	if ctx.Err() != nil {
+		return Result{}, ctx.Err()
+	}
+	if statusErr != nil || status != "signed_in" {
 		return Result{}, ErrNotConfigured
 	}
 	dir, err := os.MkdirTemp("", "tracefall-codex-")
@@ -216,13 +217,6 @@ func (c *CodexCLI) Chat(ctx context.Context, msgs []Message) (Result, error) {
 	}
 	defer os.RemoveAll(dir)
 	out := filepath.Join(dir, "answer.txt")
-
-	t := c.Timeout
-	if t <= 0 {
-		t = 5 * time.Minute
-	}
-	ctx, cancel := context.WithTimeout(ctx, t)
-	defer cancel()
 
 	cmd := exec.CommandContext(ctx, c.Binary, c.args(dir, out)...)
 	cmd.Dir = dir

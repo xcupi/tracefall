@@ -136,7 +136,7 @@ func (h *handlers) startNarrative(w http.ResponseWriter, r *http.Request) {
 	case errors.Is(err, ErrNarrativeNotConfigured):
 		writeError(w, http.StatusNotImplemented, err.Error())
 		return
-	case errors.Is(err, ErrNarrativeRunning):
+	case errors.Is(err, ErrNarrativeRunning), errors.Is(err, errLLMConfigurationBusy):
 		writeError(w, http.StatusConflict, err.Error())
 		return
 	case errors.Is(err, ErrNarrativeNoFindings), errors.Is(err, ErrNarrativeRefused):

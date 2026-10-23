@@ -16,6 +16,9 @@ import (
 
 const fakeCodex = `#!/bin/sh
 d="$(dirname "$0")"
+if [ "$1" = "-c" ]; then
+ if [ -f "$CODEX_HOME/auth.json" ]; then echo 'Logged in using ChatGPT' >&2; exit 0; else echo 'Not logged in' >&2; exit 1; fi
+fi
 printf '%s\n' "$@" > "$d/args.txt"
 cat > "$d/stdin.txt"
 env > "$d/env.txt"
@@ -109,7 +112,7 @@ func TestCodex_TheCommandLineIsolatesTheModelAndCarriesNoCaseText(t *testing.T) 
 		return false
 	}
 	for _, want := range [][]string{{"exec"}, {"--ignore-user-config"}, {"--ignore-rules"}, {"--ephemeral"}, {"--skip-git-repo-check"}, {"-s", "read-only"},
-		{"-c", `approval_policy="never"`}, {"-c", `web_search="disabled"`}, {"-m", "some-model"}} {
+		{"-c", `approval_policy="never"`}, {"-c", `cli_auth_credentials_store="file"`}, {"-c", `forced_login_method="chatgpt"`}, {"-c", `web_search="disabled"`}, {"-m", "some-model"}} {
 		if !has(want...) {
 			t.Errorf("the command line lacks %v: %v", want, args)
 		}
@@ -253,12 +256,12 @@ func TestCodex_ConfiguredNeedsTheProgramAndASignInAndNeverOpensIt(t *testing.T) 
 	if !c.Configured() {
 		t.Fatal("a program and a sign-in are present")
 	}
-	// the sign-in is only checked for existing: make it unreadable
+	// The synthetic CLI reports status; Tracefall itself never opens this file.
 	if err := os.Chmod(filepath.Join(f.home, "auth.json"), 0); err != nil {
 		t.Fatal(err)
 	}
 	if !c.Configured() {
-		t.Errorf("Configured read the sign-in file; it must only check that it exists")
+		t.Errorf("Configured must use the synthetic CLI status")
 	}
 	_ = os.Chmod(filepath.Join(f.home, "auth.json"), 0o600)
 

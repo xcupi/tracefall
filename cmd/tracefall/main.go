@@ -14,7 +14,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	// tzdata is embedded so timezone conversion works identically on
@@ -149,29 +148,12 @@ func main() {
 	//                       TRACEFALL_LLM_BASE_URL (default DeepSeek)
 	//	  codex-cli:         the Codex CLI signed in with a ChatGPT account;
 	//                       TRACEFALL_CODEX_BIN and TRACEFALL_LLM_MODEL optional
-	switch p := strings.ToLower(strings.TrimSpace(os.Getenv("TRACEFALL_LLM_PROVIDER"))); p {
-	case "codex-cli":
-		c := llm.NewCodexCLI(os.Getenv("TRACEFALL_CODEX_BIN"), os.Getenv("TRACEFALL_LLM_MODEL"))
-		if c.Configured() {
-			svc.SetLLM(c)
-			host, _ := c.Destination()
-			slog.Info("language-model summaries available through the Codex CLI", "destination", host, "model", c.ModelName())
-		} else {
-			slog.Warn("TRACEFALL_LLM_PROVIDER=codex-cli but the Codex CLI is not found or not signed in: summaries are not available")
-		}
-	case "", "openai-compatible":
-		if key := os.Getenv("TRACEFALL_LLM_API_KEY"); key != "" {
-			c := llm.New(os.Getenv("TRACEFALL_LLM_BASE_URL"), key, os.Getenv("TRACEFALL_LLM_MODEL"))
-			if c.Configured() {
-				svc.SetLLM(c)
-				host, local := c.Destination()
-				slog.Info("language-model summaries available", "host", host, "local", local, "model", c.ModelName())
-			} else {
-				slog.Warn("TRACEFALL_LLM_API_KEY is set but TRACEFALL_LLM_MODEL is not: summaries are not available")
-			}
-		}
-	default:
-		slog.Warn("TRACEFALL_LLM_PROVIDER is not recognised: summaries are not available", "value", p)
+	// Authorization is always isolated from the operator's Codex/Hermes home.
+	// No login or model request is made at startup. Explicit env selection wins;
+	// otherwise the UI's non-secret preference (API by default) is loaded.
+	apiClient := llm.New(os.Getenv("TRACEFALL_LLM_BASE_URL"), os.Getenv("TRACEFALL_LLM_API_KEY"), os.Getenv("TRACEFALL_LLM_MODEL"))
+	if err := svc.ConfigureChatGPT(cfg.DataDir, os.Getenv("TRACEFALL_CODEX_BIN"), os.Getenv("TRACEFALL_LLM_MODEL"), os.Getenv("TRACEFALL_LLM_PROVIDER"), apiClient); err != nil {
+		logger.Warn("ChatGPT integration storage unavailable; deterministic analysis remains available", "error", err)
 	}
 
 	// Server-side pipeline: work a previous process left running is put

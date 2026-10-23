@@ -31,7 +31,7 @@ import (
 
 var (
 	// ErrNarrativeNotConfigured: no model is configured.
-	ErrNarrativeNotConfigured = errors.New("no language model is configured: set TRACEFALL_LLM_API_KEY and TRACEFALL_LLM_MODEL")
+	ErrNarrativeNotConfigured = errors.New("no language model is configured: open Settings → Integrations to authorize ChatGPT and select a provider, or configure TRACEFALL_LLM_API_KEY and TRACEFALL_LLM_MODEL")
 	// ErrNarrativeEgress: the case's egress level does not allow this.
 	ErrNarrativeEgress = errors.New("the case's egress level does not allow sending this to another machine; raise it to \"pseudonymized\" first")
 	// ErrNarrativeNeedsAck: a request to another machine needs the analyst's acknowledgement.
@@ -50,7 +50,9 @@ func (s *Service) SetLLM(c llm.Chatter) {
 	if c == nil {
 		c = llm.None{}
 	}
-	s.llm = c
+	s.llm.mu.Lock()
+	s.llm.api = c
+	s.llm.mu.Unlock()
 }
 
 // NarrativeRun is the state of a request.
@@ -117,13 +119,13 @@ type NarrativeStatus struct {
 	Latest               *NarrativeView `json:"latest,omitempty"`
 }
 
-func (s *Service) narrativeAllowed(lvl egress.Level) (allowed, local bool) {
-	if !s.llm.Configured() {
-		return false, false
+func narrativeAllowed(client llm.Chatter, lvl egress.Level) (configured, allowed, local bool) {
+	if !client.Configured() {
+		return false, false, false
 	}
-	_, local = s.llm.Destination()
+	_, local = client.Destination()
 	// a model on this machine is not an outside service: nothing leaves
-	return local || lvl.AtLeast(egress.Pseudonymized), local
+	return true, local || lvl.AtLeast(egress.Pseudonymized), local
 }
 
 func viewOf(n model.Narrative, current []model.Finding) NarrativeView {
@@ -155,6 +157,7 @@ func viewOf(n model.Narrative, current []model.Finding) NarrativeView {
 
 // NarrativeStatus describes the case's state. It sends nothing.
 func (s *Service) NarrativeStatus(caseID string) (NarrativeStatus, error) {
+	client := s.llm.snapshot()
 	lvl, err := s.EgressLevel(caseID)
 	if err != nil {
 		return NarrativeStatus{}, err
@@ -163,12 +166,12 @@ func (s *Service) NarrativeStatus(caseID string) (NarrativeStatus, error) {
 	if err != nil {
 		return NarrativeStatus{}, err
 	}
-	allowed, local := s.narrativeAllowed(lvl)
-	st := NarrativeStatus{Configured: s.llm.Configured(), EgressLevel: string(lvl), Allowed: allowed, Local: local, Findings: len(findings), NeedsAcknowledgement: s.llm.Configured() && !local}
-	if s.llm.Configured() {
-		st.Destination, _ = s.llm.Destination()
-		st.Model = s.llm.ModelName()
-		st.Notice = s.llm.Notice()
+	configured, allowed, local := narrativeAllowed(client, lvl)
+	st := NarrativeStatus{Configured: configured, EgressLevel: string(lvl), Allowed: allowed, Local: local, Findings: len(findings), NeedsAcknowledgement: configured && !local}
+	if configured {
+		st.Destination, _ = client.Destination()
+		st.Model = client.ModelName()
+		st.Notice = client.Notice()
 	}
 	if n, ok, err := s.store.LatestNarrative(caseID); err != nil {
 		return NarrativeStatus{}, err
@@ -216,14 +219,24 @@ func payloadHash(system, user string) string {
 // StartNarrative prepares the request, records it, and sends it in the
 // background. Everything that can refuse does so before anything leaves.
 func (s *Service) StartNarrative(caseID string, acknowledge bool) (NarrativeStatus, error) {
+	client, release, leaseErr := s.llm.acquire()
+	if leaseErr != nil {
+		return NarrativeStatus{}, leaseErr
+	}
+	handedOff := false
+	defer func() {
+		if !handedOff {
+			release()
+		}
+	}()
 	lvl, err := s.EgressLevel(caseID)
 	if err != nil {
 		return NarrativeStatus{}, err
 	}
-	if !s.llm.Configured() {
+	configured, allowed, local := narrativeAllowed(client, lvl)
+	if !configured {
 		return NarrativeStatus{}, ErrNarrativeNotConfigured
 	}
-	allowed, local := s.narrativeAllowed(lvl)
 	if !allowed {
 		return NarrativeStatus{}, ErrNarrativeEgress
 	}
@@ -277,7 +290,7 @@ func (s *Service) StartNarrative(caseID string, acknowledge bool) (NarrativeStat
 		return NarrativeStatus{}, err
 	}
 
-	host, _ := s.llm.Destination()
+	host, _ := client.Destination()
 	sum := payloadHash(pr.System, pr.User)
 	where := "to " + host
 	if local {
@@ -285,7 +298,7 @@ func (s *Service) StartNarrative(caseID string, acknowledge bool) (NarrativeStat
 	}
 	s.audit(caseID, model.AuditNarrativeRequested, model.TargetCase, caseID, fmt.Sprintf(
 		"Sending pseudonymized facts %s, model %s, at egress level %s: %d finding(s), %d event(s), %d characters. Names, addresses, identifiers and hashes are replaced by tokens and secrets are removed. SHA-256 of exactly what was sent: %s.%s",
-		where, s.llm.ModelName(), lvl, len(pr.FindingIDs), len(pr.EventIDs), len(pr.System)+len(pr.User), sum,
+		where, client.ModelName(), lvl, len(pr.FindingIDs), len(pr.EventIDs), len(pr.System)+len(pr.User), sum,
 		map[bool]string{true: " The analyst acknowledged the provider's terms for this request.", false: ""}[!local]))
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -298,7 +311,8 @@ func (s *Service) StartNarrative(caseID string, acknowledge bool) (NarrativeStat
 	}
 	s.narr.runs[caseID] = run
 	s.narr.mu.Unlock()
-	go s.runNarrative(ctx, caseID, pr, run, host, local, sum)
+	handedOff = true
+	go func() { defer release(); s.runNarrative(ctx, caseID, pr, run, host, local, sum, client) }()
 	return s.NarrativeStatus(caseID)
 }
 
@@ -316,8 +330,8 @@ func (s *Service) CancelNarrative(caseID string) error {
 	return nil
 }
 
-func (s *Service) runNarrative(ctx context.Context, caseID string, pr *narrative.Prepared, run *narrativeRun, host string, local bool, sum string) {
-	n := model.Narrative{ID: uuid.NewString(), CaseID: caseID, CreatedAt: time.Now().UTC(), Destination: host, Local: local, Model: s.llm.ModelName(),
+func (s *Service) runNarrative(ctx context.Context, caseID string, pr *narrative.Prepared, run *narrativeRun, host string, local bool, sum string, client llm.Chatter) {
+	n := model.Narrative{ID: uuid.NewString(), CaseID: caseID, CreatedAt: time.Now().UTC(), Destination: host, Local: local, Model: client.ModelName(),
 		PayloadSystem: pr.System, PayloadUser: pr.User, PayloadSHA256: sum, FindingIDs: pr.FindingIDs, RequestedBy: s.auditActor(), SentencesJSON: "[]"}
 	finish := func(state, reason string) {
 		if state != "finished" {
@@ -338,7 +352,7 @@ func (s *Service) runNarrative(ctx context.Context, caseID string, pr *narrative
 	}
 
 	msgs := []llm.Message{{Role: "system", Content: pr.System}, {Role: "user", Content: pr.User}}
-	res, err := s.llm.Chat(ctx, msgs)
+	res, err := client.Chat(ctx, msgs)
 	var rl *llm.RateLimitError
 	if errors.As(err, &rl) {
 		select {
@@ -347,7 +361,7 @@ func (s *Service) runNarrative(ctx context.Context, caseID string, pr *narrative
 			return
 		case <-time.After(rl.RetryAfter):
 		}
-		res, err = s.llm.Chat(ctx, msgs)
+		res, err = client.Chat(ctx, msgs)
 	}
 	switch {
 	case errors.Is(err, context.Canceled):
