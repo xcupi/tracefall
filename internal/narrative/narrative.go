@@ -147,21 +147,82 @@ func Select(findings []model.Finding, lim Limits) []model.Finding {
 // Prepare builds the request. It fails with ErrLeak rather than send anything
 // that could identify the case.
 func Prepare(in Input) (*Prepared, error) {
+	if len(in.Findings) == 0 {
+		return nil, ErrNothingToSay
+	}
+	// A name can be recognised by its shape in one field (a profile path, a UNC
+	// path, an e-mail address) and appear as plain prose in another, where no
+	// shape would find it. Each pass teaches the next the names the last one
+	// found by shape, until a pass finds none that are new. A request is never
+	// sent from a pass that was still learning.
+	names := in.Names
+	for pass := 0; pass < maxPasses; pass++ {
+		pr, err := build(in, names)
+		if err != nil {
+			return nil, err
+		}
+		more := newNames(pr.Entities(), names)
+		if len(more.Hosts)+len(more.Users)+len(more.Domains) == 0 {
+			return pr, nil
+		}
+		names.Hosts = append(append([]string(nil), names.Hosts...), more.Hosts...)
+		names.Users = append(append([]string(nil), names.Users...), more.Users...)
+		names.Domains = append(append([]string(nil), names.Domains...), more.Domains...)
+	}
+	return nil, fmt.Errorf("%w (names were still being discovered after %d passes)", ErrLeak, maxPasses)
+}
+
+// maxPasses bounds the learning above; two is the usual number.
+const maxPasses = 5
+
+// newNames lists the names the entries hold that the dictionary did not.
+func newNames(entries []pseudonym.Entry, have Names) Names {
+	known := map[string]bool{}
+	for _, l := range [][]string{have.Hosts, have.Users, have.Domains} {
+		for _, v := range l {
+			known[strings.ToLower(strings.TrimSpace(v))] = true
+		}
+	}
+	var out Names
+	add := func(dst *[]string, v string) {
+		k := strings.ToLower(strings.TrimSpace(v))
+		if k != "" && !known[k] {
+			known[k] = true
+			*dst = append(*dst, v)
+		}
+	}
+	for _, e := range entries {
+		switch e.Kind {
+		case string(pseudonym.User):
+			add(&out.Users, e.Value)
+		case string(pseudonym.Host):
+			add(&out.Hosts, e.Value)
+		case string(pseudonym.Domain):
+			add(&out.Domains, e.Value)
+		case string(pseudonym.Email):
+			if i := strings.LastIndexByte(e.Value, '@'); i > 0 {
+				add(&out.Users, e.Value[:i])
+				add(&out.Domains, e.Value[i+1:])
+			}
+		}
+	}
+	return out
+}
+
+// build makes one request from the names it is given.
+func build(in Input, names Names) (*Prepared, error) {
 	lim := in.Limits
 	if lim.MaxFindings == 0 {
 		lim = DefaultLimits
 	}
-	if len(in.Findings) == 0 {
-		return nil, ErrNothingToSay
-	}
 	p := pseudonym.New()
-	for _, h := range in.Names.Hosts {
+	for _, h := range names.Hosts {
 		p.Learn(pseudonym.Host, h)
 	}
-	for _, u := range in.Names.Users {
+	for _, u := range names.Users {
 		p.Learn(pseudonym.User, u)
 	}
-	for _, d := range in.Names.Domains {
+	for _, d := range names.Domains {
 		p.Learn(pseudonym.Domain, d)
 	}
 

@@ -134,3 +134,96 @@ func TestAppendixD_RowsStateTheServicesAnswerPlainly(t *testing.T) {
 		t.Errorf("links/verdict: known %q unknown %+v", k.Link, u)
 	}
 }
+
+func appendixEOf(t *testing.T, html string) string {
+	t.Helper()
+	i := strings.Index(html, "<h3>Appendix E")
+	if i < 0 {
+		t.Fatal("no Appendix E in the report")
+	}
+	j := strings.Index(html[i:], "<footer>")
+	return stdhtml.UnescapeString(html[i : i+j])
+}
+
+func TestReport_AppendixEWithoutARequestAndTheNoAIStatement(t *testing.T) {
+	mux, svc := newTestRouterWithService(t)
+	stub := newLLMStub(t, svc, false)
+	id := caseWithFindings(t, svc, mux, nil)
+	b, err := svc.buildReport(id, time.Date(2026, 3, 14, 12, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(appendixEOf(t, string(b.HTML)), "No language-model summary was requested") || !strings.Contains(string(b.HTML), "No artificial intelligence or large language model was used") {
+		t.Errorf("a case that never asked a model must say so")
+	}
+	if stub.count() != 0 {
+		t.Errorf("building a report sent %d request(s) to a model", stub.count())
+	}
+}
+
+func TestReport_AppendixEShowsTheDraftWithTheReportsOwnFindingNumbers(t *testing.T) {
+	mux, svc := newTestRouterWithService(t)
+	stub := newLLMStub(t, svc, false)
+	id := caseWithFindings(t, svc, mux, nil)
+	setLevel(t, mux, id, "pseudonymized")
+	startNarr(t, mux, id, true)
+	waitNarr(t, svc, id)
+	sent := stub.count()
+
+	b, err := svc.buildReport(id, time.Date(2026, 3, 14, 12, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := appendixEOf(t, string(b.HTML))
+	for _, w := range []string{"alice ran PowerShell from a document on host01 and contacted 203.0.113.9", "llm.example.invalid", "stub-model", "another machine",
+		"Whether a sentence is true was not checked", "3 line(s) of the model's answer were dropped", "a web address in the sentence (1)"} {
+		if !strings.Contains(h, w) {
+			t.Errorf("missing %q in:\n%s", w, h)
+		}
+	}
+	// citations use the report's numbers, not internal ids
+	var f1, f2 string
+	for _, f := range b.Data.Findings {
+		switch f.ID {
+		case "fnd-1":
+			f1 = f.Number
+		case "fnd-2":
+			f2 = f.Number
+		}
+	}
+	if f1 == "" || f2 == "" || !strings.Contains(h, "["+f1+"; event ev-1]") || !strings.Contains(h, "["+f2+"]") || strings.Contains(h, "fnd-1") {
+		t.Errorf("citations (%s, %s) in:\n%s", f1, f2, h)
+	}
+	if strings.Contains(string(b.HTML), "No artificial intelligence or large language model was used") || !strings.Contains(string(b.HTML), "A language model drafted the summary in Appendix E") {
+		t.Errorf("the limitation must name the model-drafted summary")
+	}
+	if stub.count() != sent {
+		t.Errorf("building the report sent %d more request(s)", stub.count()-sent)
+	}
+	b2, _ := svc.buildReport(id, time.Date(2026, 3, 14, 12, 0, 0, 0, time.UTC))
+	if string(b2.HTML) != string(b.HTML) {
+		t.Errorf("a report with a draft is not deterministic")
+	}
+	// the sha in the report is the one in the audit trail
+	if !strings.Contains(h, sha256hex(stub.last().System+"\x00"+stub.last().User)) {
+		t.Errorf("the report does not carry the hash of what was sent")
+	}
+}
+
+func TestReport_AFailedRequestIsStatedInTheReport(t *testing.T) {
+	mux, svc := newTestRouterWithService(t)
+	stub := newLLMStub(t, svc, false)
+	stub.answer = func(string) (int, string) { return 200, chatBody("nothing with ids") }
+	id := caseWithFindings(t, svc, mux, nil)
+	setLevel(t, mux, id, "pseudonymized")
+	startNarr(t, mux, id, true)
+	waitNarr(t, svc, id)
+	b, _ := svc.buildReport(id, time.Date(2026, 3, 14, 12, 0, 0, 0, time.UTC))
+	h := appendixEOf(t, string(b.HTML))
+	if !strings.Contains(h, "returned nothing that passed validation") || !strings.Contains(h, "Case data was sent for this request") || strings.Contains(h, "<ol>") {
+		t.Errorf("appendix:\n%s", h)
+	}
+	if strings.Contains(string(b.HTML), "No artificial intelligence or large language model was used") {
+		t.Errorf("data was sent to a model; the report must not claim none was used")
+	}
+}

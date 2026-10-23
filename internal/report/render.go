@@ -357,7 +357,9 @@ const reportHTML = `{{define "observation"}}
   <li>A recorded digest shows that two reads of the evidence agree. It is not a third-party timestamp or a signature, and it says nothing about the evidence before ingestion.</li>
   <li>A timestamp is meaningful only with its recorded clock basis. Local readings with an unknown zone and partial dates are preserved without an invented UTC instant. Recorded host time zones and capture-clock estimates are stated separately; original timestamps are not silently corrected.</li>
   <li>Findings are indications produced by fixed rules. A finding may be a false positive, and the absence of a finding is not proof of absence.</li>
-  <li>No artificial intelligence or large language model was used to produce any part of this report. Every statement is either fixed text or a value taken from the case data, with one labelled exception: Appendix D quotes what an outside reputation service answered about file hashes, and says so.</li>
+  {{if .Narrative.Usable}}<li>A language model drafted the summary in Appendix E, which is labelled as a draft and is not evidence. No other part of this report was produced with one. Every other statement is either fixed text or a value taken from the case data, with one labelled exception: Appendix D quotes what an outside reputation service answered about file hashes, and says so.</li>
+  {{else if .Narrative.Requested}}<li>A language model was asked for a summary (Appendix E) and returned nothing usable, so no part of this report was produced with one. Every statement is either fixed text or a value taken from the case data, with one labelled exception: Appendix D quotes what an outside reputation service answered about file hashes, and says so.</li>
+  {{else}}<li>No artificial intelligence or large language model was used to produce any part of this report. Every statement is either fixed text or a value taken from the case data, with one labelled exception: Appendix D quotes what an outside reputation service answered about file hashes, and says so.</li>{{end}}
 </ul>
 
 <h2>9. Appendices</h2>
@@ -408,6 +410,27 @@ const reportHTML = `{{define "observation"}}
 {{end}}
 {{else}}
 <p>No VirusTotal lookup has been made for this case.</p>
+{{end}}
+{{end}}
+
+<h3>Appendix E &mdash; Summary drafted by a language model (not evidence)</h3>
+{{with .Narrative}}
+{{if .Requested}}
+<p class="small"><strong>Requested:</strong> {{.RequestedAt}} UTC &middot; <strong>Model:</strong> <span class="mono">{{.Model}}</span> &middot;
+  {{if .Local}}<strong>Ran on:</strong> a model on the machine that made this report ({{.Destination}}){{else}}<strong>Sent to:</strong> <span class="mono">{{.Destination}}</span>, another machine{{end}}.
+  Names, addresses, identifiers and hashes were replaced by tokens before the facts left, and restored here; secrets were removed. The exact text sent is stored with the case; its SHA-256 is <span class="mono wrap">{{.PayloadSHA256}}</span>. Tokens used: {{.PromptTokens}} in, {{.CompletionTokens}} out.</p>
+{{if .Stale}}<p><strong>The findings of this case changed after this draft was written.</strong> It describes an earlier state and should be requested again.</p>{{end}}
+{{if .Usable}}
+<p class="small"><strong>This is a draft written by a language model, not a finding and not evidence.</strong> It was asked to summarise the findings above and to cite, for every sentence, the findings or events it relies on. Each kept sentence was checked mechanically: it cites items that exist, uses only names that were given to the model, and contains no number that is not in the facts it was shown. <strong>Whether a sentence is true was not checked.</strong> Read it against the cited items. The model was shown text taken from the evidence (command lines, descriptions), and such text can try to steer a model; read the draft as you would an unverified summary.</p>
+<ol>
+  {{range .Sentences}}<li>{{.Text}} <span class="small mono muted">[{{.Cites}}]</span></li>{{end}}
+</ol>
+{{if .Rejected}}<p class="small muted">{{.Rejected}} line(s) of the model's answer were dropped by validation:{{range .Reasons}} {{.Key}} ({{.Value}});{{end}}</p>{{end}}
+{{else}}
+<p>The model returned nothing that passed validation{{if .Error}} ({{.Error}}){{end}}, so there is no draft. Case data was sent for this request; the text is stored with the case.</p>
+{{end}}
+{{else}}
+<p>No language-model summary was requested for this case.</p>
 {{end}}
 {{end}}
 

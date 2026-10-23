@@ -1,6 +1,7 @@
 package store
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -117,5 +118,43 @@ func TestDeleteCase_RemovesNarratives(t *testing.T) {
 	}
 	if _, ok, _ := s.LatestNarrative("case-1"); ok {
 		t.Errorf("a draft survives its case")
+	}
+}
+
+func TestCaseNames_ProfileNamesInSourceFilePathsAreNames(t *testing.T) {
+	s := openTest(t)
+	seedCaseAndSourceFile(t, s)
+	col := model.Collection{ID: "col-2", CaseID: "case-1", SourceType: model.SourceTypeDiskImage, IngestionStatus: model.CollectionStatusPending}
+	mk := func(id, path string) model.SourceFile {
+		return model.SourceFile{ID: id, CaseID: "case-1", CollectionID: "col-2", OriginalFilename: "f", Path: path, ImportStatus: model.SourceFileImported, Supported: true, Parser: "p", ArtifactType: "a", SHA256: id}
+	}
+	if err := s.CreateCollectionWithSourceFiles(col, []model.SourceFile{
+		mk("s1", "vol/Users/zed/AppData/Local/Microsoft/Windows/INetCache/x"),
+		mk("s2", `C:\Documents and Settings\yan\NTUSER.DAT`),
+		mk("s3", "vol/home/xia/.bash_history"),
+		mk("s4", "vol/Users/Public/Documents/a"),
+		mk("s5", "vol/Users/Default/NTUSER.DAT"),
+		mk("s6", "vol/Windows/System32/config/SYSTEM"),
+		mk("s7", "vol/Users/ZED/Desktop/y"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	n, err := s.CaseNames("case-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]int{}
+	for _, u := range n.Users {
+		got[strings.ToLower(u)]++
+	}
+	for _, want := range []string{"zed", "yan", "xia"} {
+		if got[want] != 1 {
+			t.Errorf("%q: %d times in %v (once, whatever the case)", want, got[want], n.Users)
+		}
+	}
+	for _, not := range []string{"public", "default", "system"} {
+		if got[not] != 0 {
+			t.Errorf("%q names no one and must not be in the dictionary", not)
+		}
 	}
 }

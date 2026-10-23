@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/netip"
+	"regexp"
 	"strings"
 
 	"tracefall/internal/model"
@@ -138,5 +139,32 @@ func (s *Store) CaseNames(caseID string) (CaseNames, error) {
 			}
 		}
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return CaseNames{}, err
+	}
+	// Profile names also appear in the paths of the files the evidence came
+	// from (Users/alice/AppData/...), and may be on no event's user field.
+	prows, err := s.db.Query(`SELECT DISTINCT path FROM source_files WHERE case_id = ?`, caseID)
+	if err != nil {
+		return CaseNames{}, err
+	}
+	defer prows.Close()
+	for prows.Next() {
+		var path string
+		if err := prows.Scan(&path); err != nil {
+			return CaseNames{}, err
+		}
+		for _, m := range profileInPath.FindAllStringSubmatch(path, -1) {
+			if n := m[1]; !sharedProfiles[strings.ToLower(n)] {
+				add(&out.Users, n)
+			}
+		}
+	}
+	return out, prows.Err()
 }
+
+// profileInPath finds the account name in a user profile path.
+var profileInPath = regexp.MustCompile(`(?i)(?:^|[\\/])(?:users|documents and settings|home)[\\/]([^\\/]+)`)
+
+// sharedProfiles are profile folders that name no one.
+var sharedProfiles = map[string]bool{"public": true, "default": true, "default user": true, "all users": true, "defaultuser0": true, "administrator": true, "system": true, "localservice": true, "networkservice": true}

@@ -198,6 +198,11 @@ func (s *Service) assembleAndRender(caseID string, now time.Time, spool *string)
 
 	d.Attachments = append(d.Attachments, report.Attachment{Name: files[2].Name, Description: "All correlations and their complete ordered event-reference lists.", SHA256: files[2].SHA256, Bytes: files[2].Size, Rows: len(correlations)})
 	d.Attachments = append(d.Attachments, report.Attachment{Name: files[3].Name, Description: "All resolved cited events, with complete normalized fields and record references (sensitive evidence, not redacted).", SHA256: files[3].SHA256, Bytes: files[3].Size, Rows: len(resolved)})
+	// the model-drafted summary cites findings by the numbers this report gave them
+	d.Narrative, err = s.reportNarrative(caseID, d.Findings, findings)
+	if err != nil {
+		return reportBuild{}, fmt.Errorf("loading the model-drafted summary: %w", err)
+	}
 	html, err := report.Render(d)
 	if err != nil {
 		return reportBuild{}, err

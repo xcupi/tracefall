@@ -330,6 +330,9 @@ type Data struct {
 	// External is what outside services said about indicators read from the
 	// evidence. It is not evidence and nothing else in the report depends on it.
 	External External
+	// Narrative is a draft summary written by a language model, if one was
+	// requested. It is not evidence and nothing else in the report depends on it.
+	Narrative Narrative
 	// Limitations are case-specific caveats the caller computed (stale
 	// analysis, parse failures...). Fixed caveats live in the template.
 	Limitations []string

@@ -417,3 +417,47 @@ func TestPrepare_TimesAreSentInUTC(t *testing.T) {
 		t.Errorf("times are not UTC:\n%s", pr.User)
 	}
 }
+
+func TestPrepare_ANameFoundByShapeInOneFieldIsReplacedInProseElsewhere(t *testing.T) {
+	// The user is not in any field Prepare was told about and is not in Names. Its
+	// only trace in the events is a profile path; the finding's description names it
+	// in a sentence, where no pattern would find it.
+	in := Input{
+		Findings: []model.Finding{{ID: "f-1", CaseID: "case-1", RuleID: "r", Title: "A file was cached", Severity: "high", Confidence: "medium",
+			Description: "The entry is in the zed profile's cache, and zed ran it.", SupportingEvents: []string{"e-1"}, FirstSeen: t0, LastSeen: t0}},
+		Events: map[string]model.Event{"e-1": {ID: "e-1", CaseID: "case-1", Timestamp: t0, EventType: "x", ArtifactType: "a", FilePath: `C:\Users\zed\AppData\Local\x.bin`}},
+	}
+	pr := mustPrepare(t, in)
+	if strings.Contains(strings.ToLower(pr.User), "zed") {
+		t.Errorf("a name learned from a path leaked in prose:\n%s", pr.User)
+	}
+	if !strings.Contains(pr.User, "the [USER_1] profile's cache, and [USER_1] ran it") {
+		t.Errorf("the same name must get the same token everywhere:\n%s", pr.User)
+	}
+}
+
+func TestPrepare_NamesFoundByShapeAreTaughtForEveryKind(t *testing.T) {
+	in := Input{
+		Findings: []model.Finding{{ID: "f-1", CaseID: "case-1", RuleID: "r", Title: "t", Severity: "high", Confidence: "m",
+			Description: "Contact came from fs9 and from mail.example, and carol wrote it; also zed2.", SupportingEvents: []string{"e-1"}, FirstSeen: t0, LastSeen: t0}},
+		Events: map[string]model.Event{"e-1": {ID: "e-1", CaseID: "case-1", Timestamp: t0, EventType: "x", ArtifactType: "a",
+			CommandLine: `copy \\fs9\share\a.txt && curl https://mail.example/x && mail carol@lab9.example`, FilePath: `C:\Users\zed2\a`}},
+	}
+	pr := mustPrepare(t, in)
+	for _, name := range []string{"fs9", "mail.example", "carol", "zed2", "lab9.example"} {
+		if strings.Contains(strings.ToLower(pr.User), name) {
+			t.Errorf("%q survived in:\n%s", name, pr.User)
+		}
+	}
+}
+
+func TestPrepare_LearningFromShapesDoesNotLoopAndGivesTheSameRequestEachTime(t *testing.T) {
+	in := Input{
+		Findings: []model.Finding{{ID: "f-1", CaseID: "case-1", RuleID: "r", Title: "t zed", Severity: "high", Confidence: "m", Description: "zed", SupportingEvents: []string{"e-1"}, FirstSeen: t0, LastSeen: t0}},
+		Events:   map[string]model.Event{"e-1": {ID: "e-1", CaseID: "case-1", Timestamp: t0, EventType: "x", ArtifactType: "a", FilePath: `C:\Users\zed\a`}},
+	}
+	a, b := mustPrepare(t, in), mustPrepare(t, in)
+	if a.User != b.User {
+		t.Errorf("not deterministic")
+	}
+}

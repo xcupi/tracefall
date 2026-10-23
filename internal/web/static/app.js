@@ -5442,17 +5442,131 @@ const STATUS_LABELS = {
 // sends nothing by itself: a lookup starts only from the button, and the
 // server refuses it unless the case's level allows file hashes out.
 // ---------------------------------------------------------------------
+// The summary section of the Outside services tab. Plain strings in, HTML out;
+// every value that came from the server or from a model is escaped.
+function renderNarrativeSection(nv) {
+  const run = nv.run;
+  const running = run && run.state === "running";
+  let why = "";
+  if (!nv.configured) why = "No language model is configured on this server (set TRACEFALL_LLM_API_KEY and TRACEFALL_LLM_MODEL).";
+  else if (!nv.allowed) why = "This case's level does not allow facts to be sent to another machine. Choose \"pseudonymized\" above.";
+  else if (nv.findings === 0) why = "The case has no findings yet: run the analysis first.";
+  else if (running) why = "A summary is being drafted.";
+  const where = nv.configured
+    ? nv.local
+      ? `a model on this machine (<span class="mono">${esc(nv.destination)}</span>, ${esc(nv.model)}): nothing leaves it`
+      : `<span class="mono">${esc(nv.destination)}</span>, model ${esc(nv.model)}: another machine`
+    : "not configured";
+  const l = nv.latest;
+  let latest = `<p class="empty">No summary has been requested for this case.</p>`;
+  if (l) {
+    const items = (l.sentences || [])
+      .map((x) => {
+        const cites = (x.cites || []).map((c) => (c.kind === "finding" ? "finding " : "event ") + String(c.id).replace(/^(finding|event)-/, "").slice(0, 8)).join("; ");
+        return `<li>${esc(x.text)} <span class="mono small muted">[${esc(cites)}]</span></li>`;
+      })
+      .join("");
+    const reasons = l.reasons ? Object.entries(l.reasons).map(([k, v]) => `${esc(k)} (${v})`).join("; ") : "";
+    latest = `
+      <div class="narrative-draft" style="border:1px solid var(--border, #334);padding:var(--space-3);border-radius:6px">
+        <p class="small"><strong>Draft written by a language model: not a finding, not evidence.</strong>
+          ${esc(fmtTime(l.created_at))} &middot; ${l.local ? "ran on this machine" : "sent to " + esc(l.destination)} &middot; ${esc(l.model)}
+          &middot; ${l.prompt_tokens} tokens in, ${l.completion_tokens} out</p>
+        ${l.stale ? `<p><strong>The findings changed after this draft was written.</strong> Draft it again.</p>` : ""}
+        ${
+          l.status === "ok"
+            ? `<p class="small muted">Each sentence cites what it relies on. That, the names and the numbers were checked by program;
+                <strong>whether it is true was not</strong>. Read it against the cited findings and events.</p>
+               <ol>${items}</ol>
+               ${l.rejected ? `<p class="small muted">${l.rejected} line(s) of the answer were dropped by validation: ${reasons}.</p>` : ""}`
+            : `<p>The request produced no usable draft${l.error ? ` (${esc(l.error)})` : ""}. Case facts were still sent; see exactly what below.</p>`
+        }
+        <p class="small mono muted" style="word-break:break-all">SHA-256 of what was sent: ${esc(l.payload_sha256)}</p>
+        <p><button type="button" class="btn-secondary" id="nv-payload">Show exactly what was sent</button></p>
+        <pre id="nv-payload-box" class="small" hidden style="white-space:pre-wrap;max-height:24em;overflow:auto"></pre>
+      </div>`;
+  }
+  return `
+    <h3 style="margin-top:var(--space-5)">Summary drafted by a language model</h3>
+    <p class="small muted">Optional. A model drafts a short summary of the findings; the findings themselves never come from it.
+      Where it goes: ${where}.</p>
+    <p class="small"><strong>What is sent:</strong> finding titles, rules, severities, ATT&amp;CK ids, times, and for the events they cite:
+      type, process names, command lines, paths and addresses, with every name, address, identifier and hash replaced by a token
+      only this server can reverse, and secrets removed. <strong>Never sent:</strong> file contents, SQL statements, cookies, the case name or
+      description, notes, evidence file names. Times, process names and the shape of the activity are sent as they are.</p>
+    ${
+      nv.configured && !nv.local
+        ? `<p class="small"><label><input type="checkbox" id="nv-ack"> I have checked this provider's terms for the data it will receive
+             (a free tier may use what it receives to train its models).</label></p>`
+        : ""
+    }
+    <p>
+      <button type="button" class="btn-primary" id="nv-start" disabled>Draft summary</button>
+      <button type="button" class="btn-secondary" id="nv-cancel" ${running ? "" : "hidden"}>Stop</button>
+      ${why ? `<span class="muted small" style="margin-left:var(--space-2)">${esc(why)}</span>` : ""}
+    </p>
+    <p id="nv-msg" class="small" role="status"></p>
+    ${run ? `<p class="small">Last request: <strong>${esc(run.state)}</strong>${run.reason ? " &middot; " + esc(run.reason) : ""}</p>` : ""}
+    ${latest}`;
+}
+
+function wireNarrativeSection(content, caseId, nv, say) {
+  const start = document.getElementById("nv-start");
+  if (!start) return;
+  const ack = document.getElementById("nv-ack");
+  const running = nv.run && nv.run.state === "running";
+  const ready = () => nv.configured && nv.allowed && nv.findings > 0 && !running && (nv.local || (ack && ack.checked));
+  const sync = () => (start.disabled = !ready());
+  sync();
+  if (ack) ack.addEventListener("change", sync);
+  start.addEventListener("click", async () => {
+    start.disabled = true;
+    try {
+      await api(`/cases/${caseId}/enrich/narrative`, { method: "POST", body: JSON.stringify({ acknowledge: !!(ack && ack.checked) }) });
+      await renderExternalTab(content, caseId);
+    } catch (e) {
+      say("nv-msg", e.message || String(e), true);
+      sync();
+    }
+  });
+  const cancel = document.getElementById("nv-cancel");
+  if (cancel)
+    cancel.addEventListener("click", async () => {
+      try {
+        await api(`/cases/${caseId}/enrich/narrative/cancel`, { method: "POST", body: "{}" });
+        await renderExternalTab(content, caseId);
+      } catch (e) {
+        say("nv-msg", e.message || String(e), true);
+      }
+    });
+  const show = document.getElementById("nv-payload");
+  if (show)
+    show.addEventListener("click", async () => {
+      const box = document.getElementById("nv-payload-box");
+      try {
+        const p = await api(`/cases/${caseId}/enrich/narrative/payload`);
+        box.textContent = `To: ${p.destination}   Model: ${p.model}   Sent: ${p.sent_at}\nSHA-256: ${p.sha256}\n\n--- instructions ---\n${p.system}\n\n--- facts ---\n${p.user}`;
+        box.hidden = false;
+      } catch (e) {
+        say("nv-msg", e.message || String(e), true);
+      }
+    });
+}
+
 async function renderExternalTab(content, caseId, refresh) {
   // A refresh while a run is going keeps the page as it is until the new one
   // is ready: no "Loading..." flash, and the scroll position stays.
   if (!refresh) content.innerHTML = `<p class="empty">Loading...</p>`;
-  const [eg, vt] = await Promise.all([
+  const [eg, vt, nv] = await Promise.all([
     api(`/cases/${caseId}/egress`),
     api(`/cases/${caseId}/enrich/virustotal`),
+    api(`/cases/${caseId}/enrich/narrative`),
   ]);
   const st = vt.status;
   const run = st.run;
   const running = run && run.state === "running";
+  const nrun = nv.run;
+  const nRunning = nrun && nrun.state === "running";
   const canStart = st.allowed && st.configured && !running && st.pending > 0 && st.remaining > 0;
 
   const options = eg.options
@@ -5539,6 +5653,7 @@ async function renderExternalTab(content, caseId, refresh) {
               <tbody>${rows}</tbody></table></div>`
           : `<p class="empty">No VirusTotal answers stored for this case.</p>`
       }
+      ${renderNarrativeSection(nv)}
     </div>`;
 
   if (refresh) window.scrollTo(0, scrollY);
@@ -5583,9 +5698,11 @@ async function renderExternalTab(content, caseId, refresh) {
       }
     });
 
+  wireNarrativeSection(content, caseId, nv, say);
+
   // While a run is going, refresh. Stop as soon as the analyst leaves the
   // page: the root this render created is no longer the one on screen.
-  if (running) {
+  if (running || nRunning) {
     setTimeout(() => {
       if (document.getElementById("ext-root") === root) renderExternalTab(content, caseId, true).catch(() => {});
     }, 3000);
