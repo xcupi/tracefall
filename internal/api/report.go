@@ -183,12 +183,17 @@ func (s *Service) assembleAndRender(caseID string, now time.Time, spool *string)
 		report.NewFile("cited-events.json", ej),
 	}
 
+	ext, err := s.reportExternal(caseID)
+	if err != nil {
+		return reportBuild{}, fmt.Errorf("loading outside-service answers: %w", err)
+	}
+
 	d := s.assembleReportData(reportInputs{
 		c: c, now: now, collections: collections, sourceFiles: sourceFiles, events: cited,
 		eventTotal: eventTotal, timeline: timeline, invs: invs,
 		findings: findings, correlations: correlations, runs: runs, audit: auditLog,
 		statuses: statuses, notes: notes, summary: summary,
-		timelineCSV: files[0], findingsCSV: files[1],
+		timelineCSV: files[0], findingsCSV: files[1], external: ext,
 	})
 
 	d.Attachments = append(d.Attachments, report.Attachment{Name: files[2].Name, Description: "All correlations and their complete ordered event-reference lists.", SHA256: files[2].SHA256, Bytes: files[2].Size, Rows: len(correlations)})
@@ -226,6 +231,8 @@ type reportInputs struct {
 	summary      Summary
 	timelineCSV  report.File
 	findingsCSV  report.File
+	// external is the outside-services appendix, already assembled.
+	external report.External
 }
 
 func (s *Service) assembleReportData(in reportInputs) report.Data {
@@ -334,6 +341,7 @@ func (s *Service) assembleReportData(in reportInputs) report.Data {
 			SHA256: reportSHA256(in.findingsCSV.Data), Bytes: int64(len(in.findingsCSV.Data)), Rows: len(in.findings)},
 	}
 
+	d.External = in.external
 	d.Audit, d.AuditOmitted = reportAudit(in.audit)
 	d.TimeZones = reportTimeZones(in.collections)
 	d.Limitations = reportLimitations(d, in)

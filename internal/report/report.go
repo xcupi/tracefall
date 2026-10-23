@@ -327,6 +327,9 @@ type Data struct {
 	// TimeZones states the host time zone each collection's SYSTEM hive
 	// recorded, or why none was recorded.
 	TimeZones []TimeZoneRow
+	// External is what outside services said about indicators read from the
+	// evidence. It is not evidence and nothing else in the report depends on it.
+	External External
 	// Limitations are case-specific caveats the caller computed (stale
 	// analysis, parse failures...). Fixed caveats live in the template.
 	Limitations []string
