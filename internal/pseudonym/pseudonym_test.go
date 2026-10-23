@@ -288,3 +288,45 @@ func TestEntries_ListWhatWasTokenizedForTheAnalyst(t *testing.T) {
 		t.Errorf("entries = %+v", e)
 	}
 }
+
+func TestApply_AWordThatEndsWithALearnedNameIsNotReplaced(t *testing.T) {
+	p := New()
+	p.Learn(User, "bob")
+	got := p.Apply("hbob, sbob and bob")
+	if !strings.Contains(got, "hbob, sbob and ") || strings.HasSuffix(got, "and bob") {
+		t.Errorf("a name is replaced only where it stands alone: %q", got)
+	}
+}
+
+func TestApply_TheLongestLearnedValueWins(t *testing.T) {
+	p := New()
+	// neither ends in a name a shape would recognise: only the dictionary can find them
+	p.Learn(Host, "fs-a")
+	p.Learn(Host, "fs-a.lab9")
+	got := p.Apply("login to fs-a.lab9 now")
+	mustNotContain(t, got, "lab9")
+	if n := len(tokenRe.FindAllString(got, -1)); n != 1 {
+		t.Errorf("one value, %d tokens: %q", n, got)
+	}
+}
+
+func TestApply_EmailIsOneTokenNotAUserPlusADomain(t *testing.T) {
+	p := New()
+	got := p.Apply("mail zed@mail.example now")
+	if got != "mail [EMAIL_1] now" {
+		t.Errorf("got %q", got)
+	}
+}
+
+func TestApply_EscapedBackslashPathsAreNotUNC(t *testing.T) {
+	p := New()
+	// a path as JSON writes it, every backslash doubled: \\Users is not a server named Users
+	got := p.Apply(`C:\\Users\\zed\\a.txt`)
+	if got != `C:\\Users\\zed\\a.txt` {
+		t.Errorf("an escaped path was changed: %q", got)
+	}
+	// a real UNC path in the same text is still found
+	if got := p.Apply(`copy \\fs7\x`); !strings.Contains(got, `\\[HOST_1]\x`) {
+		t.Errorf("a UNC path was missed: %q", got)
+	}
+}
