@@ -179,7 +179,9 @@ closed. The raw request-source test must use `rawNoAuthRouter`, because
 returns HTTP 200, not 204. Those corrections did not touch the user's server,
 case, credentials or production repository.
 
-## NOT VERIFIED / limitations
+## Backend-only checkpoint limitations
+
+The later parent-integration record below supersedes only the explicitly repeated gates. Other limitations remain.
 
 - No full repository suite on this branch; parent integration must run it.
 - No browser/UI changes, DOM behavior, responsive layout or screenshots verified.
@@ -206,3 +208,51 @@ case, credentials or production repository.
   Managed provider/account changes and restart invalidate planned consent;
   manually replacing credential files outside managed configuration is not a
   supported configuration workflow or verified account-change detector.
+
+## Parent integration verification
+
+Backend and UI were cherry-picked into main as `c4ccf41` and `2dc7090`.
+The parent reran the integrated scoped race suite:
+
+```
+go test -race -short ./internal/api ./internal/store ./internal/narrative \
+ -run '^(TestReviewBatches|TestCaseReview|TestReview|TestUI_|TestDeleteCase_EveryCaseOwnedTableIsEmptiedOrDocumented)' \
+ -count=1 -timeout 8m
+```
+
+PASS: api 94.389s, store 23.984s, narrative 12.467s. Build, vet, JS syntax and diff checks also passed.
+
+`tests/case-review-batches.browser.cjs` now defaults to **embedded assets** and
+compares the binary-served app.js/style.css bytes with the integrated source.
+Worktree route overrides require the explicit `TRACEFALL_TEST_ROUTE_ASSETS=1`.
+The parent built `bin/tracefall-batch-review` and ran the browser test without
+that override. The actual upload/import produced 181 synthetic events, four
+initial provider calls and one synthesis; primary/distinct successful event
+counts remained 181. Planning sent zero model calls. Exact captured payloads
+and hashes matched readback. A one-request/no-synthesis budget yielded 60
+primary reviewed events and three unreviewed packets, with partial status.
+Actual cancellation, retained history selection, packet coverage/event citations,
+external-policy/no-ack UI controls, focus/details/payload scroll, changed consent,
+untrusted raw-answer escaping, and late-response isolation passed. Desktop and
+390px screenshots were inspected; no horizontal overflow was observed.
+Artifacts: `/home/udalah/.hermes/cache/scratch/batch-parent-integrated-final-2/`.
+
+The parent also ran the rebuilt integrated binary through the independent
+synthetic HTTP probe: 181 events, four initial plus one synthesis; an additional
+blocked request was interrupted by killing/restarting the server. The persisted
+run/packet became interrupted and provider calls stayed six before/after, with
+no automatic resend. Prior exact payload remained readable, case deletion
+removed readbacks, foreign Origin/Host were refused, and ports 34023/33843 were
+verified closed. Probe record:
+`/home/udalah/.hermes/cache/scratch/batch-parent-integrated-probe/probe-results.json`.
+
+Legacy `tests/external-ux.browser.cjs`, `tests/case-review.browser.cjs` and
+`tests/case-review-ui.browser.cjs` also passed against the freshly integrated
+embedded-assets binary using the required empty/synthetic provider modes.
+Scratch regression ports were 18483/18484, not the user's server.
+
+A full repository suite and independent post-fix source review are separate final
+gates, not established by these targeted/browser checks. No real case, real
+provider, VT result input, analyst-decision/report workflow, or accuracy claim
+was exercised. Budget limits can deliberately leave most of a large snapshot
+unreviewed; new plans are separate approvals, not automatic continuation.

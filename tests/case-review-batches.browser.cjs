@@ -1,4 +1,5 @@
-// Synthetic-only real backend + this worktree's routed assets. Never a live model.
+// Synthetic-only real backend + embedded assets by default. Never a live model.
+// TRACEFALL_TEST_ROUTE_ASSETS=1 is reserved for isolated worktree asset checks.
 // PLAYWRIGHT_MODULE=/absolute/playwright node tests/case-review-batches.browser.cjs BINARY SCRATCH_OUTPUT
 const {chromium}=require(process.env.PLAYWRIGHT_MODULE||'playwright');
 const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path'),http=require('node:http'),net=require('node:net'),crypto=require('node:crypto');
@@ -30,8 +31,17 @@ const close=s=>new Promise(r=>s.close(r));
   browser=await chromium.launch({executablePath:'/usr/bin/google-chrome',headless:true,args:['--no-sandbox']});
   const page=await browser.newPage({viewport:{width:1440,height:1000}}), errors=[];page.setDefaultTimeout(10000);page.on('pageerror',e=>{errors.push(e.message);console.error('PAGE ERROR',e.message)});console.log('Browser ready');
   const assets=path.resolve(__dirname,'../internal/web/static');
-  await page.route('**/static/app.js',r=>r.fulfill({path:assets+'/app.js',contentType:'application/javascript'}));
-  await page.route('**/static/style.css',r=>r.fulfill({path:assets+'/style.css',contentType:'text/css'}));
+  if(process.env.TRACEFALL_TEST_ROUTE_ASSETS==='1') {
+   // Explicit worktree-only mode; final integration checks use embedded assets.
+   await page.route('**/static/app.js',r=>r.fulfill({path:assets+'/app.js',contentType:'application/javascript'}));
+   await page.route('**/static/style.css',r=>r.fulfill({path:assets+'/style.css',contentType:'text/css'}));
+  } else {
+   for(const name of ['app.js','style.css']) {
+    const served=await fetch(base+'/static/'+name);assert.ok(served.ok);
+    assert.equal(await served.text(),fs.readFileSync(assets+'/'+name,'utf8'),'Binary must serve the integrated embedded '+name);
+   }
+   console.log('Verified integrated embedded assets; no browser route overrides');
+  }
   const api=async(p,opts={})=>{const r=await page.request.fetch(base+'/api'+p,{...opts,headers:{'X-Tracefall-Client':'dashboard',...opts.headers}});const text=await r.text();assert.ok(r.ok(),r.status()+' '+p+' '+text);return text?JSON.parse(text):null;};
   const c=await api('/cases',{method:'POST',data:{name:'Synthetic batch UI',description:'Synthetic provider only; not evidence'}});
   const b=`/cases/${c.id}/enrich/case-review/batches`;

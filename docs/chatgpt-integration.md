@@ -2,7 +2,7 @@
 
 Optional AI summaries remain separate from deterministic analysis. Open **Settings → Integrations → ChatGPT / Codex** as an administrator (the local loopback operator is the administrator when authentication is off).
 
-The same provider also supports a separate [bounded AI Case Review](ai-case-review.md). This does not expand Summary's input or report appendix: review selection, caps, preview, consent, coverage and persistence are independent. Full all-case batch review is unavailable.
+The same provider also supports a separate [bounded AI Case Review](ai-case-review.md). This does not expand Summary's input or report appendix: review selection, caps, preview, consent, coverage and persistence are independent. A separate [parsed-case batch workflow](ai-case-review-batches.md) is available with explicit bounded budgets, persisted packet coverage and a separately approved start. Budget-limited/failed work remains partial; this is not exhaustive raw-image review.
 
 ## Authorize, select, and verify are different actions
 
