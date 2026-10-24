@@ -115,8 +115,10 @@ func (h *handlers) getReviewBatchManifest(w http.ResponseWriter, r *http.Request
 		total = p.Snapshot.Correlations
 	case "source":
 		total = p.Snapshot.Sources
+	case "enrichment":
+		total = p.Snapshot.Coverage.VTTotal
 	default:
-		writeError(w, 400, "kind must be event, finding, correlation or source")
+		writeError(w, 400, "kind must be event, finding, correlation, source or enrichment")
 		return
 	}
 	offset, limit := 0, store.BatchPageSize

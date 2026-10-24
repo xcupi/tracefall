@@ -110,7 +110,25 @@ func (s *Store) LegacyReviewFingerprint(ctx context.Context, caseID string) (str
 		wrote = false
 	}
 	finish()
-	fmt.Fprint(h, ",\"Names\":{\"Hosts\":null,\"Users\":null,\"Domains\":null}}\n")
+	fmt.Fprint(h, ",\"Names\":{\"Hosts\":null,\"Users\":null,\"Domains\":null}")
+	vtWrote := false
+	err = walkReviewVTTx(ctx, tx, caseID, func(r BatchRecord) error {
+		if !vtWrote {
+			fmt.Fprint(h, ",\"Enrichments\":[")
+			vtWrote = true
+		} else {
+			fmt.Fprint(h, ",")
+		}
+		fmt.Fprint(h, r.JSON)
+		return nil
+	})
+	if err != nil {
+		return "", 0, err
+	}
+	if vtWrote {
+		fmt.Fprint(h, "]")
+	}
+	fmt.Fprint(h, "}\n")
 	if err = tx.Commit(); err != nil {
 		return "", 0, err
 	}

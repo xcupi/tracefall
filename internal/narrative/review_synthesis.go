@@ -36,6 +36,15 @@ func PrepareReviewSynthesis(in ReviewInput, commentary []Sentence) (*ReviewPrepa
 					break
 				}
 				refs = append(refs, a)
+				if c.Kind == "enrichment" {
+					// An external opinion can anchor commentary only while its
+					// verified original event excerpts are in this new packet.
+					for _, v := range p.FrozenVT {
+						if v.ID == c.ID && len(v.SourceEventIDs) > 0 {
+							primary = true
+						}
+					}
+				}
 				if c.Kind == "event" || c.Kind == "finding" || c.Kind == "correlation" {
 					primary = true
 				}

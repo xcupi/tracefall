@@ -8,8 +8,8 @@
 //
 // The answer is the opinion of an outside service at the time it was asked. It
 // is not evidence about the case and nothing here changes a finding because of
-// it. "Not found" means VirusTotal has not been given the file; it does not
-// mean the file is safe.
+// it. "Not found" means no matching accessible record at lookup time; it
+// establishes neither safety nor that the file was never submitted.
 //
 // The free API allows 4 requests per minute; the client spaces its requests
 // accordingly and the caller applies the daily limit.
@@ -64,6 +64,16 @@ var hashRe = regexp.MustCompile(`^(?:[0-9a-f]{32}|[0-9a-f]{40}|[0-9a-f]{64})$`)
 // nothing else: this is the check that stands between the case and the network.
 func ValidHash(s string) bool { return hashRe.MatchString(s) }
 
+// TrivialHash excludes all-zero and empty-content hashes from evidence linkage
+// and candidate selection. It does not normalize invalid input.
+func TrivialHash(h string) bool {
+	switch h {
+	case "d41d8cd98f00b204e9800998ecf8427e", "da39a3ee5e6b4b0d3255bfef95601890afd80709", "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855":
+		return true
+	}
+	return strings.Trim(h, "0") == ""
+}
+
 // HashType names the kind of a valid hash.
 func HashType(s string) string {
 	switch len(s) {
@@ -79,7 +89,8 @@ func HashType(s string) string {
 
 // Result is what VirusTotal said about one hash.
 type Result struct {
-	// Found is false when VirusTotal has never seen the file.
+	// Found is false when this lookup returned no matching accessible record.
+	// This is point-in-time status, not proof of safety or never-submission.
 	Found bool `json:"found"`
 
 	Malicious       int `json:"malicious"`

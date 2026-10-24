@@ -212,7 +212,7 @@ func (s *Store) reviewSnapshot(ctx context.Context, caseID, runID string) (out R
 			add(&out.Names.Domains, v)
 		}
 	}
-	err = walkReviewTx(ctx, tx, caseID, func(r BatchRecord) error {
+	err = walkAllReviewTx(ctx, tx, caseID, func(r BatchRecord) error {
 		total++
 		out.Bytes += len(r.JSON)
 		if total > BatchSnapshotMaxRecords || out.Bytes > BatchSnapshotMaxBytes {
@@ -220,6 +220,25 @@ func (s *Store) reviewSnapshot(ctx context.Context, caseID, runID string) (out R
 		}
 		fmt.Fprintf(h, "%s\x00%s\n", r.Kind, r.JSON)
 		switch r.Kind {
+		case "enrichment":
+			var e model.Enrichment
+			if err := json.Unmarshal([]byte(r.JSON), &e); err != nil {
+				return err
+			}
+			out.Coverage.VTTotal++
+			rvt := narrative.FreezeReviewVT(e, nil, "batch_run_snapshot")
+			if !narrative.ValidReviewVTIndicator(e) || rvt.Status == "unusable" {
+				out.Coverage.VTInvalid++
+			}
+			links, err := reviewVTLinksTx(ctx, tx, e)
+			if err != nil {
+				return err
+			}
+			if narrative.ValidReviewVTIndicator(e) && len(links) == 0 {
+				out.Coverage.VTUnlinked++
+			}
+			out.Coverage.VTOmitted = out.Coverage.VTTotal
+
 		case "event":
 			out.Events++
 			var e model.Event

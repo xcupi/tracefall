@@ -51,7 +51,20 @@ type CaseReviewPreview struct {
 	SourceFingerprint string                   `json:"source_fingerprint"`
 }
 
+func (s *Service) reviewPreparationContext() (context.Context, context.CancelFunc) {
+	ctx := s.reqCtx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithTimeout(ctx, 60*time.Second)
+}
+
 func (s *Service) reviewInput(caseID string) (narrative.ReviewInput, error) {
+	ctx, cancel := s.reviewPreparationContext()
+	defer cancel()
+	if err := ctx.Err(); err != nil {
+		return narrative.ReviewInput{}, err
+	}
 	in := narrative.ReviewInput{CaseID: caseID}
 	if _, err := s.GetCase(caseID); err != nil {
 		return in, err
@@ -69,11 +82,44 @@ func (s *Service) reviewInput(caseID string) (narrative.ReviewInput, error) {
 	if in.Sources, err = s.store.ListSourceFiles(caseID); err != nil {
 		return in, err
 	}
+	pr, e := narrative.PrepareReview(in)
+	if e != nil {
+		return in, e
+	}
+	selected := map[string]bool{}
+	for _, id := range pr.EventIDs {
+		selected[id] = true
+	}
+	var events []model.Event
+	for _, ev := range in.Events {
+		if selected[ev.ID] {
+			events = append(events, ev)
+		}
+	}
+	vt, cv, e := s.store.ReviewVTContext(ctx, caseID, "", events)
+	if e != nil {
+		return in, e
+	}
+	in.Enrichments = vt
+	in.VTCatalog = &cv
 	return in, nil
 }
 func (s *Service) prepareCaseReview(caseID string) (*narrative.ReviewPrepared, error) {
+	ctx, cancel := s.reviewPreparationContext()
+	defer cancel()
+	before, _, err := s.store.LegacyReviewFingerprint(ctx, caseID)
+	if err != nil {
+		return nil, err
+	}
 	in, err := s.reviewInput(caseID)
 	if err != nil {
+		if errors.Is(err, narrative.ErrNothingToSay) {
+			return nil, errReviewEmpty
+		}
+		if errors.Is(err, narrative.ErrLeak) {
+			s.audit(caseID, "case_review_refused", model.TargetCase, caseID, "Bounded case review refused by the pseudonymization leak gate. Nothing was sent.")
+			return nil, ErrNarrativeRefused
+		}
 		return nil, err
 	}
 	names, err := s.store.CaseNames(caseID)
@@ -88,6 +134,12 @@ func (s *Service) prepareCaseReview(caseID string) (*narrative.ReviewPrepared, e
 	if errors.Is(err, narrative.ErrLeak) {
 		s.audit(caseID, "case_review_refused", model.TargetCase, caseID, "Bounded case review refused by the pseudonymization leak gate. Nothing was sent.")
 		return nil, ErrNarrativeRefused
+	}
+	if err == nil {
+		pr.Fingerprint, _, err = s.store.LegacyReviewFingerprint(ctx, caseID)
+		if err == nil && pr.Fingerprint != before {
+			return nil, errReviewPreviewChanged
+		}
 	}
 	return pr, err
 }
@@ -210,7 +262,7 @@ func (s *Service) StartCaseReview(caseID string, ack bool, previewKey string) (C
 	}
 	host, _ := c.Destination()
 	now := time.Now().UTC()
-	row := store.CaseReview{Privacy: &pr.Privacy, Narrative: model.Narrative{ID: uuid.NewString(), CaseID: caseID, CreatedAt: now, Destination: host, Local: local, Model: c.ModelName(), PayloadSystem: pr.System, PayloadUser: pr.User, PayloadSHA256: sum, FindingIDs: pr.FindingIDs, RequestedBy: s.auditActor(), SentencesJSON: "[]", Status: model.NarrativeError, Error: "request not completed (running or interrupted); no automatic resume"}, Coverage: pr.Coverage, Fingerprint: pr.Fingerprint}
+	row := store.CaseReview{FrozenVT: pr.FrozenVT, Privacy: &pr.Privacy, Narrative: model.Narrative{ID: uuid.NewString(), CaseID: caseID, CreatedAt: now, Destination: host, Local: local, Model: c.ModelName(), PayloadSystem: pr.System, PayloadUser: pr.User, PayloadSHA256: sum, FindingIDs: pr.FindingIDs, RequestedBy: s.auditActor(), SentencesJSON: "[]", Status: model.NarrativeError, Error: "request not completed (running or interrupted); no automatic resume"}, Coverage: pr.Coverage, Fingerprint: pr.Fingerprint}
 	if err := s.store.SaveCaseReview(row); err != nil {
 		return CaseReviewStatus{}, err
 	}

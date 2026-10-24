@@ -42,6 +42,8 @@ func (b BatchBudget) validate() error {
 }
 
 type ReviewBatchPlan struct {
+	VTIncluded                int                  `json:"vt_included"`
+	VTOmitted                 int                  `json:"vt_omitted"`
 	Acknowledged              bool                 `json:"acknowledged"`
 	RequestedBy               string               `json:"requested_by,omitempty"`
 	StartedAt                 string               `json:"started_at,omitempty"`
@@ -78,6 +80,7 @@ type ReviewBatchPlan struct {
 	UnsynthesizedBatches      int                  `json:"unsynthesized_batches"`
 }
 type ReviewBatchPacket struct {
+	VTIDs                []string                 `json:"vt_ids,omitempty"`
 	OmittedSourceBatches []int                    `json:"omitted_source_batches,omitempty"`
 	OutputBytesRetained  int                      `json:"output_bytes_retained"`
 	Seq                  int                      `json:"seq"`
@@ -151,6 +154,7 @@ func (s *Service) PlanReviewBatches(caseID string, budget BatchBudget) (plan Rev
 	}
 	seq := 0
 	binding := ""
+	vtIncluded := map[string]bool{}
 	for _, group := range []struct {
 		kind    string
 		n, size int
@@ -192,6 +196,10 @@ func (s *Service) PlanReviewBatches(caseID string, budget BatchBudget) (plan Rev
 					if cv := pr.Coverage; cv.EventsOmitted > 0 || cv.FindingsOmitted > 0 || cv.CorrelationsOmitted > 0 || cv.CommandLinesOmitted > 0 || cv.MissingSupportingRefs > 0 || cv.SupportingRefsOmitted > 0 {
 						plan.InputIncomplete = true
 					}
+					for _, v := range pr.FrozenVT {
+						packet.VTIDs = append(packet.VTIDs, v.ID)
+						vtIncluded[v.ID] = true
+					}
 					packet.EventIDs = pr.EventIDs
 					packet.FindingIDs = pr.FindingIDs
 					for _, cc := range in.Correlations {
@@ -219,6 +227,11 @@ func (s *Service) PlanReviewBatches(caseID string, budget BatchBudget) (plan Rev
 	if err != nil {
 		return plan, err
 	}
+	plan.VTIncluded = len(vtIncluded)
+	plan.VTOmitted = snap.Coverage.VTTotal - plan.VTIncluded
+	if plan.VTOmitted > 0 {
+		plan.InputIncomplete = true
+	}
 	plan.FindingsOmitted = snap.Findings - plan.FindingsIncluded
 	plan.CorrelationsOmitted = snap.Correlations - plan.CorrelationsIncluded
 	b, _ := json.Marshal(budget)
@@ -233,6 +246,11 @@ func (s *Service) PlanReviewBatches(caseID string, budget BatchBudget) (plan Rev
 	return plan, nil
 }
 func (s *Service) batchInput(caseID, runID, kind string, offset, size int, names narrative.Names) (narrative.ReviewInput, error) {
+	ctx, cancel := s.reviewPreparationContext()
+	defer cancel()
+	if err := ctx.Err(); err != nil {
+		return narrative.ReviewInput{}, err
+	}
 	in := narrative.ReviewInput{CaseID: caseID, Names: names, KnownOmittedEvents: map[string]bool{}}
 	records, err := s.store.BatchMembers(caseID, runID, kind, offset, size)
 	if err != nil {
@@ -303,6 +321,12 @@ func (s *Service) batchInput(caseID, runID, kind string, offset, size int, names
 		}
 		in.Sources = append(in.Sources, sf)
 	}
+	vt, cv, err := s.store.ReviewVTContext(ctx, caseID, runID, in.Events)
+	if err != nil {
+		return in, err
+	}
+	in.Enrichments = vt
+	in.VTCatalog = &cv
 	return in, nil
 }
 

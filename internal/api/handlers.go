@@ -181,6 +181,8 @@ func NewRouterWithAuth(svc *Service, logger *slog.Logger, maxUploadBytes int64, 
 	mux.HandleFunc("GET /api/cases/{id}/enrich/case-review/batches/{run}/packets", h.getReviewBatchPackets)
 	mux.HandleFunc("GET /api/cases/{id}/enrich/case-review/batches/{run}/packets/{seq}/payload", h.getReviewBatchPayload)
 	mux.HandleFunc("GET /api/cases/{id}/enrich/case-review/batches/{run}/manifest", h.getReviewBatchManifest)
+	mux.HandleFunc("GET /api/cases/{id}/enrich/case-review/{review}/{reference...}", h.getReviewVT)
+	mux.HandleFunc("GET /api/cases/{id}/enrich/case-review/batches/{run}/virustotal/{enrichment}", h.getBatchReviewVT)
 	mux.HandleFunc("GET /api/cases/{id}/enrich/case-review", h.getCaseReview)
 	mux.HandleFunc("GET /api/cases/{id}/enrich/case-review/preview", h.previewCaseReview)
 	mux.HandleFunc("GET /api/cases/{id}/enrich/case-review/payload", h.getCaseReviewPayload)

@@ -408,7 +408,7 @@ func trimZeros(s string) string {
 
 // Cite is one thing a sentence cites, by its real id.
 type Cite struct {
-	Kind string `json:"kind"` // "finding" or "event"
+	Kind string `json:"kind"` // Summary: finding/event. Review also: correlation, coverage, enrichment.
 	ID   string `json:"id"`
 }
 

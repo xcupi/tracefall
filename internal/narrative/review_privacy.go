@@ -12,7 +12,7 @@ import (
 // rather than silently changing Summary's allowed text or output contract.
 // ReviewPrivacyContract versions the preparation contract, not case egress.
 // Bumping it invalidates preview acknowledgements even if the text is unchanged.
-const ReviewPrivacyContract = "parsed-review-privacy-v1"
+const ReviewPrivacyContract = "parsed-review-privacy-v2"
 
 // ReviewPrivacy describes a local check. It never grants transmission permission
 // and is intentionally kept outside the model's system/user evidence packet.

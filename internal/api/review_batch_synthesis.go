@@ -10,7 +10,7 @@ import (
 )
 
 func (s *Service) prepareBatchSynthesis(p ReviewBatchPlan, packets []ReviewBatchPacket) (ReviewBatchPacket, *narrative.ReviewPrepared, int, error) {
-	in := narrative.ReviewInput{CaseID: p.CaseID, Names: p.Snapshot.Names}
+	in := narrative.ReviewInput{CaseID: p.CaseID, Names: p.Snapshot.Names, VTCatalog: &p.Snapshot.Coverage}
 	var commentary []narrative.Sentence
 	var origins []int
 	refs := map[narrative.Cite]bool{}
@@ -62,6 +62,28 @@ func (s *Service) prepareBatchSynthesis(p ReviewBatchPlan, packets []ReviewBatch
 		}
 	}
 	for _, c := range ids {
+		if c.Kind == "enrichment" && len(in.Enrichments) < narrative.ReviewMaxVT {
+			raw, err := s.store.BatchMemberJSON(p.CaseID, p.ID, "enrichment", c.ID)
+			if err != nil {
+				return ReviewBatchPacket{}, nil, 0, err
+			}
+			var e model.Enrichment
+			if err = json.Unmarshal(raw, &e); err != nil {
+				return ReviewBatchPacket{}, nil, 0, err
+			}
+			for _, id := range e.SourceEventIDs {
+				ev, ok, err := s.store.BatchEvent(p.CaseID, p.ID, id)
+				if err != nil {
+					return ReviewBatchPacket{}, nil, 0, err
+				}
+				if ok && len(narrative.ReviewVTLinks(e, []model.Event{ev})) > 0 {
+					if err = addEvent(id); err != nil {
+						return ReviewBatchPacket{}, nil, 0, err
+					}
+				}
+			}
+			in.Enrichments = append(in.Enrichments, e)
+		}
 		if c.Kind != "finding" && c.Kind != "correlation" {
 			continue
 		}
@@ -113,6 +135,9 @@ func (s *Service) prepareBatchSynthesis(p ReviewBatchPlan, packets []ReviewBatch
 		return ReviewBatchPacket{}, nil, len(commentary), err
 	}
 	packet := ReviewBatchPacket{Seq: p.TotalBatches, Kind: "synthesis", State: "ready", Namespace: "synthesis", EventIDs: prepared.EventIDs, FindingIDs: prepared.FindingIDs, Privacy: prepared.Privacy, Coverage: prepared.Coverage, Payload: NarrativePayload{System: prepared.System, User: prepared.User, SHA256: payloadHash(prepared.System, prepared.User), Destination: p.Destination, Model: p.Model}}
+	for _, v := range prepared.FrozenVT {
+		packet.VTIDs = append(packet.VTIDs, v.ID)
+	}
 	omittedBatches := map[int]bool{}
 	for _, index := range prepared.SynthesisOmittedIndices {
 		omittedBatches[origins[index]] = true

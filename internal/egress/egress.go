@@ -85,7 +85,7 @@ func (l Level) Describe() string {
 	case Hashes:
 		return "File hashes (MD5, SHA-1, SHA-256) of files found in the evidence may be sent to a reputation service. No file name, path, host, user, case name or event is sent."
 	case Pseudonymized:
-		return "Bounded normalized facts may be sent to a language model: selected findings, correlations, supporting/context/unflagged observations and numeric parse coverage. Known and recognized identifiers become local reversible tokens; recognized secrets are removed. Timestamps, process names and activity patterns remain sensitive: pseudonymized is not anonymous. Includes file hashes. Choosing this level does not start a request; inspect the preview and authorize each external request separately."
+		return "Bounded normalized facts may be sent to a language model: selected findings, correlations, supporting/context/unflagged observations and numeric parse coverage, plus linked stored VirusTotal reputation status, lookup time and numerical verdict counts (hashes/IDs aliased, provider prose omitted). Stored reputation is external opinion, not evidence or a fresh check. Known and recognized identifiers become local reversible tokens; recognized secrets are removed. Timestamps, process names and activity patterns remain sensitive: pseudonymized is not anonymous. Includes file hashes. Choosing this level does not start a request; inspect the preview and authorize each external request separately."
 	case Full:
 		return "Reserved: case content as it is. No feature uses it yet."
 	}

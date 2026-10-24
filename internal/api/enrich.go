@@ -164,16 +164,7 @@ type VTCandidate struct {
 	EventIDs []string `json:"event_ids"`
 }
 
-// the hashes of empty content: looking them up says nothing about the case.
-var trivialHashes = map[string]bool{
-	"d41d8cd98f00b204e9800998ecf8427e":                                 true,
-	"da39a3ee5e6b4b0d3255bfef95601890afd80709":                         true,
-	"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855": true,
-}
-
-func trivialHash(h string) bool {
-	return trivialHashes[h] || strings.Trim(h, "0") == ""
-}
+func trivialHash(h string) bool { return virustotal.TrivialHash(h) }
 
 // VirusTotalCandidates lists the distinct, valid, non-trivial file hashes in a
 // case's events, each with the events that held it.

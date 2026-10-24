@@ -10,10 +10,30 @@ import (
 
 // CaseReview is separate from legacy Summary and its report appendix.
 type CaseReview struct {
+	FrozenVT    []narrative.ReviewVT     `json:"frozen_vt,omitempty"`
 	Privacy     *narrative.ReviewPrivacy `json:"privacy,omitempty"`
 	Narrative   model.Narrative          `json:"narrative"`
 	Coverage    narrative.ReviewCoverage `json:"coverage"`
 	Fingerprint string                   `json:"source_fingerprint"`
+}
+
+// CaseReviewVT reads only the attempted single-review snapshot. Old rows without
+// frozen_vt are not recorded and resolve as unavailable, never live data.
+func (s *Store) CaseReviewVT(caseID, reviewID, id string) (narrative.ReviewVT, error) {
+	var raw string
+	if err := s.db.QueryRow(`SELECT record_json FROM case_reviews WHERE case_id=? AND id=?`, caseID, reviewID).Scan(&raw); err != nil {
+		return narrative.ReviewVT{}, err
+	}
+	var r CaseReview
+	if err := json.Unmarshal([]byte(raw), &r); err != nil {
+		return narrative.ReviewVT{}, err
+	}
+	for _, v := range r.FrozenVT {
+		if v.ID == id {
+			return v, nil
+		}
+	}
+	return narrative.ReviewVT{}, sql.ErrNoRows
 }
 
 func (s *Store) SaveCaseReview(r CaseReview) error {

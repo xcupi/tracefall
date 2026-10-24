@@ -11,6 +11,8 @@ image completeness, or a human-reviewed forensic conclusion.** All counts refer
 to normalized primary event representatives, not every recollection in the
 observation/provenance tables. Chunk order is selection order, not chronology.
 
+Stored VirusTotal context is attached alongside verified original event excerpts in relevant packets and synthesis, never deferred to a VT-only packet or fetched automatically. See [the VT contract](ai-review-virustotal-context.md) for frozen citation routes, numerical validation, privacy-v2 and distinct VT coverage.
+
 ## Endpoints
 
 Let `B = /api/cases/{case_id}/enrich/case-review/batches`.
@@ -31,7 +33,7 @@ also need the existing CSRF cookie/header pair. Use JSON request bodies.
 | `POST B/{run_id}/cancel` | `{}` | `204`; cancels in-flight context and durably prevents a cancelled run becoming succeeded; already delivered bytes cannot be recalled |
 | `GET B/{run_id}/packets?after=-1&limit=20` | zero-based sequence cursor; limit 1..100 | `200 {packets:Packet[],after,limit}`; continue after the last returned `seq`, until a short/empty page |
 | `GET B/{run_id}/packets/{seq}/payload` | none | `200 {payload:Payload,privacy:Privacy,attempted:bool,state}`; both frozen pre-send inspection and exact attempted readback; 404 if that budget-disabled packet has no prepared payload |
-| `GET B/{run_id}/manifest?kind=event&offset=0&limit=60` | kind `event`, `finding`, `correlation`, `source`; limit 1..60 | `200 {members:[{kind,member_id,ordinal,primary_packet_seq}],total,offset,limit,has_more}`; original same-case IDs, **not** raw member JSON; source members have primary_packet_seq -1 |
+| `GET B/{run_id}/manifest?kind=event&offset=0&limit=60` | kind `event`, `finding`, `correlation`, `source`, `enrichment`; limit 1..60 | `200 {members:[{kind,member_id,ordinal,primary_packet_seq}],total,offset,limit,has_more}`; original same-case IDs, **not** raw member JSON; source/enrichment members have primary_packet_seq -1 |
 
 Packet pages include bounded payloads/results as well as metadata. They are not
 a source-file export. They never return the locally frozen raw manifest JSON.
