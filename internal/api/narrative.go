@@ -67,6 +67,8 @@ type narrativeRun struct {
 	mu     sync.Mutex
 	st     NarrativeRun
 	cancel context.CancelFunc
+	// externalReview is only set for Case Review; legacy Summary is unchanged.
+	externalReview bool
 }
 
 func (r *narrativeRun) snapshot() NarrativeRun { r.mu.Lock(); defer r.mu.Unlock(); return r.st }

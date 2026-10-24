@@ -13,11 +13,11 @@
 //	               evidence, and nothing else: no file name, path, host, user,
 //	               case name or event. A hash says "this exact content"; it
 //	               reveals to the service that someone holds that content.
-//	pseudonymized  structured facts about findings and the events they cite
-//	               (titles, rules, times, process names, command lines, paths,
-//	               addresses) with every name, address, identifier and hash
-//	               replaced by a token that only this server can reverse, and
-//	               secrets removed. Sent to a language model to draft a summary.
+//	pseudonymized  bounded normalized findings/correlations and selected
+//	               supporting, context and unflagged observations, plus numeric
+//	               parse coverage. Known/recognized identifiers are tokenized;
+//	               recognized secrets removed. Summary and Case Review require
+//	               separate explicit starts and external acknowledgements.
 //	               Includes everything "hashes" allows.
 //	full           case content as it is. Reserved: no feature uses it yet.
 package egress
@@ -85,7 +85,7 @@ func (l Level) Describe() string {
 	case Hashes:
 		return "File hashes (MD5, SHA-1, SHA-256) of files found in the evidence may be sent to a reputation service. No file name, path, host, user, case name or event is sent."
 	case Pseudonymized:
-		return "Findings and the events they cite may be sent to a language model with every name, address, identifier and hash replaced by a token only this server can reverse, and secrets removed. Timestamps, process names and the shape of the activity are sent as they are. Includes file hashes."
+		return "Bounded normalized facts may be sent to a language model: selected findings, correlations, supporting/context/unflagged observations and numeric parse coverage. Known and recognized identifiers become local reversible tokens; recognized secrets are removed. Timestamps, process names and activity patterns remain sensitive: pseudonymized is not anonymous. Includes file hashes. Choosing this level does not start a request; inspect the preview and authorize each external request separately."
 	case Full:
 		return "Reserved: case content as it is. No feature uses it yet."
 	}

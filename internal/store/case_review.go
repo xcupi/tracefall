@@ -10,6 +10,7 @@ import (
 
 // CaseReview is separate from legacy Summary and its report appendix.
 type CaseReview struct {
+	Privacy     *narrative.ReviewPrivacy `json:"privacy,omitempty"`
 	Narrative   model.Narrative          `json:"narrative"`
 	Coverage    narrative.ReviewCoverage `json:"coverage"`
 	Fingerprint string                   `json:"source_fingerprint"`

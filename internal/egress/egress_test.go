@@ -1,6 +1,18 @@
 package egress
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
+
+func TestPseudonymizedDescriptionDisclosesReviewAndSeparatePermission(t *testing.T) {
+	text := Pseudonymized.Describe()
+	for _, want := range []string{"correlations", "unflagged", "parse coverage", "not anonymous", "does not start"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("permission description hides %q", want)
+		}
+	}
+}
 
 func TestParseAndOrder(t *testing.T) {
 	for in, want := range map[string]Level{"none": None, " Hashes ": Hashes, "PSEUDONYMIZED": Pseudonymized, "full": Full} {

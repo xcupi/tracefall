@@ -35,7 +35,7 @@ var ErrReviewTooLarge = errors.New("bounded review packet exceeds the 160000-byt
 // Defense in depth for generated prose: the strict field allowlist already
 // excludes SQL, cookie and raw body fields. Refuse recognizable bodies copied
 // into otherwise allowed prose rather than attempt to redact SQL semantically.
-var reviewProhibitedBody = regexp.MustCompile(`(?is)\b(?:select\s+.+?\s+from\b|insert\s+into\b|update\s+\S+\s+set\b|delete\s+from\b|exec(?:ute)?\s+\S+|(?:create|alter|drop)\s+(?:table|database|procedure|login)\b|(?:set-)?cookie\s*:)`)
+var reviewProhibitedBody = regexp.MustCompile(`(?is)(?:\b(?:select\s+|insert\s+into\b|update\s+\S+\s+set\b|delete\s+from\b|exec(?:ute)?\s+\S+|(?:create|alter|drop)\s+(?:table|database|procedure|login)\b|(?:set-)?cookies?["']?\s*[:=])|-----BEGIN [A-Z ]*PRIVATE KEY-----|\b(?:curl|wget)\b[^\r\n]*\s(?:--(?:data(?:-ascii|-binary|-raw|-urlencode)?|json|cookie|post-data|post-file)|-[bd])(?:[=\s]|$)|\b(?:Invoke-WebRequest|Invoke-RestMethod|iwr|irm|curl)\b[^\r\n]*\s-Body\b|\bdata:[a-z0-9.+-]+/[a-z0-9.+-]+[;,])`)
 
 var reviewTimeReading = regexp.MustCompile(`^(?:[A-Z][a-z]{2} {1,2}[0-9]{1,2} [0-9]{2}:[0-9]{2}:[0-9]{2}|[0-9]{4}-[0-9]{2}-[0-9]{2}[ T][0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,9})?)$`)
 
@@ -70,6 +70,7 @@ type ReviewCoverage struct {
 
 type ReviewPrepared struct {
 	*Prepared
+	Privacy     ReviewPrivacy  `json:"privacy"`
 	Coverage    ReviewCoverage `json:"coverage"`
 	Fingerprint string         `json:"source_fingerprint"`
 }
@@ -129,6 +130,7 @@ func PrepareReview(in ReviewInput) (*ReviewPrepared, error) {
 		more := newNames(p.Entities(), names)
 		if len(more.Hosts)+len(more.Users)+len(more.Domains) == 0 {
 			p.Fingerprint = ReviewFingerprint(in)
+			p.Privacy = ReviewPrivacy{Contract: ReviewPrivacyContract, Status: "checked", PayloadBytes: len(p.System) + len(p.User), RequiresSeparatePermission: true}
 			return p, nil
 		}
 		names.Hosts = append(names.Hosts, more.Hosts...)
@@ -395,7 +397,15 @@ func buildReview(in ReviewInput, names Names) (*ReviewPrepared, error) {
 	for i, s := range sourceList {
 		a := fmt.Sprintf("K%d", i+2)
 		p.reviewRefs[a] = Cite{Kind: "coverage", ID: s.ID}
-		fmt.Fprintf(&b, "%s | source=%s acquisition=%s status=%s | ", a, knownAlias(sources, s.ID), knownAlias(acqs, s.CollectionID), p.text(s.ImportStatus, 40))
+		// Import status is a classification, never a free-text parser channel.
+		status := "unclassified_status_not_sent"
+		switch s.ImportStatus {
+		case model.SourceFileDiscovered, model.SourceFileImported, model.SourceFileUnsupported, model.SourceFileDuplicate, model.SourceFileFailed:
+			status = s.ImportStatus
+		case "":
+			status = "not_recorded"
+		}
+		fmt.Fprintf(&b, "%s | source=%s acquisition=%s status=%s | ", a, knownAlias(sources, s.ID), knownAlias(acqs, s.CollectionID), status)
 		if c := s.ParseCoverage; c != nil {
 			fmt.Fprintf(&b, "parse_coverage=recorded records_read=%d mapped=%d unmapped=%d undated=%d records_failed=%d chunks_failed=%d limit_reached=%t notes_present=%t\n", c.RecordsRead, c.Mapped, c.Unmapped, c.Undated, c.RecordsFailed, c.ChunksFailed, c.LimitReached, len(c.Notes) > 0)
 		} else {

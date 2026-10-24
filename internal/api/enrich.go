@@ -112,6 +112,9 @@ func (s *Service) SetEgressLevel(caseID, level string) (egress.Level, error) {
 	if !l.Selectable() {
 		return egress.None, ErrEgressUnavailable
 	}
+	// Serialize policy changes with Case Review admission and cancellation.
+	s.review.mu.Lock()
+	defer s.review.mu.Unlock()
 	old, err := s.EgressLevel(caseID)
 	if err != nil {
 		return egress.None, err
@@ -121,6 +124,11 @@ func (s *Service) SetEgressLevel(caseID, level string) (egress.Level, error) {
 	}
 	if err := s.store.SetSetting(egressKey(caseID), string(l)); err != nil {
 		return egress.None, err
+	}
+	if !l.AtLeast(egress.Pseudonymized) {
+		if r := s.review.runs[caseID]; r != nil && r.externalReview && r.snapshot().State == "running" {
+			r.cancel()
+		}
 	}
 	s.audit(caseID, model.AuditEgressChanged, model.TargetCase, caseID, fmt.Sprintf("Egress level changed from %s to %s. %s", old, l, l.Describe()))
 	return l, nil

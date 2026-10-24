@@ -30,7 +30,6 @@ import (
 	"strings"
 	"time"
 
-	"tracefall/internal/cmdsem"
 	"tracefall/internal/model"
 	"tracefall/internal/pseudonym"
 )
@@ -319,7 +318,7 @@ func build(in Input, names Names) (*Prepared, error) {
 // and checked.
 func (pr *Prepared) text(s string, max int) string {
 	if pr.reviewRefs != nil {
-		s = cmdsem.Redact(s)
+		s = redactReviewValue(s)
 	}
 	if pr.reviewRefs != nil && reviewProhibitedBody.MatchString(s) {
 		pr.leaks["prohibited SQL or cookie body"] = true
@@ -335,6 +334,10 @@ func (pr *Prepared) text(s string, max int) string {
 // technique, an event type). It is not pseudonymized, because it names no one;
 // it is checked all the same, so that if one ever did, nothing is sent.
 func (pr *Prepared) own(s string) string {
+	if pr.reviewRefs != nil && (reviewProhibitedBody.MatchString(s) || redactReviewValue(s) != s) {
+		pr.leaks["protected content in classification"] = true
+		return pseudonym.Redacted
+	}
 	s = clean(s)
 	pr.check(s)
 	return s

@@ -107,6 +107,8 @@ func TestCaseReview_ExternalGatesPreviewChangeAndNoAutomaticSend(t *testing.T) {
 		t.Fatalf("no egress got %d", got)
 	}
 	setLevel(t, mux, id, "pseudonymized")
+	// Permission changes invalidate a preview; inspect under the new policy.
+	p = reviewPreview(t, mux, id)
 	if got := reviewStart(t, mux, id, false, p.PreviewKey); got != 403 {
 		t.Fatalf("no ack got %d", got)
 	}

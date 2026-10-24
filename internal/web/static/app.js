@@ -5720,11 +5720,15 @@ function renderCaseReviewSection(rv) {
     <p class="small"><strong>Optional AI commentary, not a finding or evidence.</strong> A single request reviews selected parsed findings, correlations, supporting events, context and unflagged observations. It never changes findings or severity.</p>
     <p class="small muted">Not exhaustive case analysis; no raw-image coverage. Full all-case batch review is unavailable in this phase. Unknown or tied times do not establish order; unknown hosts are acquisition-scoped. Validation checks references, entities and numbers, not semantic truth.</p>
     <p class="small">Destination: ${rv.configured ? `${esc(rv.destination)} · ${esc(rv.model)} · ${rv.local ? "local model; nothing leaves this machine" : "another machine"}` : `<a href="#/settings/integrations">Settings → Integrations</a>`}.</p>
-    <p id="rv-caps" class="small"><strong>Request caps:</strong> 25 findings · 25 correlations · 120 parsed events · 60 source coverage records · 160000 payload bytes. One request, always limited in scope.</p>
-    <details id="rv-privacy" class="external-details"><summary>Selection plan and privacy</summary>
+    <p id="rv-caps" class="small"><strong>1. Evidence selection — request caps:</strong> 25 findings · 25 correlations · 120 parsed events · 60 source coverage records · 160000 payload bytes. One request, always limited in scope.</p>
+    <details id="rv-selection" class="external-details"><summary>How evidence is selected</summary>
       <p class="small">Half the event capacity is reserved for deterministic acquisition/source/type/identity/time-knownness strata beyond primary references. ID ordering is only a selection tie-break, never evidence of temporal order. Provenance identifies the primary observation, not every recollection.</p>
-      <p class="small">Only allowlisted normalized fields and numeric parse coverage are used. Names, addresses and hashes become stable tokens; secrets are removed. Bounded normalized command lines are secret-redacted; recognizable SQL/cookie bodies are omitted and counted. Original partial/local time readings stay labelled, never treated as UTC. No raw file bodies, SQL statements, cookies, notes, case names, evidence names, server paths or raw parser errors. Pseudonymized does not mean anonymous. Missing parse coverage means not recorded, not complete.</p>
     </details>
+    <p id="rv-privacy-status" class="small" role="status"><strong>2. Privacy preparation:</strong> Not checked for a current preview. A privacy check is not permission to transmit.</p>
+    <details id="rv-privacy" class="external-details"><summary>Privacy contract and limitations</summary>
+      <p class="small">Only allowlisted normalized fields and numeric parse coverage are used. Names, addresses and hashes become stable tokens; secrets are removed. Bounded normalized command lines are secret-redacted; recognizable SQL/cookie bodies are omitted and counted. Original partial/local time readings stay labelled, never treated as UTC. No raw file bodies, SQL statements, cookies, notes, case names, evidence names, server paths or raw parser errors. URL userinfo, query strings and fragments are removed before tokenization. Recognized request bodies and private-key blocks are excluded. These are pattern-based protections, not a guarantee that arbitrary text contains no sensitive information. Pseudonymized does not mean anonymous. Missing parse coverage means not recorded, not complete.</p>
+    </details>
+    <p id="rv-permission" class="small"><strong>3. Transmission permission:</strong> Provider login is not consent. ${!rv.configured ? "No provider is active." : rv.local ? "Local destination; explicitly starting is still required. No external acknowledgement is needed." : rv.allowed ? "Case policy permits pseudonymized facts, but each external request still requires the current preview and your acknowledgement." : "Case policy blocks external case facts. A successful privacy check cannot override it."} Choosing a policy or inspecting a preview never starts a request. Revocation cancels an in-flight external review where possible; bytes already delivered cannot be recalled.</p>
     ${rv.configured && !rv.local ? `<p class="external-notice small"><strong>Before sending:</strong> ${esc(rv.notice || "Check this provider's terms and data controls.")}</p><p class="small"><label><input type="checkbox" id="rv-ack"> I reviewed the preview and provider terms and authorize this one bounded request.</label></p>` : ""}
     <p><button type="button" class="secondary" id="rv-preview" ${running || rv.events === 0 ? "disabled" : ""}>Inspect pre-send preview</button>
     <button type="button" id="rv-start" disabled>Start bounded review</button>
@@ -5734,6 +5738,7 @@ function renderCaseReviewSection(rv) {
     ${rv.run ? `<p class="small">Last bounded request: <strong>${esc(rv.run.state)}</strong> ${esc(rv.run.reason || "")}</p>` : ""}
     ${l ? `<div class="review-commentary"><p><strong>Optional AI commentary — not evidence or a new finding.</strong></p>
       ${l.stale ? `<p class="field-error-box">Stale: parsed events, correlations, findings or source coverage changed since this request.</p>` : ""}
+      <p class="small">Privacy preparation at this attempt: ${l.privacy ? `${esc(l.privacy.status)} · ${esc(l.privacy.contract)} · ${esc(l.privacy.payload_bytes)} payload bytes. A local check, not proof of anonymity.` : "not recorded (older result)."}</p>
       ${coverage(l.coverage)}
       <p class="small">${esc(l.created_at)} · ${esc(l.destination)} · ${esc(l.model)}${l.prompt_tokens || l.completion_tokens ? ` · ${l.prompt_tokens} tokens in, ${l.completion_tokens} out` : ""}</p>
       ${l.status === "ok" ? `<ol>${(l.sentences || []).map(s => `<li>${esc(s.text)} <span class="source-links">${(s.cites || []).map(c => externalCitation(c.kind,c.id)).join(" ")}</span></li>`).join("")}</ol>` : `<p>No usable commentary: ${esc(l.error || "request failed or interrupted")}. The request payload is recorded separately.</p>`}
@@ -5746,13 +5751,27 @@ function wireCaseReviewSection(content, caseId, rv, say) {
   const card = content.querySelector("#external-review");
   if (!card) return;
   const start = card.querySelector("#rv-start"), ack = card.querySelector("#rv-ack");
-  const sync = () => { start.disabled = !rv.configured || !rv.allowed || rv.events === 0 || rv.run?.state === "running" || !card.dataset.previewHash || (!rv.local && !ack?.checked); };
+  const sync = () => { start.disabled = !rv.configured || !rv.allowed || rv.events === 0 || rv.run?.state === "running" || !card.dataset.previewHash || card.dataset.privacyContract !== rv.privacy_contract || (!rv.local && !ack?.checked); };
   if (ack) ack.addEventListener("change",sync);
   card.addEventListener("review-state-restored",sync);
+  const invalidatePreview = () => {
+    delete card.dataset.previewHash; delete card.dataset.privacyContract;
+    if (ack) ack.checked = false;
+    card.querySelector("#rv-preview-box").hidden = true;
+    card.querySelector("#rv-plan").hidden = true;
+    card.querySelector("#rv-privacy-status").textContent = "2. Privacy preparation: not checked for a current preview; no transmission permission granted.";
+    sync();
+  };
   card.querySelector("#rv-preview").addEventListener("click",async () => {
+    invalidatePreview();
     try {
       const p = await api(`/cases/${caseId}/enrich/case-review/preview`);
       if (!card.isConnected) return;
+      const bytes = new TextEncoder().encode(p.system + p.user).length;
+      if (!p.privacy || p.privacy.status !== "checked" || p.privacy.contract !== rv.privacy_contract || p.privacy.requires_separate_permission !== true || p.privacy.payload_bytes !== bytes || !p.preview_key) throw Error("A current privacy-preparation receipt is required; refresh and inspect again.");
+      if (p.destination !== rv.destination || p.model !== rv.model || p.local !== rv.local || p.egress_level !== rv.egress_level || p.source_fingerprint !== rv.source_fingerprint) throw Error("The preview privacy/provider/policy/input context changed; refresh before authorizing.");
+      card.dataset.privacyContract = p.privacy.contract;
+      card.querySelector("#rv-privacy-status").textContent = `2. Privacy preparation: checked locally (${p.privacy.contract}, ${bytes} payload bytes). Pattern-based checks, not anonymity or permission to transmit.`;
       card.dataset.previewHash = p.preview_key;
       card.dataset.fingerprint = p.source_fingerprint;
       const box = card.querySelector("#rv-preview-box");
@@ -5761,14 +5780,14 @@ function wireCaseReviewSection(content, caseId, rv, say) {
       if (ack) ack.checked = false;
       card.querySelector("#rv-why").textContent = "Preview built locally; nothing sent. Starting recomputes and refuses a changed payload.";
       sync();
-    } catch(e) { say("rv-msg",e.message || String(e),true); }
+    } catch(e) { if (!card.isConnected) return; invalidatePreview(); say("rv-msg",e.message || String(e),true); }
   });
   start.addEventListener("click",async () => {
     start.disabled = true;
     try {
       await api(`/cases/${caseId}/enrich/case-review`,{method:"POST",body:JSON.stringify({acknowledge:!!ack?.checked,preview_key:card.dataset.previewHash})});
       if (card.isConnected) await renderExternalTab(content,caseId);
-    } catch(e) { if (!card.isConnected) return; delete card.dataset.previewHash; if (ack) ack.checked=false; sync(); say("rv-msg",e.message || String(e),true); }
+    } catch(e) { if (!card.isConnected) return; invalidatePreview(); say("rv-msg",e.message || String(e),true); }
   });
   card.querySelector("#rv-cancel").addEventListener("click",async () => {
     try { await api(`/cases/${caseId}/enrich/case-review/cancel`,{method:"POST",body:"{}"}); if(card.isConnected)await renderExternalTab(content,caseId); }
@@ -5907,7 +5926,7 @@ function captureExternalState(root, consentKey) {
   const reviewPreview = root.querySelector("#rv-preview-box");
   const reviewPayload = root.querySelector("#rv-payload-box");
   return {
-    review: review ? { ack: !!root.querySelector("#rv-ack")?.checked, hash: review.dataset.previewHash, fingerprint: review.dataset.fingerprint, preview: reviewPreview && !reviewPreview.hidden ? reviewPreview.textContent : null, plan: root.querySelector("#rv-plan")?.textContent, payload: reviewPayload && !reviewPayload.hidden ? {hash:reviewPayload.dataset.hash,text:reviewPayload.textContent,scrollTop:reviewPayload.scrollTop} : null, scrollTop:reviewPreview?.scrollTop } : null,
+    review: review ? { privacyContract: review.dataset.privacyContract, privacyText: review.querySelector("#rv-privacy-status")?.textContent, ack: !!root.querySelector("#rv-ack")?.checked, hash: review.dataset.previewHash, fingerprint: review.dataset.fingerprint, preview: reviewPreview && !reviewPreview.hidden ? reviewPreview.textContent : null, plan: root.querySelector("#rv-plan")?.textContent, payload: reviewPayload && !reviewPayload.hidden ? {hash:reviewPayload.dataset.hash,text:reviewPayload.textContent,scrollTop:reviewPayload.scrollTop} : null, scrollTop:reviewPreview?.scrollTop } : null,
     ack: !!root.querySelector("#nv-ack")?.checked,
     openDetails: Array.from(root.querySelectorAll("details[id]")).filter((d) => d.open).map((d) => d.id),
     payload: box && !box.hidden ? { hash: box.dataset.hash, text: box.textContent, scrollTop: box.scrollTop } : null,
@@ -5930,8 +5949,9 @@ function restoreExternalState(root, state) {
   const review = root.querySelector("#external-review");
   const rv = state.review;
   if (review && rv) {
-    if (rv.hash && rv.fingerprint === root.dataset.reviewFingerprint && rv.preview) {
-      review.dataset.previewHash=rv.hash; review.dataset.fingerprint=rv.fingerprint;
+    if (rv.hash && rv.privacyContract && rv.privacyContract === root.dataset.reviewPrivacyContract && rv.fingerprint === root.dataset.reviewFingerprint && rv.preview) {
+      review.dataset.previewHash=rv.hash; review.dataset.fingerprint=rv.fingerprint; review.dataset.privacyContract=rv.privacyContract;
+      review.querySelector("#rv-privacy-status").textContent=rv.privacyText;
       const preview=review.querySelector("#rv-preview-box");preview.textContent=rv.preview;preview.hidden=false;preview.scrollTop=rv.scrollTop || 0;
       const plan=review.querySelector("#rv-plan");plan.textContent=rv.plan;plan.hidden=false;
       const reviewAck=review.querySelector("#rv-ack");if(reviewAck){reviewAck.checked=rv.ack;reviewAck.dispatchEvent(new Event("change"));}
@@ -5959,7 +5979,7 @@ async function renderExternalTab(content, caseId, refresh) {
   ]);
   // A response from a page we left must not repaint the next tab.
   if (!content.isConnected || (refresh && document.getElementById("ext-root") !== previousRoot)) return;
-  const consentKey = JSON.stringify([caseId, eg.level, nv.destination, nv.model, nv.local, rv.destination, rv.model, rv.local]);
+  const consentKey = JSON.stringify([caseId, eg.level, nv.destination, nv.model, nv.local, rv.destination, rv.model, rv.local, rv.egress_level, rv.privacy_contract]);
   const state = refresh ? captureExternalState(previousRoot, consentKey) : null;
   const st = vt.status;
   const run = st.run;
@@ -6073,6 +6093,7 @@ async function renderExternalTab(content, caseId, refresh) {
   const root = document.getElementById("ext-root");
   root.dataset.consentKey = consentKey;
   root.dataset.reviewFingerprint = rv.source_fingerprint || "";
+  root.dataset.reviewPrivacyContract = rv.privacy_contract || "";
   const say = (id, text, bad) => {
     const el = document.getElementById(id);
     if (!el) return;
