@@ -4,7 +4,7 @@ AI Summary and AI Case Review are **different operations** in a case's Outside s
 
 - **AI Summary** keeps its existing `/enrich/narrative` contract, selection, output and Appendix E. It summarizes selected deterministic findings and their cited events. It is not an independent review of the case.
 - **AI Case Review** makes **one bounded request** over selected existing parsed case data, including unflagged observations. It can run with zero findings when parsed events exist. Its output is optional commentary, not a new finding or evidence. It never changes deterministic findings or severity and is not inserted into Summary or the report appendix. Reports do not include this separate commentary in this phase.
-- **Exhaustive all-case/batch review is unavailable.** There is no autonomous retrieval, tool use, multi-batch coverage, restart/resume pipeline, analyst accept/reject workflow, or raw-image coverage claim. Even when all currently parsed events fit, unparsed/acquisition/image coverage is not established.
+- **Optional parsed-snapshot batch review has a separate backend API** under `/enrich/case-review/batches`: see [the batch API and resource contract](ai-case-review-batches.md). It uses explicit local planning, persisted membership, approved run budgets and visible partial coverage. Dashboard integration is a separate workstream. Neither path provides exhaustive raw-image review, autonomous retrieval/tools, automatic uncertain-request resume, or the future typed analyst accept/reject workflow.
 
 ## Selection and privacy contract
 
@@ -42,7 +42,7 @@ The preview key binds payload hash, full source fingerprint, provider kind, dest
 
 The exact hash is SHA-256 of `system + NUL + user`, not the serialized HTTP envelope. A `case_reviews` row retains the versioned privacy receipt (contract, checked status, actual combined payload bytes and separate-permission requirement). Older rows without a receipt remain not recorded; no retrospective claim of checking is made. The row is written **before** invoking the provider, then updated with the exact raw answer, accepted sentences/rejection reasons, usage if supplied, and error/cancellation outcome. The initial row records an attempted request, not proof the destination received it. If the process stops, its unfinished row says running-or-interrupted; no automatic resend happens. Run state itself is in memory.
 
-The locally computed source fingerprint includes current events, findings, correlations and active source/parse-coverage records, including omitted records, rather than only finding IDs. Changes mark stored commentary stale. The packet and source selection are bounded, but local preparation/status currently materialize case data: **RAM and fingerprint work remain O(case size)**. This phase does not claim streaming/local-memory scalability.
+The locally computed source fingerprint includes current events, findings, correlations and active source/parse-coverage records, including omitted records, rather than only finding IDs. Changes mark stored commentary stale. The single-packet explicit preview/start preparation still materializes case data and remains **O(case size) RAM**. Status now streams the same fingerprint contract with a bounded metadata cache; first/invalidated scans remain O(case size) time but not case-sized event allocations. The separate batch backend has its own bounded-page preparation and explicit disk/time caps; that does not relabel the old single-packet preparation as streaming.
 
 ## Output and UI
 

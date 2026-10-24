@@ -112,7 +112,28 @@ func (s *Service) SetEgressLevel(caseID, level string) (egress.Level, error) {
 	if !l.Selectable() {
 		return egress.None, ErrEgressUnavailable
 	}
-	// Serialize policy changes with Case Review admission and cancellation.
+	// Batch revocation uses its own short admission lock, before the legacy
+	// global preparation lock. Verify case access before affecting a run.
+	if !l.AtLeast(egress.Pseudonymized) {
+		if _, err := s.GetCase(caseID); err != nil {
+			return egress.None, err
+		}
+		s.batches.mu.Lock()
+		s.batches.policyBlocked[caseID]++
+		if r := s.batches.runs[caseID]; r != nil && r.external {
+			r.cancel()
+		}
+		s.batches.mu.Unlock()
+		defer func() {
+			s.batches.mu.Lock()
+			s.batches.policyBlocked[caseID]--
+			if s.batches.policyBlocked[caseID] == 0 {
+				delete(s.batches.policyBlocked, caseID)
+			}
+			s.batches.mu.Unlock()
+		}()
+	}
+	// Serialize policy changes with legacy Case Review admission/cancellation.
 	s.review.mu.Lock()
 	defer s.review.mu.Unlock()
 	old, err := s.EgressLevel(caseID)

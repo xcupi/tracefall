@@ -1,9 +1,12 @@
 package api
 
 import (
+	"context"
+	"database/sql"
 	"errors"
 	"net/http"
 	"tracefall/internal/narrative"
+	"tracefall/internal/store"
 )
 
 func (h *handlers) reviewFail(w http.ResponseWriter, err error) bool {
@@ -11,13 +14,19 @@ func (h *handlers) reviewFail(w http.ResponseWriter, err error) bool {
 		return false
 	}
 	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		writeError(w, 404, "batch plan not found in this case")
+	case errors.Is(err, context.DeadlineExceeded):
+		writeError(w, 408, "bounded local preparation deadline exceeded; no requests sent")
+	case errors.Is(err, store.ErrReviewSnapshotLimit), errors.Is(err, narrative.ErrLeak):
+		writeError(w, 422, err.Error())
 	case errors.Is(err, ErrNarrativeEgress), errors.Is(err, ErrNarrativeNeedsAck):
 		writeError(w, http.StatusForbidden, err.Error())
 	case errors.Is(err, ErrNarrativeNotConfigured):
 		writeError(w, http.StatusNotImplemented, err.Error())
 	case errors.Is(err, errReviewRunning), errors.Is(err, errReviewPreviewChanged), errors.Is(err, errLLMConfigurationBusy):
 		writeError(w, http.StatusConflict, err.Error())
-	case errors.Is(err, errReviewEmpty), errors.Is(err, ErrNarrativeRefused), errors.Is(err, narrative.ErrReviewTooLarge):
+	case errors.Is(err, errReviewEmpty), errors.Is(err, ErrNarrativeRefused), errors.Is(err, narrative.ErrReviewTooLarge), errors.Is(err, errReviewBudgetEmpty):
 		writeError(w, http.StatusUnprocessableEntity, err.Error())
 	default:
 		return h.fail(w, err)

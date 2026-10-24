@@ -1,6 +1,7 @@
 package store_test
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"os"
@@ -245,6 +246,16 @@ func populate(t *testing.T, s *store.Store, caseID, name string, events int) {
 	}
 	// The independent bounded review must also be case-owned.
 	if err := s.SaveCaseReview(store.CaseReview{Narrative: model.Narrative{ID: caseID + "-review1", CaseID: caseID, CreatedAt: now, Status: model.NarrativeOK}}); err != nil {
+		t.Fatal(err)
+	}
+	// The frozen batch manifest, plan and exact attempted packets are case-owned.
+	if _, err := s.FreezeReviewSnapshot(context.Background(), caseID, caseID+"-batch"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SaveBatchRun(caseID, caseID+"-batch", "planned", map[string]any{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SaveBatchPacket(caseID, caseID+"-batch", 0, "ready", map[string]any{}); err != nil {
 		t.Fatal(err)
 	}
 	// An outside service's answer about an indicator of this case.

@@ -3,12 +3,15 @@ package api
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/google/uuid"
 
 	"tracefall/internal/credentials"
 	"tracefall/internal/enrich/llm"
@@ -28,13 +31,17 @@ type llmConfiguration struct {
 	cancel                        context.CancelFunc
 	done                          chan struct{}
 	active                        int
-	verified                      bool
+	revision                      uint64
+	// Random per-manager generation prevents address reuse across restarts from
+	// validating a previous process's planned consent.
+	generation string
+	verified   bool
 }
 
 var errLLMConfigurationBusy = errors.New("ChatGPT authorization or verification is in progress; wait or cancel authorization before starting a summary")
 
 func newLLMConfiguration() *llmConfiguration {
-	return &llmConfiguration{api: llm.None{}, state: "not_connected"}
+	return &llmConfiguration{api: llm.None{}, state: "not_connected", generation: uuid.NewString()}
 }
 func (m *llmConfiguration) effectiveLocked() string {
 	if m.environment != "" {
@@ -65,6 +72,11 @@ func (m *llmConfiguration) snapshot() llm.Chatter {
 	defer m.mu.Unlock()
 	return m.clientLocked()
 }
+func (m *llmConfiguration) batchBinding() string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return payloadHash(m.generation, fmt.Sprintf("%d", m.revision))
+}
 func (m *llmConfiguration) acquire() (llm.Chatter, func(), error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -84,6 +96,10 @@ func (s *Service) ConfigureChatGPT(dataDir, binary, model, envProvider string, a
 	if apiClient == nil {
 		apiClient = llm.None{}
 	}
+	if m.active > 0 {
+		return errLLMConfigurationBusy
+	}
+	m.revision++
 	m.api = apiClient
 	m.environment = strings.ToLower(strings.TrimSpace(envProvider))
 	if dataDir == "" {
@@ -195,6 +211,7 @@ func (h *handlers) selectChatGPTProvider(w http.ResponseWriter, r *http.Request)
 		writeError(w, 500, "Could not save provider preference")
 		return
 	}
+	m.revision++
 	m.preference = body.Provider
 	h.svc.auditSecurity("", "integration_provider_selected", "integration", "chatgpt", principalFrom(r).Username, "AI summary provider preference changed; no request sent and no case policy changed.")
 	writeJSON(w, 200, m.infoLocked(r.Context()))
@@ -220,6 +237,7 @@ func (h *handlers) authorizeChatGPTIntegration(w http.ResponseWriter, r *http.Re
 	m.cancel = cancel
 	m.done = make(chan struct{})
 	done := m.done
+	m.revision++
 	m.state = "authorizing"
 	m.prompt = llm.DevicePrompt{}
 	m.verified = false
@@ -288,6 +306,7 @@ func (h *handlers) disconnectChatGPTIntegration(w http.ResponseWriter, r *http.R
 		writeError(w, 503, "Integration storage unavailable")
 		return
 	}
+	m.revision++
 	if err := m.codex.Logout(r.Context()); err != nil {
 		m.state = "failed"
 		writeError(w, 502, "Could not confirm Codex disconnect; retry after checking server setup")

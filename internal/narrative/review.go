@@ -17,12 +17,13 @@ import (
 
 // ReviewInput contains parsed case data, not file bodies or analyst material.
 type ReviewInput struct {
-	CaseID       string
-	Events       []model.Event
-	Findings     []model.Finding
-	Correlations []model.Correlation
-	Sources      []model.SourceFile
-	Names        Names
+	KnownOmittedEvents map[string]bool `json:"-"`
+	CaseID             string
+	Events             []model.Event
+	Findings           []model.Finding
+	Correlations       []model.Correlation
+	Sources            []model.SourceFile
+	Names              Names
 }
 
 const ReviewMaxEvents = 120
@@ -69,6 +70,7 @@ type ReviewCoverage struct {
 }
 
 type ReviewPrepared struct {
+	SynthesisOmittedIndices []int `json:"-"`
 	*Prepared
 	Privacy     ReviewPrivacy  `json:"privacy"`
 	Coverage    ReviewCoverage `json:"coverage"`
@@ -77,7 +79,7 @@ type ReviewPrepared struct {
 
 // canonicalReview filters by case and sorts identities without implying time order.
 func canonicalReview(in ReviewInput) ReviewInput {
-	out := ReviewInput{CaseID: in.CaseID, Names: in.Names}
+	out := ReviewInput{CaseID: in.CaseID, Names: in.Names, KnownOmittedEvents: in.KnownOmittedEvents}
 	for _, e := range in.Events {
 		if e.CaseID == in.CaseID {
 			out.Events = append(out.Events, e)
@@ -202,7 +204,11 @@ func buildReview(in ReviewInput, names Names) (*ReviewPrepared, error) {
 	}
 	for id := range refs {
 		if _, ok := byID[id]; !ok {
-			cv.MissingSupportingRefs++
+			if in.KnownOmittedEvents[id] {
+				cv.SupportingRefsOmitted++
+			} else {
+				cv.MissingSupportingRefs++
+			}
 		}
 	}
 	selected := map[string]string{}
@@ -374,7 +380,7 @@ func buildReview(in ReviewInput, names Names) (*ReviewPrepared, error) {
 		for _, id := range ids {
 			if a := aliases[id]; a != "" {
 				out = append(out, a)
-			} else if _, ok := byID[id]; ok {
+			} else if _, ok := byID[id]; ok || in.KnownOmittedEvents[id] {
 				omitted++
 			} else {
 				missing++

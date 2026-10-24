@@ -51,8 +51,12 @@ func (s *Service) SetLLM(c llm.Chatter) {
 		c = llm.None{}
 	}
 	s.llm.mu.Lock()
+	defer s.llm.mu.Unlock()
+	if s.llm.active > 0 {
+		return
+	}
+	s.llm.revision++
 	s.llm.api = c
-	s.llm.mu.Unlock()
 }
 
 // NarrativeRun is the state of a request.

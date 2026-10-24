@@ -114,7 +114,16 @@ func (s *Service) PreviewCaseReview(caseID string) (CaseReviewPreview, error) {
 	return CaseReviewPreview{EgressLevel: string(lvl), Local: local, Privacy: pr.Privacy, NarrativePayload: NarrativePayload{System: pr.System, User: pr.User, SHA256: payloadHash(pr.System, pr.User), Destination: host, Model: c.ModelName()}, Coverage: pr.Coverage, SourceFingerprint: pr.Fingerprint, PreviewKey: reviewPreviewKey(pr, c, lvl)}, nil
 }
 func (s *Service) CaseReviewStatus(caseID string) (CaseReviewStatus, error) {
-	in, err := s.reviewInput(caseID)
+	if _, err := s.GetCase(caseID); err != nil {
+		return CaseReviewStatus{}, err
+	}
+	ctx := s.reqCtx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
+	fingerprint, eventCount, err := s.store.LegacyReviewFingerprint(ctx, caseID)
 	if err != nil {
 		return CaseReviewStatus{}, err
 	}
@@ -125,8 +134,8 @@ func (s *Service) CaseReviewStatus(caseID string) (CaseReviewStatus, error) {
 	c := s.llm.snapshot()
 	configured, allowed, local := narrativeAllowed(c, lvl)
 	host, _ := c.Destination()
-	st := CaseReviewStatus{PrivacyContract: narrative.ReviewPrivacyContract, Configured: configured, Allowed: allowed, Local: local, Destination: host, Model: c.ModelName(), Notice: c.Notice(), EgressLevel: string(lvl), NeedsAcknowledgement: configured && !local, Scope: "bounded_partial_parsed_case", Events: len(in.Events)}
-	st.SourceFingerprint = narrative.ReviewFingerprint(in)
+	st := CaseReviewStatus{PrivacyContract: narrative.ReviewPrivacyContract, Configured: configured, Allowed: allowed, Local: local, Destination: host, Model: c.ModelName(), Notice: c.Notice(), EgressLevel: string(lvl), NeedsAcknowledgement: configured && !local, Scope: "bounded_partial_parsed_case", Events: eventCount}
+	st.SourceFingerprint = fingerprint
 	r, ok, err := s.store.LatestCaseReview(caseID)
 	if err != nil {
 		return st, err

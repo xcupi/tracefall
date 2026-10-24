@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -49,7 +50,9 @@ func isUniqueConstraintViolation(err error) bool {
 }
 
 type Store struct {
-	db *sql.DB
+	db                  *sql.DB
+	reviewFingerprintMu sync.Mutex
+	reviewFingerprints  map[string]reviewFingerprintCache
 }
 
 // Open opens (creating if necessary) the SQLite database at path and
@@ -75,7 +78,12 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("store: enabling foreign keys: %w", err)
 	}
-	return &Store{db: db}, nil
+	s := &Store{db: db}
+	if err := s.RecoverReviewBatches(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("store: recovering interrupted batch reviews: %w", err)
+	}
+	return s, nil
 }
 
 func (s *Store) Close() error { return s.db.Close() }
@@ -1519,6 +1527,9 @@ func (s *Store) DeleteCaseWithCounts(caseID string) (DeletedCaseCounts, error) {
 		// egress level chosen for it, have no meaning without the case.
 		`DELETE FROM enrichments WHERE case_id = ?`,
 		`DELETE FROM narratives WHERE case_id = ?`,
+		`DELETE FROM review_batch_packets WHERE case_id = ?`,
+		`DELETE FROM review_batch_members WHERE case_id = ?`,
+		`DELETE FROM review_batch_runs WHERE case_id = ?`,
 		`DELETE FROM case_reviews WHERE case_id = ?`,
 		`DELETE FROM app_settings WHERE key = 'egress:' || ?`,
 		`DELETE FROM cases WHERE id = ?`,

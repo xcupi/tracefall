@@ -490,6 +490,25 @@ CREATE INDEX IF NOT EXISTS idx_provider_requests ON provider_requests(provider, 
 
 -- Drafts written by a language model about a case's findings, with the exact
 -- text that was sent. Not evidence; kept apart from events and findings.
+-- ID-keyset indexes for bounded parsed-case snapshot pages.
+CREATE INDEX IF NOT EXISTS idx_review_event_identity ON events(case_id,id);
+CREATE INDEX IF NOT EXISTS idx_review_finding_identity ON findings(case_id,id);
+CREATE INDEX IF NOT EXISTS idx_review_correlation_identity ON correlations(case_id,id);
+CREATE INDEX IF NOT EXISTS idx_review_source_identity ON source_files(case_id,id);
+CREATE TABLE IF NOT EXISTS review_batch_runs (
+ id TEXT PRIMARY KEY, case_id TEXT NOT NULL REFERENCES cases(id), state TEXT NOT NULL,
+ record_json TEXT NOT NULL, created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_review_batch_runs_case ON review_batch_runs(case_id,created_at);
+CREATE TABLE IF NOT EXISTS review_batch_members (
+ case_id TEXT NOT NULL REFERENCES cases(id), run_id TEXT NOT NULL, kind TEXT NOT NULL,
+ member_id TEXT NOT NULL, ordinal INTEGER NOT NULL, record_json TEXT NOT NULL,
+ PRIMARY KEY(case_id,run_id,kind,member_id), UNIQUE(case_id,run_id,kind,ordinal)
+);
+CREATE TABLE IF NOT EXISTS review_batch_packets (
+ case_id TEXT NOT NULL REFERENCES cases(id), run_id TEXT NOT NULL, seq INTEGER NOT NULL,
+ state TEXT NOT NULL, record_json TEXT NOT NULL, PRIMARY KEY(case_id,run_id,seq)
+);
 CREATE TABLE IF NOT EXISTS case_reviews (
  id TEXT PRIMARY KEY,
  case_id TEXT NOT NULL REFERENCES cases(id),

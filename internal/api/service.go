@@ -191,9 +191,10 @@ type Service struct {
 	enrich *enrichManager
 	// llm drafts summaries; nil or key-less means drafting is not configured.
 	// narr holds the state of requests in progress, in memory only.
-	llm    *llmConfiguration
-	narr   *narrativeManager
-	review *narrativeManager
+	llm     *llmConfiguration
+	narr    *narrativeManager
+	review  *narrativeManager
+	batches *batchManager
 	// actor is the identity behind the CURRENT request, set by
 	// WithActor on a per-request copy. The shared Service always has the
 	// zero value; only request-scoped copies carry an identity.
@@ -264,10 +265,11 @@ func NewService(s *store.Store, files *casefiles.Store) *Service {
 		jobs: newImportJobs(), throttle: newLoginGuard(),
 		deletions: newDeletionTracker(), pipe: newPipelineManager(),
 		heavy: gate.New(DefaultHeavyOps), imports: gate.New(DefaultImports),
-		enrich: newEnrichManager(),
-		narr:   newNarrativeManager(),
-		review: newNarrativeManager(),
-		llm:    newLLMConfiguration(),
+		enrich:  newEnrichManager(),
+		narr:    newNarrativeManager(),
+		review:  newNarrativeManager(),
+		batches: newBatchManager(),
+		llm:     newLLMConfiguration(),
 	}
 }
 
@@ -2392,6 +2394,13 @@ func (s *Service) DeleteCase(caseID string) error {
 		return err
 	}
 
+	// Batch cancellation happens before removing the case-owned manifest. A
+	// stale worker cannot recreate deleted rows or send its next packet.
+	s.batches.mu.Lock()
+	if run := s.batches.runs[caseID]; run != nil {
+		run.cancel()
+	}
+	s.batches.mu.Unlock()
 	// Progress is published as the deletion passes each phase. It costs
 	// a handful of map writes and adds no query: see deleteprogress.go
 	// for why stages -- rather than a per-record count -- are the only
