@@ -64,6 +64,21 @@ and uncertainty. Structural citation/type validation is not semantic truth.
 The existing single preview/latest and each prepared batch packet have integer
 `coverage.vt_total`, `vt_included`, `vt_omitted`, `vt_invalid`, `vt_unlinked`.
 
+These integers are meaningful only when **`coverage.vt_recorded === true`**.
+New preparation records this boolean even for an actual zero-row VT census,
+before the no-VT prompt early return. Raw new snapshots, prepared initial
+packets and prepared synthesis use the same coverage marker. A plan additionally
+has **top-level `vt_recorded`** for its distinct included/omitted census; the raw
+catalog marker remains at `snapshot.coverage.vt_recorded`. Both booleans always
+serialize, including `false` on typed old-row/status/plan/history readbacks.
+Absent or false means **not recorded**, regardless of any zero-valued integer
+fields introduced by typed decoding. Raw old packet pages may still omit the
+marker; the UI treats that identically. Budget-disabled/unprepared packets have
+no prepared census and do not claim one. Never infer presence from the counts,
+backfill historical rows, or confuse a new recorded zero with old unknown data.
+The marker is local metadata, not an extra prompt line or canonical input field;
+no-VT payload bytes and fingerprints stay compatible.
+
 * `total`: all same-case stored VT rows in the relevant full source catalog.
 * `included`: distinct original enrichment IDs actually present in this payload.
 * `omitted = total - included`: exclusive complement, including unavailable

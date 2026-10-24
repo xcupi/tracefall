@@ -46,6 +46,7 @@ var reviewCiteLineRe = regexp.MustCompile(`^(.*?)\s*\[((?:[FECKV]\d{1,4})(?:\s*,
 
 // ReviewCoverage describes selection, not the completeness of the acquired image.
 type ReviewCoverage struct {
+	VTRecorded               bool   `json:"vt_recorded"`
 	VTTotal                  int    `json:"vt_total"`
 	VTIncluded               int    `json:"vt_included"`
 	VTOmitted                int    `json:"vt_omitted"`
@@ -164,7 +165,7 @@ func buildReview(in ReviewInput, names Names) (*ReviewPrepared, error) {
 	p := &Prepared{limits: DefaultLimits, p: pseudonym.New(), numbers: map[string]bool{}, leaks: map[string]bool{}, reviewRefs: map[string]Cite{}}
 	result := &ReviewPrepared{Prepared: p}
 	cv := &result.Coverage
-	*cv = ReviewCoverage{Scope: "bounded_partial_parsed_case", EventsTotal: len(in.Events), FindingsTotal: len(in.Findings), CorrelationsTotal: len(in.Correlations), SourcesTotal: len(in.Sources)}
+	*cv = ReviewCoverage{VTRecorded: true, Scope: "bounded_partial_parsed_case", EventsTotal: len(in.Events), FindingsTotal: len(in.Findings), CorrelationsTotal: len(in.Correlations), SourcesTotal: len(in.Sources)}
 	for _, s := range names.Hosts {
 		p.p.Learn(pseudonym.Host, s)
 	}

@@ -2401,6 +2401,12 @@ func (s *Service) DeleteCase(caseID string) error {
 		run.cancel()
 	}
 	s.batches.mu.Unlock()
+	// Share single-review outcome admission; a deleted case cannot earn a
+	// late successful result. Do not hold batches.mu while taking this lock.
+	s.review.mu.Lock()
+	if run := s.review.runs[caseID]; run != nil {
+		run.cancel()
+	}
 	// Progress is published as the deletion passes each phase. It costs
 	// a handful of map writes and adds no query: see deleteprogress.go
 	// for why stages -- rather than a per-record count -- are the only
@@ -2415,6 +2421,7 @@ func (s *Service) DeleteCase(caseID string) error {
 	tombstone := s.auditChainSummaryForDeletion(caseID)
 	s.deletions.stage(caseID, DeletionStageRemovingRecords)
 	counts, err := s.store.DeleteCaseWithCounts(caseID)
+	s.review.mu.Unlock()
 	if err != nil {
 		deleteErr = fmt.Errorf("deleting case: %w", err)
 		return deleteErr

@@ -212,6 +212,7 @@ func (s *Store) reviewSnapshot(ctx context.Context, caseID, runID string) (out R
 			add(&out.Names.Domains, v)
 		}
 	}
+	out.Coverage.VTRecorded = true
 	err = walkAllReviewTx(ctx, tx, caseID, func(r BatchRecord) error {
 		total++
 		out.Bytes += len(r.JSON)

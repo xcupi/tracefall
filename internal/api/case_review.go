@@ -188,6 +188,10 @@ func (s *Service) CaseReviewStatus(caseID string) (CaseReviewStatus, error) {
 	host, _ := c.Destination()
 	st := CaseReviewStatus{PrivacyContract: narrative.ReviewPrivacyContract, Configured: configured, Allowed: allowed, Local: local, Destination: host, Model: c.ModelName(), Notice: c.Notice(), EgressLevel: string(lvl), NeedsAcknowledgement: configured && !local, Scope: "bounded_partial_parsed_case", Events: eventCount}
 	st.SourceFingerprint = fingerprint
+	// Read the durable outcome and terminal run state from one admission view;
+	// otherwise a poll can combine the initial error row with a finished run.
+	s.review.mu.Lock()
+	defer s.review.mu.Unlock()
 	r, ok, err := s.store.LatestCaseReview(caseID)
 	if err != nil {
 		return st, err
@@ -199,9 +203,7 @@ func (s *Service) CaseReviewStatus(caseID string) (CaseReviewStatus, error) {
 		_ = json.Unmarshal([]byte(n.ReasonsJSON), &v.Reasons)
 		st.Latest = &v
 	}
-	s.review.mu.Lock()
 	run := s.review.runs[caseID]
-	s.review.mu.Unlock()
 	if run != nil {
 		rs := run.snapshot()
 		st.Run = &rs
@@ -281,8 +283,8 @@ func (s *Service) CancelCaseReview(caseID string) error {
 		return err
 	}
 	s.review.mu.Lock()
+	defer s.review.mu.Unlock()
 	r := s.review.runs[caseID]
-	s.review.mu.Unlock()
 	if r != nil {
 		r.cancel()
 	}
@@ -314,7 +316,7 @@ func (s *Service) runCaseReview(ctx context.Context, caseID string, pr *narrativ
 		n.Model = res.Model
 	}
 	switch {
-	case ctx.Err() != nil || errors.Is(err, context.Canceled):
+	case errors.Is(err, context.Canceled):
 		state, reason = "cancelled", "cancelled"
 	case err != nil:
 		state, reason = "failed", safeEnrichError(err)
@@ -332,8 +334,30 @@ func (s *Service) runCaseReview(ctx context.Context, caseID string, pr *narrativ
 			n.Error = ""
 		}
 	}
+	s.admitCaseReviewOutcome(ctx, caseID, row, run, state, reason)
+}
+
+func (s *Service) admitCaseReviewOutcome(ctx context.Context, caseID string, row store.CaseReview, run *narrativeRun, state, reason string) {
+	n := &row.Narrative
+	// Validation and provider work stay outside admission. The final context
+	// observation, durable outcome and published run state are one ordered
+	// boundary with explicit cancellation, policy revocation and deletion.
+	s.review.mu.Lock()
+	defer s.review.mu.Unlock()
+	if ctx.Err() != nil {
+		state, reason = "cancelled", "cancelled"
+		n.SentencesJSON = "[]"
+	}
 	if state != "finished" {
 		n.Status, n.Error = model.NarrativeError, reason
+	}
+	// Deletion won admission and removed the attempt; do not recreate it or
+	// replace cancellation with a misleading storage-failure outcome.
+	if _, err := s.GetCase(caseID); errors.Is(err, ErrCaseNotFound) {
+		run.mu.Lock()
+		run.st.State, run.st.Reason, run.st.FinishedAt = "cancelled", "case deleted", time.Now().UTC().Format(time.RFC3339)
+		run.mu.Unlock()
+		return
 	}
 	if err := s.store.SaveCaseReview(row); err != nil {
 		state, reason = "failed", "could not store the review outcome; initial payload remains recorded"

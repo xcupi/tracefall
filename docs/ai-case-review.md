@@ -30,6 +30,17 @@ External destinations still require case `pseudonymized` permission and explicit
 
 ## API
 
+Single-review outcome admission serializes the final cancellation observation,
+durable outcome and in-memory terminal state with explicit Cancel, external
+policy revocation and case deletion. Provider Chat and validation run outside
+that critical section. If cancellation/revocation wins after validation, the
+attempt retains its exact payload, bounded raw response and frozen VT metadata,
+but accepted commentary is withheld (`latest.status=error`, `latest.error=cancelled`,
+empty sentences, `run.state=cancelled`). If outcome admission wins first, its
+already-stored result is not retrospectively retracted. Deletion removes the
+attempt and prevents late resurrection. Local-provider policy exceptions and
+legacy Summary are unchanged; delivered external bytes cannot be recalled.
+
 Under `/api/cases/{id}/enrich/case-review`:
 
 | Method/path | Effect |

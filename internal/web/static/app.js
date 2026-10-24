@@ -5660,7 +5660,7 @@ function externalCitation(kind, id, context = {}) {
 
 // Stored VT is secondary context, never primary event/success coverage.
 function renderStoredVTCoverage(c) {
-  const n = key => Number.isSafeInteger(c?.[key]) && c[key] >= 0 ? String(c[key]) : "not recorded";
+  const n = key => c?.vt_recorded === true && Number.isSafeInteger(c?.[key]) && c[key] >= 0 ? String(c[key]) : "not recorded";
   return `<p class="small stored-vt-coverage"><strong>Stored VirusTotal context:</strong> total ${n("vt_total")} · included ${n("vt_included")} · omitted ${n("vt_omitted")} · invalid ${n("vt_invalid")} · unlinked ${n("vt_unlinked")}. Packet context is separate from primary event coverage; do not sum repeated VT rows across packets. Older results without metadata are not recorded, not zero.</p>`;
 }
 
@@ -5823,7 +5823,7 @@ function mountBatchReview(card, caseId, provider) {
       <p class="small">Requests attempted ${n(progress.requests_attempted)} · input bytes admitted ${n(progress.input_bytes_admitted)} · output bytes retained ${n(progress.output_bytes_retained)}. Attempts are durable admission, not proof of delivery or billing.</p>
       <p class="small">Whole catalog: ${n(c.sources_imported)} imported, ${n(c.sources_failed)} failed, ${n(c.sources_unsupported)} unsupported, ${n(c.sources_not_imported)} not imported. Parse gaps ${n(p.snapshot?.source_parse_gaps)}; parse coverage not recorded ${n(c.parse_coverage_not_recorded)}; undated ${n(c.undated_total)}. These totals remain applicable when sampled source details are omitted.</p>
       <p class="small">Findings included ${n(p.findings_included)} / omitted ${n(p.findings_omitted)}; correlations included ${n(p.correlations_included)} / omitted ${n(p.correlations_omitted)}.</p>
-      <p class="small">Distinct stored VT included ${n(p.vt_included)} / omitted ${n(p.vt_omitted)} across this plan. Not primary or successful event coverage.</p>${renderStoredVTCoverage({...c,vt_included:p.vt_included,vt_omitted:p.vt_omitted})}
+      <p class="small">Distinct stored VT included ${p.vt_recorded === true ? n(p.vt_included) : "not recorded"} / omitted ${p.vt_recorded === true ? n(p.vt_omitted) : "not recorded"} across this plan. Not primary or successful event coverage.</p>${renderStoredVTCoverage({...c,vt_recorded:c.vt_recorded === true && p.vt_recorded === true,vt_included:p.vt_included,vt_omitted:p.vt_omitted})}
       <p class="small">Synthesis ${n(p.synthesis_state||"not prepared")} · omitted sentences ${n(p.synthesis_omitted_sentences)} · unsynthesized successful batches ${n(p.unsynthesized_batches)}. Reservation: ${p.budget?.synthesis ? "one request + 160000 input bytes" : "disabled"}; output/time remaining and a newly prepared privacy namespace can still prevent synthesis. Omitted, failed or budget-exhausted work is not whole-case completion.</p>`;
     sync(); schedule();
   };

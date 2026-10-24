@@ -46,10 +46,10 @@ function extract(name){const start=source.indexOf('function '+name+'(');assert.o
   window.api=async(p,o)=>{if(o?.method){writes.push(p);throw Error('fixture refuses writes');}reads.push(p);if(p.includes('/virustotal/')){if(window.failVT||p.includes('wrong-context'))throw Object.assign(Error('SECRET RAW PROVIDER ERROR'),{status:404});return structuredClone(dto);}if(p.includes('/packets?'))return {packets:structuredClone(packets)};return structuredClone(plan);};
   // Provenance is outside this fixture's scope; verify exact ID and nested-dialog behavior.
   window.loadProvenanceInto=async(c,id,body)=>{reads.push('event:'+c+':'+id);body.textContent='Verified fixture source '+id;};
-  window.rv={events:1,latest:{id:'review/full<&',status:'ok',coverage:{vt_total:9,vt_included:2,vt_omitted:7,vt_invalid:1,vt_unlinked:3},sentences:[{kind:'hypothesis',text:'Synthetic outside opinion only',cites:[{kind:'enrichment',id:'vt/full<&'}]}]}};
+  window.rv={events:1,latest:{id:'review/full<&',status:'ok',coverage:{vt_recorded:true,vt_total:9,vt_included:2,vt_omitted:7,vt_invalid:1,vt_unlinked:3},sentences:[{kind:'hypothesis',text:'Synthetic outside opinion only',cites:[{kind:'enrichment',id:'vt/full<&'}]}]}};
   document.querySelector('#single').innerHTML=renderCaseReviewSection(rv);wireExternalCitations(document.querySelector('#single'),'case/full<&');
-  window.plan={id:'run/full<&',state:'succeeded',total_batches:1,synthesis_state:'succeeded',local:true,budget:{},progress:{primary_reviewed_events:1,distinct_successful_events:1},snapshot:{coverage:{vt_total:9,vt_invalid:1,vt_unlinked:3}},vt_included:2,vt_omitted:7};
-  window.packets=[{seq:0,kind:'event',state:'succeeded',coverage:{vt_total:9,vt_included:1,vt_omitted:8},sentences:rv.latest.sentences},{seq:1,kind:'synthesis',state:'succeeded',coverage:{},sentences:rv.latest.sentences}];
+  window.plan={vt_recorded:true,id:'run/full<&',state:'succeeded',total_batches:1,synthesis_state:'succeeded',local:true,budget:{},progress:{primary_reviewed_events:1,distinct_successful_events:1},snapshot:{coverage:{vt_recorded:true,vt_total:9,vt_invalid:1,vt_unlinked:3}},vt_included:2,vt_omitted:7};
+  window.packets=[{seq:0,kind:'event',state:'succeeded',coverage:{vt_recorded:true,vt_total:9,vt_included:1,vt_omitted:8},sentences:rv.latest.sentences},{seq:1,kind:'synthesis',state:'succeeded',coverage:{},sentences:rv.latest.sentences}];
   mountBatchReview(document.querySelector('#batch'),'case/full<&',{configured:false});
   document.querySelector('#summary').innerHTML=renderNarrativeSection({latest:{status:'ok',sentences:[{text:'Legacy findings only',cites:[{kind:'finding',id:'finding-original'}]}]}});
  });
@@ -83,11 +83,37 @@ function extract(name){const start=source.indexOf('function '+name+'(');assert.o
   const node=document.createElement('div');node.id='preview-fixture';document.querySelector('main').appendChild(node);
   window.previewState={configured:true,allowed:true,local:false,events:1,destination:'synthetic.invalid',model:'synthetic',egress_level:'pseudonymized',privacy_contract:'synthetic-contract',source_fingerprint:'synthetic-fingerprint'};
   node.innerHTML='<section id="external-review">'+renderCaseReviewSection(previewState)+'</section>';
-  const previous=api;window.api=async(p,o)=>p.endsWith('/preview') ? (reads.push(p),{...previewState,preview_key:'synthetic-key',system:'S',user:'U',privacy:{status:'checked',contract:previewState.privacy_contract,requires_separate_permission:true,payload_bytes:2},coverage:{vt_total:10,vt_included:1,vt_omitted:9,vt_invalid:0,vt_unlinked:2}}) : previous(p,o);
+  const previous=api;window.api=async(p,o)=>p.endsWith('/preview') ? (reads.push(p),{...previewState,preview_key:'synthetic-key',system:'S',user:'U',privacy:{status:'checked',contract:previewState.privacy_contract,requires_separate_permission:true,payload_bytes:2},coverage:{vt_recorded:true,vt_total:10,vt_included:1,vt_omitted:9,vt_invalid:0,vt_unlinked:2}}) : previous(p,o);
   wireCaseReviewSection(node,'case/full<&',previewState,()=>{});
  });
  await page.locator('#preview-fixture #rv-preview').click();assert.match(await page.locator('#preview-fixture #rv-plan').innerText(),/included 1/);assert.equal(await page.locator('#preview-fixture #rv-start').isDisabled(),true,'Preview is not per-request consent');await page.locator('#preview-fixture #rv-ack').check();assert.equal(await page.locator('#preview-fixture #rv-start').isDisabled(),false,'Exact preview plus acknowledgement permits deliberate start only');
  for(const width of [1440,390]){await page.setViewportSize({width,height:1000});await page.waitForTimeout(100);assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),width+'px fit');await page.locator('#preview-fixture #rv-plan').screenshot({path:out+'/vt-preview-'+width+'.png'});await page.screenshot({path:out+'/vt-'+width+'.png',fullPage:true});await page.locator('#br-packets [data-source-kind="enrichment"]').click();await page.waitForSelector('dialog .stored-vt-source');await page.locator('dialog').screenshot({path:out+'/vt-dialog-'+width+'.png'});assert.ok(await page.locator('dialog').evaluate(d=>d.scrollWidth<=d.clientWidth));await page.keyboard.press('Escape');await page.waitForSelector('dialog',{state:'detached'});}
  assert.deepEqual(await page.evaluate(()=>writes),[]);assert.ok((await page.evaluate(()=>reads)).every(p=>!p.endsWith('/enrich/virustotal')),'Never resolve current live row');assert.deepEqual(errors,[]);fs.writeFileSync(out+'/fixture-reads.json',JSON.stringify(await page.evaluate(()=>reads),null,2));
+ if(process.env.TRACEFALL_TEST_VT_PRESENCE_DIR){
+  for(const name of ['historical','zero']){
+   const data=JSON.parse(fs.readFileSync(path.join(process.env.TRACEFALL_TEST_VT_PRESENCE_DIR,name+'.json'),'utf8'));
+   const presence=await browser.newPage({viewport:{width:1440,height:1000}});
+   await presence.setContent('<main id="ext-root"><div id="single"></div><div id="batch"></div></main>');
+   await presence.addStyleTag({path:assets+'/style.css'});
+   await presence.addScriptTag({content:names.map(extract).join('\n')+'\nfunction fmtTime(x){return x||"not recorded";}'});
+   await presence.evaluate(data=>{
+    window.api=async p=>p.includes('/packets?')?data.packets:structuredClone(data.plan);
+    document.querySelector('#single').innerHTML=renderCaseReviewSection(data.single);
+    mountBatchReview(document.querySelector('#batch'),'synthetic',{configured:false});
+   },data);
+   await presence.locator('#batch-review > summary').click();await presence.waitForSelector('#br-run-id');
+   await presence.waitForSelector('#br-packets .batch-packet');await presence.waitForSelector('#br-synthesis-result .batch-packet');
+   const expected=name==='zero'?/included 0/:/included not recorded/;
+   for(const selector of ['#single .stored-vt-coverage','#br-status .stored-vt-coverage','#br-packets .stored-vt-coverage','#br-synthesis-result .stored-vt-coverage']){
+    const nodes=presence.locator(selector);assert.ok(await nodes.count(),name+' '+selector);
+    for(const text of await nodes.allTextContents())assert.match(text,expected,name+' '+selector);
+   }
+   assert.match(await presence.locator('#br-status').innerText(),name==='zero'?/Distinct stored VT included 0/:/Distinct stored VT included not recorded/);
+   // History is typed/unmarshalled/re-marshalled by the real history API.
+   for(const p of data.history.plans){assert.equal(p.vt_recorded,name==='zero');assert.equal(p.snapshot.coverage.vt_recorded,name==='zero');}
+   await presence.screenshot({path:out+'/vt-presence-'+name+'.png',fullPage:true});await presence.close();
+  }
+  console.log('PASS real stored historical/new-zero API -> single/plan/packet/synthesis browser render + history presence');
+ }
  console.log('PASS zero-write synthetic VT context: frozen single/run/synthesis, errors/unknowns, escaping, nested source/Escape/focus, polling survival, counts, old Summary, batch controls, desktop/390px');
 }finally{await browser?.close();}})().catch(e=>{console.error(e);process.exitCode=1;});

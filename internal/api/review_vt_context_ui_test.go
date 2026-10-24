@@ -40,7 +40,9 @@ assert.match(renderCaseReviewSection({latest:{status:'ok',stale:true,sentences:[
 const oldCoverage=renderCaseReviewSection({latest:{status:'ok',coverage:{events_total:'<img src=x>',vt_total:'<img src=x>'},sentences:[]}});
 assert.ok(!oldCoverage.includes('<img'),'All coverage DTO values are escaped or treated as unknown');
 assert.ok(!oldCoverage.includes('undefined'),'Missing coverage values are not recorded');
-const missing=renderStoredVTCoverage({vt_included:0});assert.match(missing,/included 0/);assert.match(missing,/total not recorded/);
+const missing=renderStoredVTCoverage({vt_included:0});assert.match(missing,/included not recorded/);assert.match(missing,/total not recorded/);
+assert.match(renderStoredVTCoverage({vt_recorded:true,vt_included:0}),/included 0/);
+assert.match(renderStoredVTCoverage({vt_recorded:false,vt_included:0}),/included not recorded/);
 const hostile=renderStoredVTSource({status:'found',indicator:'<img>',fetched_at:'<svg>',verdicts_recorded:true,malicious:'<img>',error:'SECRET',source_event_ids:['<event>']});assert.ok(!hostile.includes('<img'));assert.ok(!hostile.includes('<svg>'));assert.ok(!hostile.includes('SECRET'));assert.match(hostile,/malicious: not recorded/);
 assert.match(renderStoredVTSource({status:'constructor'}),/Status not recorded/);
 `

@@ -187,6 +187,7 @@ func (s *Store) ReviewVTContext(ctx context.Context, caseID, runID string, event
 		return nil, cv, err
 	}
 	err = tx.Commit()
+	cv.VTRecorded = err == nil
 	return out, cv, err
 }
 

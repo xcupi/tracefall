@@ -42,6 +42,7 @@ func (b BatchBudget) validate() error {
 }
 
 type ReviewBatchPlan struct {
+	VTRecorded                bool                 `json:"vt_recorded"`
 	VTIncluded                int                  `json:"vt_included"`
 	VTOmitted                 int                  `json:"vt_omitted"`
 	Acknowledged              bool                 `json:"acknowledged"`
@@ -227,6 +228,7 @@ func (s *Service) PlanReviewBatches(caseID string, budget BatchBudget) (plan Rev
 	if err != nil {
 		return plan, err
 	}
+	plan.VTRecorded = true
 	plan.VTIncluded = len(vtIncluded)
 	plan.VTOmitted = snap.Coverage.VTTotal - plan.VTIncluded
 	if plan.VTOmitted > 0 {
