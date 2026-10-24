@@ -415,6 +415,9 @@ type Cite struct {
 // Sentence is one accepted sentence: its text with names restored (for the
 // examiner, on this server) and what it cites.
 type Sentence struct {
+	// Kind is model-supplied Review commentary metadata, not a truth verdict.
+	// Summary and historical rows omit it.
+	Kind  string `json:"kind,omitempty"`
 	Text  string `json:"text"`
 	Cites []Cite `json:"cites"`
 }
@@ -443,9 +446,19 @@ func (pr *Prepared) Validate(answer string) (Draft, error) {
 			reject("more sentences than allowed")
 			continue
 		}
+		kind := ""
 		matcher := citeLineRe
 		if pr.reviewRefs != nil {
 			matcher = reviewCiteLineRe
+			kind = "unclassified"
+			if prefix, text, explicit := strings.Cut(line, "|"); explicit {
+				kind = strings.TrimSpace(prefix)
+				if !knownReviewKind(kind) {
+					reject("unknown review claim kind")
+					continue
+				}
+				line = strings.TrimSpace(text)
+			}
 		}
 		m := matcher.FindStringSubmatch(line)
 		if m == nil {
@@ -490,7 +503,7 @@ func (pr *Prepared) Validate(answer string) (Draft, error) {
 			reject("a web address in the sentence")
 			continue
 		}
-		d.Sentences = append(d.Sentences, Sentence{Text: pr.p.Restore(body), Cites: cites})
+		d.Sentences = append(d.Sentences, Sentence{Kind: kind, Text: pr.p.Restore(body), Cites: cites})
 	}
 	if len(d.Sentences) == 0 {
 		return d, errors.New("narrative: no sentence of the answer passed validation")

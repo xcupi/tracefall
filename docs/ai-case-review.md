@@ -4,7 +4,7 @@ AI Summary and AI Case Review are **different operations** in a case's Outside s
 
 - **AI Summary** keeps its existing `/enrich/narrative` contract, selection, output and Appendix E. It summarizes selected deterministic findings and their cited events. It is not an independent review of the case.
 - **AI Case Review** makes **one bounded request** over selected existing parsed case data, including unflagged observations. It can run with zero findings when parsed events exist. Its output is optional commentary, not a new finding or evidence. It never changes deterministic findings or severity and is not inserted into Summary or the report appendix. Reports do not include this separate commentary in this phase.
-- **Optional parsed-snapshot batch review has a separate backend API** under `/enrich/case-review/batches`: see [the batch API and resource contract](ai-case-review-batches.md). It uses explicit local planning, persisted membership, approved run budgets and visible partial coverage. Dashboard integration is a separate workstream. Neither path provides exhaustive raw-image review, autonomous retrieval/tools, automatic uncertain-request resume, or the future typed analyst accept/reject workflow.
+- **Optional parsed-snapshot batch review has a separate backend API** under `/enrich/case-review/batches`: see [the batch API and resource contract](ai-case-review-batches.md). It uses explicit local planning, persisted membership, approved run budgets and visible partial coverage. Dashboard integration is a separate workstream. Neither path provides exhaustive raw-image review, autonomous retrieval/tools, automatic uncertain-request resume, or the future analyst accept/reject workflow.
 
 ## Selection and privacy contract
 
@@ -45,6 +45,8 @@ The exact hash is SHA-256 of `system + NUL + user`, not the serialized HTTP enve
 The locally computed source fingerprint includes current events, findings, correlations and active source/parse-coverage records, including omitted records, rather than only finding IDs. Changes mark stored commentary stale. The single-packet explicit preview/start preparation still materializes case data and remains **O(case size) RAM**. Status now streams the same fingerprint contract with a bounded metadata cache; first/invalidated scans remain O(case size) time but not case-sized event allocations. The separate batch backend has its own bounded-page preparation and explicit disk/time caps; that does not relabel the old single-packet preparation as streaming.
 
 ## Output and UI
+
+Accepted Review items now carry an optional model-supplied `kind`: `observation`, `possible_conflict`, `hypothesis`, `gap`, `next_check`, or conservative `unclassified`. New prompts use `kind | text [E1]`; legacy plain responses remain explicitly unclassified. Unknown explicit kinds are rejected, never guessed from keywords. Summary output/prompt/report contracts are unchanged. See [Review claim types](ai-review-claim-types.md) for exact JSON, synthesis and backward-compatibility semantics.
 
 Accepted lines require actual packet references, issued entity tokens and permitted number runs; unsupported references/unknown tokens/numbers/schema are rejected, not repaired. An anchored sentence can still be semantically false. **Validation does not prove truth, contradiction, completeness or model accuracy.** The model is asked to label hypotheses/investigative leads and to avoid unsupported order/identity claims; these semantic requirements still need examiner review.
 

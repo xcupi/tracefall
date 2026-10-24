@@ -21,7 +21,7 @@ func PrepareReviewSynthesis(in ReviewInput, commentary []Sentence) (*ReviewPrepa
 		for a, c := range p.reviewRefs {
 			aliases[c] = a
 		}
-		p.System += "\nSYNTHESIS: reconcile only the validated commentary with the primary excerpts. Commentary is not evidence. Preserve disagreements, uncertainty and original primary citations. Do not infer agreement or identity from prior packet-local pseudonyms. Do not claim global, raw-image, or whole-case coverage."
+		p.System += "\nSYNTHESIS: compare only the validated commentary with the primary excerpts. Commentary is not evidence. Preserve each item's kind, disagreements, uncertainty and original primary citations. Never promote a hypothesis or possible_conflict into an established observation; unclassified is an abstention, not an observation. Do not automatically reconcile conflicting detector claims. Do not infer agreement or identity from prior packet-local pseudonyms. Do not claim global, raw-image, or whole-case coverage."
 		p.User += "\nVALIDATED COMMENTARY (not primary evidence):\n"
 		omitted := 0
 		var omittedIndices []int
@@ -47,7 +47,12 @@ func PrepareReviewSynthesis(in ReviewInput, commentary []Sentence) (*ReviewPrepa
 			}
 			sort.Strings(refs)
 			text := p.text(sentence.Text, DefaultLimits.MaxSentenceRunes)
-			line := fmt.Sprintf("commentary_only | %s [%s]\n", text, strings.Join(refs, ", "))
+			kind := sentence.Kind
+			if !knownReviewKind(kind) {
+				// Historical/malformed metadata must not become prompt prose.
+				kind = "unclassified"
+			}
+			line := fmt.Sprintf("commentary_only | kind=%s | %s [%s]\n", kind, text, strings.Join(refs, ", "))
 			// Reserve room for catalog/omission counts after preparation.
 			if len(p.System)+len(p.User)+len(line) > ReviewMaxBytes-4096 {
 				omitted++

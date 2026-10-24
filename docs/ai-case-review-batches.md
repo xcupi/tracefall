@@ -188,7 +188,15 @@ attempt. `sent_at` is empty before admission, not proof of provider delivery.
 receipts have status `checked` and requires_separate_permission true. Unprepared
 metadata has empty/zero fields, **not** a checked privacy receipt.
 
-`sentences` contains `{text,cites:[{kind,id}]}`. Cite kinds are `event`, `finding`,
+`sentences` contains `{kind?,text,cites:[{kind,id}]}`. The optional sentence kind
+is Review commentary metadata: `observation`, `possible_conflict`, `hypothesis`,
+`gap`, `next_check`, or `unclassified`. It is distinct from both packet kinds and
+citation kinds. New untyped responses are explicitly unclassified; historical
+rows without it remain unchanged. Synthesis carries canonical kinds with original
+primary references and normalizes unknown/absent metadata to unclassified; it
+must not present commentary as evidence or promote hypotheses/conflicts to
+established observations. See [claim types](ai-review-claim-types.md) for the
+plain-text protocol and semantic limits. Cite kinds are `event`, `finding`,
 `correlation`, `coverage`. Coverage ID `selection` means the packet coverage;
 other coverage IDs refer to original source metadata. Missing same-case primary
 references are never repaired into a different case. `reasons` maps validation
