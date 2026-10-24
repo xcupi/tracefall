@@ -254,7 +254,57 @@ Execution passed: narrative 34.146s, store 24.246s, API 263.644s. Separate
 VirusTotal-client/egress package tests also passed with the live-key variable
 empty. Build/vet/diff checks are recorded in the delivery summary.
 
-Integrated embedded-UI,
-actual CLI/browser restart, full-suite and independent review are separate
-parent verification gates. No live provider/evidence analytical-quality claim is
-made by these synthetic checks.
+## Integrated parent verification
+
+On application revision `2616c27e979c4e9c8da3cd4735b4cf800e978b4d`, the parent
+rebuilt the ordinary `cmd/tracefall` executable with its embedded assets and
+reran the following checks. This is synthetic workflow verification, not live
+provider/evidence analytical quality.
+
+* Executed the separate synthetic fixture helper, then used the real browser UI
+  for preview, explicit acknowledgement, single Review, batch planning/start and
+  synthesis. No API response or web-asset route overrides were used. The fake
+  OpenAI-compatible server used the host's non-loopback interface, exercising
+  external-model policy/acknowledgement gates rather than the local exception.
+* All 6 stored opinions accompanied 6 original event excerpts; 3 actual fake
+  model requests (single, initial batch, synthesis) matched persisted system/user
+  text and independently calculated SHA-256(system + NUL + user). Forbidden VT
+  canaries, raw hashes, case identity and fixture host/user were absent from
+  captured model input. No configured VT key was needed; both provider-ledger
+  usage counters stayed zero.
+* Refused `none`, `hashes` and missing-ack single starts with no model request.
+  Planning and read-only citation inspection added no requests. Primary distinct
+  event coverage stayed 6, not 12 after adding the 6 external opinions.
+* Stopped the actual scratch CLI, replaced the live opinion via the ordinary
+  store Upsert (same ID; malicious verdict count 2 to 7 and a later lookup time),
+  then restarted it. Both historical single/run citation DTOs remained identical
+  to their frozen earlier values; the single Review became stale. Its payload
+  and accepted commentary persisted, and no model request was resent.
+* The batch correctly remained `partial`, despite all 6 primary events and
+  synthesis succeeding: the synthetic source lacks the recorded
+  parse-coverage contract. Unrecorded source coverage was not promoted to
+  completeness. No failed/unreviewed packets were hidden by that classification.
+* Desktop/390px embedded UI and frozen-citation dialogs were exercised and
+  screenshots inspected. The existing typed batch/actual single Review harness
+  also passed: 181 synthetic imported events, four initial requests plus
+  synthesis, exact payload hashes, distinct coverage, budget partials, privacy,
+  cancellation, history and focused UI states. All owned ports were closed.
+* The parent reran the historical/new-zero presence and serialized single
+  outcome regression selectors with `-race`; API passed in 17.659s. The earlier
+  integrated scoped race run passed narrative 27.991s, store 23.976s and API
+  232.509s before the outcome/presence fixes; these are separate runs, not a
+  claim that that earlier run exercised later code.
+
+Reproducible scratch probes (ephemeral, not production endpoints):
+`/home/udalah/.hermes/cache/scratch/vt-parent-probe.py`,
+`vt-parent-actual-ui.cjs`, and `tf-review-vt-mutate/main.go` in that scratch root.
+Final artifacts: `vt-parent-integrated-5/{verified.json,requests.jsonl,preview.json,
+single-status.json,packets.json,browser/}`; legacy regression artifacts:
+`vt-parent-legacy-batches-2/`. `tests/review-vt-context.browser.cjs` additionally
+supports read-only embedded inspection with explicit case/review/run/member IDs.
+
+The independent source review first found missing historical VT presence and a
+single-review cancellation admission race; both have regression fixes in
+`2616c27`. Independent re-review and the final full suite remain separate gates.
+No real case was transmitted or reanalysed, and the operator's server was not
+restarted by these checks.
