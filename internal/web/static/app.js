@@ -5711,6 +5711,171 @@ function wireExternalCitations(root, caseId) {
   });
 }
 
+// Parsed-case batches keep their own DOM and selected identity. Poll only that
+// frozen run and one small metadata page, never reconstruct the whole case.
+function mountBatchReview(card, caseId, provider) {
+  const root = document.createElement("details");
+  root.id = "batch-review";
+  root.dataset.caseId = caseId;
+  root.className = "external-details batch-review";
+  const ranges = {requests:[8,1,8],input_bytes:[1280000,4096,1280000],output_bytes:[131072,1024,131072],per_request_seconds:[120,1,120],overall_seconds:[900,1,900],concurrency:[1,1,1],retries:[0,0,0]};
+  root.innerHTML = `<summary>Parsed-case batch review · optional bounded snapshot</summary>
+    <p>Build a local plan, inspect its packets, then deliberately start. No navigation, planning, inspection or polling calls a model. Provider login and privacy receipts are not case egress permission or run consent.</p>
+    <p class="small">Frozen parsed snapshot, not raw-image completeness or forensic correctness. Successful means structurally validated commentary, not that every included event was semantically examined. Repeated context is not extra coverage. GET does not certify freshness; Start rechecks source, provider and policy. No automatic retry or resume after restart.</p>
+    <form id="br-budget"><fieldset><legend>Hard-bounded run budget</legend><div class="batch-budget">${Object.entries(ranges).map(([key,[value,min,max]])=>`<label>${key.replaceAll("_"," ")} (${min}–${max}) <input id="br-${key}" name="${key}" type="number" min="${min}" max="${max}" step="1" value="${value}" required ${min===max ? "readonly" : ""}></label>`).join("")}</div>
+    <label><input type="checkbox" name="synthesis" id="br-synthesis" checked> Request separate synthesis (reserves one request and 160000 input bytes)</label></fieldset>
+    <p class="small">Sequential concurrency 1; retries 0. Budgets limit local admission, retained output and deadlines, not provider billing or computation. Output can be truncated or withheld without successful coverage. No dollar/token estimate. Each local plan retains sensitive frozen records and consumes disk; backups are not securely erased.</p>
+    <button id="br-build" class="secondary" type="submit">Build batch plan</button></form>
+    <p id="br-message" role="status" class="small"></p>
+    <details id="br-history"><summary>Prior-run history (10 per page)</summary><div id="br-history-list"></div><button id="br-history-prev" class="secondary" type="button">Previous runs</button> <button id="br-history-next" class="secondary" type="button">Next runs</button></details>
+    <div id="br-plan"></div>`;
+  card.appendChild(root);
+  const base = `/cases/${caseId}/enrich/case-review/batches`;
+  let plan = null, context = structuredClone(provider), busy = false, loaded = false, generation = 0, timer, after = -1, historyOffset = 0;
+  const q = s => root.querySelector(s);
+  const live = () => root.isConnected;
+  const message = (text, bad=false) => { if(live()){q("#br-message").textContent=text; q("#br-message").classList.toggle("field-error-box",bad);} };
+  const binding = p => JSON.stringify([p?.id,p?.plan_key,p?.provider_binding,p?.privacy_contract,p?.egress_level,p?.destination,p?.model,p?.local]);
+  const allowed = () => plan && context.configured && (plan.local || (context.allowed && context.egress_level === "pseudonymized")) && context.destination === plan.destination && context.model === plan.model && context.local === plan.local && context.privacy_contract === plan.privacy_contract && context.egress_level === plan.egress_level;
+  const invalidate = () => { const ack=q("#br-ack"); if(ack)ack.checked=false; sync(); };
+  const sync = () => {
+    q("#br-build").disabled=busy;
+    const start=q("#br-start"), stop=q("#br-stop");
+    if(start)start.disabled=busy || plan.state!=="planned" || !allowed() || (!plan.local && !q("#br-ack")?.checked);
+    if(stop)stop.disabled=busy || plan.state!=="running";
+  };
+  root.updateProvider = next => {
+    if(JSON.stringify([context.destination,context.model,context.local,context.egress_level,context.privacy_contract,context.configured,context.allowed]) !== JSON.stringify([next.destination,next.model,next.local,next.egress_level,next.privacy_contract,next.configured,next.allowed])) invalidate();
+    context=structuredClone(next); sync(); schedule();
+  };
+  const showPlan = p => {
+    const changed = binding(plan)!==binding(p);
+    plan=p;
+    if(changed) {
+      generation++; after=-1;
+      q("#br-plan").innerHTML=`<h4>Inspected run <span id="br-run-id" class="mono"></span></h4><div id="br-status" role="status"></div>
+        <p class="small">Provider terms and data controls apply. <a href="#/settings/integrations">Provider setup</a> is independent of this case's policy. ${p.local ? "Local provider; no external acknowledgement required." : "External provider: current pseudonymized case permission and deliberate approval of this exact plan are required."}</p>
+        ${p.local ? "" : '<label><input id="br-ack" type="checkbox"> I inspected this plan, its sanitized packets and provider terms and authorize this run only.</label>'}
+        <p><button id="br-start" type="button">Start batch review</button> <button id="br-stop" type="button" class="secondary">Stop batch review</button> <button id="br-refresh" type="button" class="secondary">Refresh inspected run</button></p>
+        <h4>Initial packets (10 per page)</h4><div id="br-packets"></div><p><button id="br-packets-first" class="secondary" type="button">First packets</button> <button id="br-packets-next" class="secondary" type="button">Next packets</button></p><h4>Separate synthesis — model prose, not new evidence</h4><div id="br-synthesis-result"></div>`;
+      q("#br-run-id").textContent=p.id;
+      q("#br-ack")?.addEventListener("change",sync);
+      q("#br-refresh").onclick=()=>refresh().catch(e=>message(e.message,true));
+      q("#br-start").onclick=()=>operation(async()=>{
+        const result=await api(`${base}/${encodeURIComponent(plan.id)}/start`,{method:"POST",body:JSON.stringify({plan_key:plan.plan_key,acknowledge:!!q("#br-ack")?.checked})});
+        if(!live())return; invalidate(); showPlan(result); await packets();
+      });
+      q("#br-stop").onclick=()=>operation(async()=>{await api(`${base}/${encodeURIComponent(plan.id)}/cancel`,{method:"POST",body:"{}"});if(live()){invalidate();await refresh();}});
+      q("#br-packets-first").onclick=()=>{after=-1;packets().catch(e=>message(e.message,true));};
+      q("#br-packets-next").onclick=()=>{after=Number(q("#br-packets-next").dataset.after);packets().catch(e=>message(e.message,true));};
+    }
+    const n=v=>esc(v??"not recorded"), c=p.snapshot?.coverage||{}, progress=p.progress||{};
+    q("#br-status").innerHTML=`<p><strong>${n(p.state)}</strong> · ${n(p.reason||"No recorded reason")} ${p.input_incomplete ? " · Incomplete input / partial work" : ""}</p>
+      <p class="small">${n(p.destination)} · ${n(p.model)} · privacy contract ${n(p.privacy_contract)}. Frozen ${n(p.created_at)}; GET is not a freshness check.</p>
+      <p class="small">Frozen budget: requests ${n(p.budget?.requests)} · input bytes ${n(p.budget?.input_bytes)} · output bytes ${n(p.budget?.output_bytes)} · per-request seconds ${n(p.budget?.per_request_seconds)} · overall seconds ${n(p.budget?.overall_seconds)} · concurrency ${n(p.budget?.concurrency)} · retries ${n(p.budget?.retries)}. Editing the form above affects only the next Build plan, not this inspected run.</p>
+      <p>Eligible ${n(p.eligible_events)} / planned primary events ${n(p.planned_events)}. Total initial batches ${n(p.total_batches)} / enabled ${n(p.enabled_batches)}.</p>
+      <p>Successful ${n(progress.succeeded)} · failed ${n(progress.failed)} · cancelled ${n(progress.cancelled)} · interrupted ${n(progress.interrupted)} · unreviewed ${n(progress.unreviewed)} · ready (subset of unreviewed) ${n(progress.ready)} · sending ${n(progress.sending)}.</p>
+      <p>Primary reviewed events ${n(progress.primary_reviewed_events)} · distinct successful events ${n(progress.distinct_successful_events)}. Neither count proves semantic examination; synthesis adds no event coverage.</p>
+      <p class="small">Requests attempted ${n(progress.requests_attempted)} · input bytes admitted ${n(progress.input_bytes_admitted)} · output bytes retained ${n(progress.output_bytes_retained)}. Attempts are durable admission, not proof of delivery or billing.</p>
+      <p class="small">Whole catalog: ${n(c.sources_imported)} imported, ${n(c.sources_failed)} failed, ${n(c.sources_unsupported)} unsupported, ${n(c.sources_not_imported)} not imported. Parse gaps ${n(p.snapshot?.source_parse_gaps)}; parse coverage not recorded ${n(c.parse_coverage_not_recorded)}; undated ${n(c.undated_total)}. These totals remain applicable when sampled source details are omitted.</p>
+      <p class="small">Findings included ${n(p.findings_included)} / omitted ${n(p.findings_omitted)}; correlations included ${n(p.correlations_included)} / omitted ${n(p.correlations_omitted)}.</p>
+      <p class="small">Synthesis ${n(p.synthesis_state||"not prepared")} · omitted sentences ${n(p.synthesis_omitted_sentences)} · unsynthesized successful batches ${n(p.unsynthesized_batches)}. Reservation: ${p.budget?.synthesis ? "one request + 160000 input bytes" : "disabled"}; output/time remaining and a newly prepared privacy namespace can still prevent synthesis. Omitted, failed or budget-exhausted work is not whole-case completion.</p>`;
+    sync(); schedule();
+  };
+  const operation = async fn => {if(busy)return;busy=true;sync();message("Working locally or awaiting explicit operation…");try{await fn();if(live())message("Operation completed; inspect recorded state below.");}catch(e){if(live()){invalidate();message(e.message||String(e),true);}}finally{busy=false;if(live())sync();}};
+  const schedule = () => {clearTimeout(timer);if(plan?.state==="running")timer=setTimeout(()=>{if(live())refresh().catch(e=>{message(e.message,true);schedule();});},2000);};
+  const refresh = async () => {
+    if(!plan)return;
+    const id=plan.id, epoch=generation;
+    const p=await api(`${base}/${encodeURIComponent(id)}`);
+    if(!live()||generation!==epoch||plan.id!==id)return;
+    showPlan(p); await packets();
+  };
+  // Packet rendering and exact payload inspection are independent of whole-case loads.
+  const packets = async () => {
+    const id=plan.id, epoch=generation, cursor=after;
+    const page=await api(`${base}/${encodeURIComponent(id)}/packets?after=${cursor}&limit=10`);
+    if(!live()||epoch!==generation||plan.id!==id||cursor!==after)return;
+    const paint = (container, items) => {
+      // Remove the empty-state text when a prepared packet becomes available.
+      for(const node of [...container.childNodes])if(node.nodeType===Node.TEXT_NODE)node.remove();
+      const wanted=new Set(items.map(p=>String(p.seq)));
+      for(const node of [...container.children])if(!wanted.has(node.dataset.seq))node.remove();
+      for(const packet of items){
+        let node=[...container.children].find(n=>n.dataset.seq===String(packet.seq));
+        if(!node){
+          node=document.createElement("details");node.className="batch-packet";node.dataset.seq=packet.seq;
+          node.innerHTML=`<summary></summary><p class="batch-packet-identity small"></p><div class="batch-packet-status small"></div>
+            <button class="secondary batch-payload-button" type="button">Inspect exact sanitized payload / hash</button><pre class="batch-payload small" tabindex="0" hidden></pre>
+            <details class="batch-coverage"><summary>This packet's coverage and primary / context references</summary><pre class="small"></pre><div class="batch-originals source-links"></div></details>
+            <div class="batch-commentary"></div><details class="batch-raw"><summary>Untrusted raw provider answer — text only, not evidence</summary><pre class="small"></pre></details>`;
+          container.appendChild(node);
+          node.querySelector(".batch-payload-button").onclick=async()=>{
+            const button=node.querySelector(".batch-payload-button");button.disabled=true;
+            try{
+              const data=await api(`${base}/${encodeURIComponent(id)}/packets/${packet.seq}/payload`);
+              if(!live()||epoch!==generation||!node.isConnected)return;
+              const box=node.querySelector(".batch-payload");
+              box.textContent=`${data.attempted ? "Attempted: durable admission, not delivery proof" : "Frozen pre-send: NOT a transmission receipt"}\nState: ${data.state}\nPrivacy receipt: ${JSON.stringify(data.privacy)}\nA privacy check is not separate permission.\nDestination: ${data.payload.destination} · Model: ${data.payload.model}\nSHA-256 (system + NUL + user): ${data.payload.sha256}\n\nSYSTEM\n${data.payload.system}\n\nUSER\n${data.payload.user}`;
+              box.hidden=false;
+            }catch(e){message("Payload unavailable: "+(e.message||String(e)),true);}finally{if(node.isConnected)button.disabled=false;}
+          };
+        }
+        if(node.dataset.record===JSON.stringify(packet))continue;
+        node.dataset.record=JSON.stringify(packet);
+        node.querySelector("summary").textContent=`Packet ${packet.seq} · ${packet.kind} · ${packet.state}`;
+        node.querySelector(".batch-packet-identity").textContent=`Namespace: ${packet.namespace||"not prepared"}. Aliases and pseudonyms are local to this namespace, never merge equal-looking tokens. Offset ${packet.offset}; primary events ${packet.primary_events}; event/context references ${(packet.event_ids||[]).length}.`;
+        node.querySelector(".batch-packet-status").textContent=`Privacy receipt: ${packet.privacy?.status||"not recorded"} · ${packet.privacy?.contract||"not recorded"}; ${packet.privacy?.payload_bytes||0} payload bytes. Not consent or anonymity. ${packet.error||""} Rejected lines ${packet.rejected||0}; rejection reasons ${JSON.stringify(packet.reasons||{})}. ${packet.actual_model ? "Reported model: "+packet.actual_model : ""} ${packet.prompt_tokens||packet.completion_tokens ? "Reported tokens in "+(packet.prompt_tokens??"unknown")+", out "+(packet.completion_tokens??"unknown") : "Usage not reported."} ${packet.omitted_source_batches?.length ? "Synthesis omitted source batches: "+packet.omitted_source_batches.join(", ") : ""}`;
+        node.querySelector(".batch-coverage pre").textContent=JSON.stringify(packet.coverage,null,2);
+        node.querySelector(".batch-originals").innerHTML=`<p>Original same-case references: ${packet.kind==="event" ? "event membership is primary" : "events are supporting context, not additional primary event coverage"}.</p>`+
+          ["event","finding","correlation"].map(kind=>(packet[kind+"_ids"]||[]).map(ref=>externalCitation(kind,ref)).join(" ")).join(" ");
+        wireExternalCitations(node.querySelector(".batch-originals"),caseId);
+        const commentary=node.querySelector(".batch-commentary");
+        commentary.innerHTML=`<p><strong>Validated commentary — not evidence; anchoring is not truth.</strong></p>`+(packet.sentences?.length ? `<ol>${packet.sentences.map(s=>`<li>${esc(s.text)} ${(s.cites||[]).map(c=>c.kind==="coverage"&&c.id==="selection" ? '<button type="button" class="source-link batch-selection">coverage selection (this packet)</button>' : externalCitation(c.kind,c.id)).join(" ")}</li>`).join("")}</ol>` : `<p>No usable commentary recorded for this packet (${esc(packet.state)}).</p>`);
+        commentary.querySelectorAll(".batch-selection").forEach(b=>{
+          // Deliberately bypass legacy latest-review coverage resolution.
+          b.classList.remove("source-link");b.onclick=()=>{
+            const d=document.createElement("dialog");d.className="external-source-dialog";d.setAttribute("aria-label","Batch packet coverage");
+            d.innerHTML='<h2>This packet’s frozen coverage</h2><p class="batch-coverage-id"></p><pre></pre><button type="button" class="secondary">Close</button>';
+            d.querySelector(".batch-coverage-id").textContent=`Run ${id}; packet ${packet.seq}; namespace ${packet.namespace}. Not raw-image coverage; do not sum repeated context.`;
+            d.querySelector("pre").textContent=JSON.stringify(packet.coverage,null,2);d.querySelector("button").onclick=()=>d.close();d.addEventListener("close",()=>{d.remove();if(b.isConnected)b.focus({preventScroll:true});},{once:true});document.body.appendChild(d);d.showModal();
+          };
+        });
+        wireExternalCitations(commentary,caseId);
+        node.querySelector(".batch-raw pre").textContent=packet.raw_answer||"No raw provider answer recorded.";
+      }
+    };
+    paint(q("#br-packets"),page.packets.filter(p=>p.kind!=="synthesis"));
+    const synthesis=page.packets.filter(p=>p.kind==="synthesis");
+    if(!synthesis.length && plan.synthesis_state && !["disabled","omitted"].includes(plan.synthesis_state)){
+      const s=await api(`${base}/${encodeURIComponent(id)}/packets?after=${plan.total_batches-1}&limit=1`);
+      if(!live()||epoch!==generation||cursor!==after)return;
+      synthesis.push(...s.packets.filter(p=>p.kind==="synthesis"));
+    }
+    paint(q("#br-synthesis-result"),synthesis);
+    if(!synthesis.length)q("#br-synthesis-result").textContent=`Synthesis ${plan.synthesis_state||"not prepared"}. No new evidence; only retained validated original citations may be used.`;
+    q("#br-packets-next").disabled=page.packets.filter(p=>p.kind!=="synthesis").length<10;
+    q("#br-packets-next").dataset.after=page.packets.at(-1)?.seq ?? cursor;
+  };
+  const history = async () => {
+    const offset=historyOffset;
+    const h=await api(`${base}/history?offset=${offset}&limit=10`);
+    if(!live()||offset!==historyOffset)return;
+    const list=q("#br-history-list"); list.innerHTML=`<p class="small">${h.total} retained plans; inspecting a history entry never resumes it.</p>`;
+    for(const p of h.plans){const b=document.createElement("button");b.type="button";b.className="secondary";b.textContent=`${p.id} · ${p.state} · ${p.created_at}`;b.onclick=()=>operation(async()=>{invalidate();showPlan(p);await packets();});list.appendChild(b);}
+    q("#br-history-prev").disabled=offset===0;q("#br-history-next").disabled=!h.has_more;
+  };
+  q("#br-history").ontoggle=()=>{if(q("#br-history").open)history().catch(e=>message(e.message,true));};
+  q("#br-history-prev").onclick=()=>{historyOffset=Math.max(0,historyOffset-10);history().catch(e=>message(e.message,true));};
+  q("#br-history-next").onclick=()=>{historyOffset+=10;history().catch(e=>message(e.message,true));};
+  q("#br-budget").onsubmit=e=>{e.preventDefault();operation(async()=>{
+    const budget={}; for(const key of Object.keys(ranges))budget[key]=Number(q(`[name="${key}"]`).value);budget.synthesis=q("#br-synthesis").checked;
+    invalidate();const p=await api(`${base}/plan`,{method:"POST",body:JSON.stringify({budget})});if(!live())return;showPlan(p);await packets();message("Plan built locally; zero model requests. Inspect and approve before starting.");
+  });};
+  root.addEventListener("toggle",()=>{if(root.open&&!loaded){loaded=true;operation(async()=>{const p=await api(base);if(!live())return;if(p.id){showPlan(p);await packets();}else message("No plan yet. Build locally; nothing will be sent.");});}});
+  return root;
+}
+
 function renderCaseReviewSection(rv) {
   const running = rv.run?.state === "running";
   const l = rv.latest;
@@ -5718,7 +5883,7 @@ function renderCaseReviewSection(rv) {
   let why = !rv.configured ? "Set up a provider in Settings → Integrations." : !rv.allowed ? "Choose pseudonymized egress for an external destination." : rv.events === 0 ? "No parsed events are available." : running ? "A bounded review is running." : "Inspect a preview before starting.";
   return `<h3>AI Case Review <span class="external-optional">Optional · bounded</span></h3>
     <p class="small"><strong>Optional AI commentary, not a finding or evidence.</strong> A single request reviews selected parsed findings, correlations, supporting events, context and unflagged observations. It never changes findings or severity.</p>
-    <p class="small muted">Not exhaustive case analysis; no raw-image coverage. Full all-case batch review is unavailable in this phase. Unknown or tied times do not establish order; unknown hosts are acquisition-scoped. Validation checks references, entities and numbers, not semantic truth.</p>
+    <p class="small muted">Not exhaustive case analysis; no raw-image coverage. Use the separate parsed-case batch section below to plan multiple bounded requests. Unknown or tied times do not establish order; unknown hosts are acquisition-scoped. Validation checks references, entities and numbers, not semantic truth.</p>
     <p class="small">Destination: ${rv.configured ? `${esc(rv.destination)} · ${esc(rv.model)} · ${rv.local ? "local model; nothing leaves this machine" : "another machine"}` : `<a href="#/settings/integrations">Settings → Integrations</a>`}.</p>
     <p id="rv-caps" class="small"><strong>1. Evidence selection — request caps:</strong> 25 findings · 25 correlations · 120 parsed events · 60 source coverage records · 160000 payload bytes. One request, always limited in scope.</p>
     <details id="rv-selection" class="external-details"><summary>How evidence is selected</summary>
@@ -5970,7 +6135,10 @@ async function renderExternalTab(content, caseId, refresh) {
   // A refresh while a run is going keeps the page as it is until the new one
   // is ready: no "Loading..." flash, and the scroll position stays.
   const previousRoot = document.getElementById("ext-root");
-  if (!refresh) content.innerHTML = `<p class="empty">Loading...</p>`;
+  const previousBatch = previousRoot?.querySelector("#batch-review");
+  const batchRoot = previousBatch?.dataset.caseId === String(caseId) ? previousBatch : null;
+  const initialPlaceholder = refresh ? null : document.createElement("p");
+  if (initialPlaceholder) { initialPlaceholder.className="empty"; initialPlaceholder.textContent="Loading..."; content.replaceChildren(initialPlaceholder); }
   const [eg, vt, nv, rv] = await Promise.all([
     api(`/cases/${caseId}/egress`),
     api(`/cases/${caseId}/enrich/virustotal`),
@@ -5978,7 +6146,8 @@ async function renderExternalTab(content, caseId, refresh) {
     api(`/cases/${caseId}/enrich/case-review`),
   ]);
   // A response from a page we left must not repaint the next tab.
-  if (!content.isConnected || (refresh && document.getElementById("ext-root") !== previousRoot)) return;
+  if (!content.isConnected || (refresh ? document.getElementById("ext-root") !== previousRoot : content.firstElementChild !== initialPlaceholder)) return;
+  const batchFocus = batchRoot?.contains(document.activeElement) ? document.activeElement : null;
   const consentKey = JSON.stringify([caseId, eg.level, nv.destination, nv.model, nv.local, rv.destination, rv.model, rv.local, rv.egress_level, rv.privacy_contract]);
   const state = refresh ? captureExternalState(previousRoot, consentKey) : null;
   const st = vt.status;
@@ -6138,6 +6307,12 @@ async function renderExternalTab(content, caseId, refresh) {
   wireCaseReviewSection(content, caseId, rv, say);
   wireExternalCitations(root, caseId);
   restoreExternalState(root, state);
+  const batchCard = root.querySelector("#external-review");
+  if (batchRoot) {
+    batchCard.appendChild(batchRoot);
+    batchRoot.updateProvider(rv);
+    if(batchFocus && !batchFocus.disabled)batchFocus.focus({preventScroll:true});
+  } else mountBatchReview(batchCard, caseId, rv);
 
   // While a run is going, refresh. Stop as soon as the analyst leaves the
   // page: the root this render created is no longer the one on screen.
