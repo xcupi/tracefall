@@ -5831,7 +5831,7 @@ function mountBatchReview(card, caseId, provider) {
           ["event","finding","correlation"].map(kind=>(packet[kind+"_ids"]||[]).map(ref=>externalCitation(kind,ref)).join(" ")).join(" ");
         wireExternalCitations(node.querySelector(".batch-originals"),caseId);
         const commentary=node.querySelector(".batch-commentary");
-        commentary.innerHTML=`<p><strong>Validated commentary — not evidence; anchoring is not truth.</strong></p>`+(packet.sentences?.length ? `<ol>${packet.sentences.map(s=>`<li>${esc(s.text)} ${(s.cites||[]).map(c=>c.kind==="coverage"&&c.id==="selection" ? '<button type="button" class="source-link batch-selection">coverage selection (this packet)</button>' : externalCitation(c.kind,c.id)).join(" ")}</li>`).join("")}</ol>` : `<p>No usable commentary recorded for this packet (${esc(packet.state)}).</p>`);
+        commentary.innerHTML=`<p><strong>Validated commentary — not evidence; anchoring is not truth.</strong></p>`+(packet.sentences?.length ? renderReviewClaimGroups(packet.sentences, (kind,id)=>kind==="coverage"&&id==="selection" ? '<button type="button" class="source-link batch-selection">coverage selection (this packet)</button>' : externalCitation(kind,id)) : `<p>No usable commentary recorded for this packet (${esc(packet.state)}).</p>`);
         commentary.querySelectorAll(".batch-selection").forEach(b=>{
           // Deliberately bypass legacy latest-review coverage resolution.
           b.classList.remove("source-link");b.onclick=()=>{
@@ -5876,6 +5876,29 @@ function mountBatchReview(card, caseId, provider) {
   return root;
 }
 
+// Case Review types are supplied by the backend, never inferred from prose.
+// Summary deliberately does not use this renderer.
+function renderReviewClaimGroups(sentences, citation = externalCitation) {
+  const types = [
+    ["observation", "Observations", "Check the cited records; an AI label is not a verified observation."],
+    ["possible_conflict", "Possible conflicts", "Tentative conflict; compare the cited records before drawing a conclusion."],
+    ["hypothesis", "Hypotheses", "Unconfirmed explanations, not detector findings."],
+    ["gap", "Gaps", "Missing or limited information is not proof of absence."],
+    ["next_check", "Suggested checks", "Recommendations only; no action has been executed."],
+    ["unclassified", "Unclassified / not type-checked", "Missing or unknown type, including older results. Not retrospectively classified."]
+  ];
+  const groups = new Map(types.map(([kind]) => [kind, []]));
+  for (const sentence of sentences || []) {
+    const kind = groups.has(sentence.kind) ? sentence.kind : "unclassified";
+    groups.get(kind).push(sentence);
+  }
+  return `<div class="review-claim-groups"><p class="small review-claim-legend"><strong>AI-labelled categories — not truth-validated.</strong> Observations need citation checks; possible conflicts are tentative; hypotheses are unconfirmed; gaps are not proof of absence; suggested checks are recommendations, not executed actions. Labels do not change findings, severity or evidence.</p>` + types.map(([kind, label, caution]) => {
+    const items = groups.get(kind);
+    if (!items.length) return "";
+    return `<section class="review-claim-group" data-claim-kind="${kind}"><h5>${label} <span class="review-claim-count">(${items.length})</span></h5><p class="small muted">${caution}</p><ol>${items.map(s => `<li>${esc(s.text)} <span class="source-links">${(s.cites || []).map(c => citation(c.kind, c.id)).join(" ")}</span></li>`).join("")}</ol></section>`;
+  }).join("") + `</div>`;
+}
+
 function renderCaseReviewSection(rv) {
   const running = rv.run?.state === "running";
   const l = rv.latest;
@@ -5906,7 +5929,7 @@ function renderCaseReviewSection(rv) {
       <p class="small">Privacy preparation at this attempt: ${l.privacy ? `${esc(l.privacy.status)} · ${esc(l.privacy.contract)} · ${esc(l.privacy.payload_bytes)} payload bytes. A local check, not proof of anonymity.` : "not recorded (older result)."}</p>
       ${coverage(l.coverage)}
       <p class="small">${esc(l.created_at)} · ${esc(l.destination)} · ${esc(l.model)}${l.prompt_tokens || l.completion_tokens ? ` · ${l.prompt_tokens} tokens in, ${l.completion_tokens} out` : ""}</p>
-      ${l.status === "ok" ? `<ol>${(l.sentences || []).map(s => `<li>${esc(s.text)} <span class="source-links">${(s.cites || []).map(c => externalCitation(c.kind,c.id)).join(" ")}</span></li>`).join("")}</ol>` : `<p>No usable commentary: ${esc(l.error || "request failed or interrupted")}. The request payload is recorded separately.</p>`}
+      ${l.status === "ok" ? renderReviewClaimGroups(l.sentences) : `<p>No usable commentary: ${esc(l.error || "request failed or interrupted")}. The request payload is recorded separately.</p>`}
       <p class="small">${l.rejected || 0} line(s) rejected. Anchoring validation does not prove truth. Read every claim against its references.</p>
       <button type="button" class="secondary" id="rv-payload">Show exactly what was sent</button>
       <pre id="rv-payload-box" data-hash="${esc(l.payload_sha256)}" hidden tabindex="0" aria-label="Exact bounded review payload" class="small" style="white-space:pre-wrap;overflow-wrap:anywhere;max-height:24em;overflow:auto"></pre></div>` : `<p class="empty">No bounded case review has been requested.</p>`}`;

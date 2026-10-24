@@ -17,8 +17,12 @@ const close=s=>new Promise(r=>s.close(r));
    if(req.method==='GET'){res.end('TRACEFALL_SYNTHETIC_BATCH_UI_PROVIDER');return;}
    let body='';for await(const b of req)body+=b;
    const json=JSON.parse(body);requests.push(json);fs.writeFileSync(out+'/requests.json',JSON.stringify(requests,null,2));
+   // Explicit opt-in for the integrated typed backend; default retains old-backend compatibility.
+   const answer=process.env.TRACEFALL_TEST_TYPED_CLAIMS==='1'
+    ? 'observation | Synthetic observation is recorded. [E1]\npossible_conflict | Synthetic possible conflict remains tentative. [E1]\nhypothesis | Synthetic hypothesis remains unconfirmed. [E1]\ngap | This is a bounded partial selection. [K1]\nnext_check | Check the cited record. [E1]'
+    : 'Synthetic observation is recorded. [E1]\nThis is a bounded partial selection. [K1]';
    await sleep(delay);
-   res.setHeader('Content-Type','application/json');res.end(JSON.stringify({model:'synthetic-batch-ui-test',choices:[{message:{role:'assistant',content:'Synthetic observation is recorded. [E1]\nThis is a bounded partial selection. [K1]'},finish_reason:'stop'}]}));
+   res.setHeader('Content-Type','application/json');res.end(JSON.stringify({model:'synthetic-batch-ui-test',choices:[{message:{role:'assistant',content:answer},finish_reason:'stop'}]}));
   });
   providerPort=await listen(provider);
   const reserve=net.createServer();port=await listen(reserve);await close(reserve);
@@ -75,6 +79,15 @@ const close=s=>new Promise(r=>s.close(r));
   assert.equal(done.progress.requests_attempted,5);assert.equal(requests.length,5,'Four initial calls plus one synthesis');
   assert.equal(done.synthesis_state,'succeeded');
   const packets=(await api(b+'/'+id+'/packets?after=-1&limit=10')).packets;
+  if(process.env.TRACEFALL_TEST_TYPED_CLAIMS==='1'){
+   const kinds=['observation','possible_conflict','hypothesis','gap','next_check'];
+   for(const packet of packets){
+    assert.deepEqual([...new Set(packet.sentences.map(s=>s.kind))].sort(),[...kinds].sort(),'Actual synthetic-provider output must survive typed backend validation');
+    const container=packet.kind==='synthesis'?'#br-synthesis-result':'#br-packets';
+    for(const kind of kinds)assert.equal(await page.locator(`${container} .batch-packet[data-seq="${packet.seq}"] [data-claim-kind="${kind}"] li`).count(),1);
+   }
+   console.log('PASS integrated typed synthetic provider → backend → grouped packet/synthesis UI');
+  }
   for(const packet of packets){
     const exact=await api(b+'/'+id+'/packets/'+packet.seq+'/payload');
     const req=requests.find(r=>r.messages[0].content===exact.payload.system && r.messages[1].content===exact.payload.user);assert.ok(req,'Exact persisted request must match captured synthetic provider bytes');

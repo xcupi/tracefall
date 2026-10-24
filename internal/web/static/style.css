@@ -2700,6 +2700,15 @@ body.deletion-open { overflow: hidden; }
 .batch-packet > summary { cursor: pointer; font-weight: 600; }
 .batch-payload { background: var(--bg); padding: var(--space-3); }
 .batch-commentary li { margin: var(--space-2) 0; }
+/* Claim types are neutral model labels, never detector severity indicators. */
+.review-claim-groups { min-width: 0; overflow-wrap: anywhere; }
+.review-claim-legend { border: 1px solid var(--border); border-radius: var(--radius-md); padding: var(--space-3); }
+.review-claim-group { border-left: 2px solid var(--border); padding-left: var(--space-3); margin: var(--space-4) 0; min-width: 0; }
+.review-claim-group h5 { margin: 0 0 var(--space-2); font-size: .95rem; color: var(--text); }
+.review-claim-count { font-weight: 400; color: var(--text-dim); }
+.review-claim-group ol { padding-left: 1.5em; }
+.review-claim-group li { margin: var(--space-2) 0; line-height: 1.6; }
+.review-claim-group .source-links { display: inline; }
 #br-history-list { display: flex; flex-direction: column; align-items: flex-start; gap: var(--space-2); }
 #br-status { border-left: 3px solid var(--accent); padding-left: var(--space-3); }
 
