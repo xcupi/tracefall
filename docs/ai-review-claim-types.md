@@ -104,3 +104,46 @@ A provider may mislabel or overstate a claim; examiner review is still necessary
 Synthetic tests prove protocol/workflow preservation, not real-model analytical
 quality. No live provider, user case, VirusTotal, stored-VT-input feature, analyst
 acceptance workflow or report appendix is authorized or implemented here.
+
+## UI and integrated verification
+
+The same grouped renderer is used for single-packet Review, initial batch
+packets and synthesis. Each nonempty category shows its count, category-specific
+caution and original actionable citations. Missing/unknown stored metadata is
+shown under **Unclassified / not type-checked**, not retrospectively inferred
+from text. Styling is neutral, not detector severity. Legacy Summary remains a
+flat list and does not use the Review grouping renderer.
+
+The parent reran integrated review/summary/UI/store race checks after merging:
+API 135.196s, narrative 12.164s, store 30.523s, all PASS. Build, vet and JS syntax
+checks also passed. The built `bin/tracefall-claim-types` was exercised with:
+
+```sh
+TRACEFALL_TEST_TYPED_CLAIMS=1 PLAYWRIGHT_MODULE=/path/to/playwright \
+ node tests/case-review-batches.browser.cjs /absolute/tracefall-claim-types "$SCRATCH/claims-typed"
+PLAYWRIGHT_MODULE=/path/to/playwright \
+ node tests/review-claim-types.browser.cjs "$SCRATCH/claims-fixtures"
+```
+
+Without an asset override, the browser harness compared the binary-served assets
+with integrated source and exercised a real synthetic provider: 181 imported
+events, four initial requests plus one synthesis, five grouped kinds in packet
+and synthesis output, exact captured payload/hash readback, partial budget,
+cancel, external no-send controls and existing state-preservation checks.
+The typed mode also started an actual single Review through its UI, checked five
+persisted categories and exact wire payload/hash, and opened the hypothesis
+citation's original event. Desktop/390px screenshots were inspected. Separate
+zero-write UI fixtures covered missing/unknown legacy kinds, no prefix inference,
+HTML escaping, unchanged Summary and packet-specific coverage references. The
+untyped provider mode also passed as a compatibility control. The original
+single-event drilldown locator was made explicit with `.first()` because typed
+output legitimately contains several citations to the same event.
+
+A separate integrated-binary HTTP restart probe used a synthetic hypothesis-only
+provider. All five successful packet/synthesis items still had kind `hypothesis`
+after an actual restart. An in-flight later run became interrupted, and provider
+calls remained six before/after restart with no automatic resend. Exact payloads
+and original primary coverage remained inspectable; deletion and request-source
+checks passed; disposable ports were verified closed. These checks prove
+transport/UI/persistence behavior, not model accuracy. Full-suite and independent
+source review are separate final gates.
