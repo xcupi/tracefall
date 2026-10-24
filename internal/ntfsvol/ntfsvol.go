@@ -99,6 +99,8 @@ type Info struct {
 	RecordSize     int
 	VolumeBytes    int64
 	MFTRecords     int64
+	// Warnings describe observed format limitations, not acquisition findings.
+	Warnings []string
 }
 
 // Volume is an opened NTFS volume.
@@ -115,6 +117,7 @@ type Volume struct {
 	label       string
 	version     string
 	mftRecordsN int64
+	warnings    []string
 }
 
 // Open parses the boot sector and bootstraps the $MFT.
@@ -123,7 +126,10 @@ func Open(r io.ReaderAt, size int64) (*Volume, error) {
 	if n, _ := r.ReadAt(b, 0); n < 512 {
 		return nil, fmt.Errorf("%w: the volume is smaller than a boot sector", ErrNotNTFS)
 	}
-	if string(b[3:11]) != "NTFS    " || b[510] != 0x55 || b[511] != 0xAA {
+	// Some file-system capture volumes omit both DOS boot fields. Recognize
+	// only the all-zero pair, not a damaged or partial nonzero signature.
+	missingBootFields := b[0] == 0 && b[1] == 0 && b[2] == 0 && b[510] == 0 && b[511] == 0
+	if string(b[3:11]) != "NTFS    " || (!missingBootFields && (b[510] != 0x55 || b[511] != 0xAA)) {
 		return nil, ErrNotNTFS
 	}
 	bps := int(binary.LittleEndian.Uint16(b[11:]))
@@ -168,6 +174,19 @@ func Open(r io.ReaderAt, size int64) (*Volume, error) {
 	}
 	if err := v.bootstrapMFT(); err != nil {
 		return nil, err
+	}
+	if missingBootFields {
+		// The relaxed identification requires a live, self-parented root with
+		// valid record fixups and attributes, in addition to the MFT bootstrap.
+		root, err := v.loadFile(rootRecord)
+		if err != nil {
+			return nil, corrupt("capture-volume root record: %v", err)
+		}
+		s, ok := describe(rootRecord, root)
+		if !ok || !s.inUse || !s.dir || s.name != "." || s.parent != rootRecord || s.parentSeq != s.seq || root.rec.baseRef != 0 {
+			return nil, corrupt("capture-volume root is not a live self-parented directory")
+		}
+		v.warnings = []string{"DOS boot jump and 0x55AA signature are absent; the NTFS geometry, MFT bootstrap and root record validated. Read-only filesystem access only; these bytes do not establish bootability, acquisition scope or cause. No boot-sector repair was performed."}
 	}
 	v.readVolumeRecord()
 	return v, nil
@@ -235,7 +254,7 @@ func (v *Volume) readVolumeRecord() {
 // Info returns the volume's geometry and identity.
 func (v *Volume) Info() Info {
 	return Info{Label: v.label, Version: v.version, Serial: v.serial, BytesPerSector: v.bps, ClusterSize: v.cluster,
-		RecordSize: v.recordSize, VolumeBytes: v.volBytes, MFTRecords: v.mftRecordsN}
+		RecordSize: v.recordSize, VolumeBytes: v.volBytes, MFTRecords: v.mftRecordsN, Warnings: append([]string(nil), v.warnings...)}
 }
 
 // ---- records and attributes

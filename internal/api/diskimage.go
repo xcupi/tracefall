@@ -275,6 +275,9 @@ func openDiskImage(paths []string) (image.Image, partition.Table, []openedVolume
 				notes = append(notes, fmt.Sprintf("partition %d: the NTFS volume could not be opened (%v)", p.Index, err))
 				continue
 			}
+			for _, warning := range v.Info().Warnings {
+				notes = append(notes, fmt.Sprintf("partition %d (NTFS): %s", p.Index, warning))
+			}
 			vols = append(vols, openedVolume{part: p, vol: v.AsVolume()})
 		case "fat", "fat32", "exfat":
 			v, err := fat.Open(p.Reader(img), p.SizeBytes)
