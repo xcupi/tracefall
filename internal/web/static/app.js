@@ -5648,9 +5648,36 @@ const STATUS_LABELS = {
 // ---------------------------------------------------------------------
 // The summary section of the Outside services tab. Plain strings in, HTML out;
 // every value that came from the server or from a model is escaped.
-function externalCitation(kind, id) {
+function externalCitation(kind, id, context = {}) {
+  if (kind === "enrichment") {
+    if (!id || (!!context.reviewID === !!context.runID)) return `<span class="small">Stored VirusTotal source unavailable: frozen snapshot context not recorded.</span>`;
+    const binding = context.reviewID ? `data-review-id="${esc(context.reviewID)}"` : `data-run-id="${esc(context.runID)}"`;
+    return `<button type="button" class="source-link" data-source-kind="enrichment" data-source-id="${esc(id)}" ${binding} title="Open stored VirusTotal source: ${esc(id)}">stored VT ${esc(String(id).slice(0,12))}</button>`;
+  }
   if (!["finding", "event", "correlation", "coverage"].includes(kind)) return `<span class="small">Unsupported source reference: ${esc(kind)} ${esc(id)}</span>`;
   return `<button type="button" class="source-link" data-source-kind="${kind}" data-source-id="${esc(id)}" title="Open ${kind}: ${esc(id)}">${kind} ${esc(String(id).slice(0, 12))}</button>`;
+}
+
+// Stored VT is secondary context, never primary event/success coverage.
+function renderStoredVTCoverage(c) {
+  const n = key => Number.isSafeInteger(c?.[key]) && c[key] >= 0 ? String(c[key]) : "not recorded";
+  return `<p class="small stored-vt-coverage"><strong>Stored VirusTotal context:</strong> total ${n("vt_total")} · included ${n("vt_included")} · omitted ${n("vt_omitted")} · invalid ${n("vt_invalid")} · unlinked ${n("vt_unlinked")}. Packet context is separate from primary event coverage; do not sum repeated VT rows across packets. Older results without metadata are not recorded, not zero.</p>`;
+}
+
+function renderStoredVTSource(data) {
+  const d = data && typeof data === "object" ? data : {};
+  const n = key => Number.isSafeInteger(d[key]) && d[key] >= 0 ? String(d[key]) : "not recorded";
+  const statuses = {found:"Found at lookup time",not_found:"Not known to VirusTotal at lookup time",error:"Stored lookup error; no usable opinion",unusable:"Stored result unusable; no usable opinion"};
+  // Fixed labels only: no provider errors, JSON, names or free-text labels.
+  const counts = ["malicious","suspicious","harmless","undetected","timeout","failure","type_unsupported","engines"];
+  const events = Array.isArray(d.source_event_ids) ? d.source_event_ids.filter(id => typeof id === "string" && id) : [];
+  return `<div class="stored-vt-source"><p><strong>Outside opinion at lookup time — not primary evidence.</strong> Stored results only; no VirusTotal call and no VT key required to inspect. Zero detections and not_found are not proof of safety.</p>
+    <p>${Object.hasOwn(statuses,d.status) ? statuses[d.status] : "Status not recorded; no usable opinion"}. Recorded time: ${esc(typeof d.fetched_at === "string" && d.fetched_at.trim() ? d.fetched_at : "time not recorded")}.</p>
+    <p>Frozen review/run snapshot. This is not the current live VT tab; later lookups never replace this citation.</p>
+    <p>Local hash (${esc(d.indicator_type || "not recorded")}): <span class="mono">${esc(d.indicator || "not recorded")}</span></p>
+    ${d.verdicts_recorded === true && d.status === "found" ? `<p>Recorded verdict counts: ${counts.map(key=>`${key}: ${n(key)}`).join(" · ")}</p>` : "<p>Verdicts not recorded; no counts inferred.</p>"}
+    <h3>Verified same-snapshot source events</h3><div class="source-links">${events.map(id=>externalCitation("event",id)).join(" ") || "No verified source event references recorded."}</div>
+    <p class="small">Lookup age and case-source freshness are different: a source change can stale a review even when a VT lookup is recent; an older lookup is still only the opinion recorded at that time. No age threshold or safety conclusion is inferred.</p></div>`;
 }
 
 // The dialog lives outside the refreshed status cards. Reading a source must
@@ -5670,12 +5697,28 @@ function wireExternalCitations(root, caseId) {
       dialog.addEventListener("close", () => {
         dialog.remove();
         // A status refresh may have replaced the original citation button.
-        const target = button.isConnected ? button : Array.from(document.querySelectorAll("#ext-root .source-link")).find((el) => el.dataset.sourceKind === kind && el.dataset.sourceId === id);
+        const target = button.isConnected ? button : Array.from(document.querySelectorAll("#ext-root .source-link")).find((el) => el.dataset.sourceKind === kind && el.dataset.sourceId === id && el.dataset.reviewId === button.dataset.reviewId && el.dataset.runId === button.dataset.runId);
         if (target) target.focus({ preventScroll: true });
       }, { once: true });
       dialog.showModal();
       const body = dialog.querySelector(".external-source-body");
-      if (kind === "event") {
+      if (kind === "enrichment") {
+        // Resolve only the frozen snapshot named by the rendered citation.
+        const reviewID = button.dataset.reviewId, runID = button.dataset.runId;
+        if (!id || (!!reviewID === !!runID)) {
+          body.textContent = "Frozen stored VirusTotal source unavailable: snapshot context not recorded.";
+          return;
+        }
+        try {
+          const snapshot = runID ? `batches/${encodeURIComponent(runID)}` : encodeURIComponent(reviewID);
+          const data = await api(`/cases/${encodeURIComponent(caseId)}/enrich/case-review/${snapshot}/virustotal/${encodeURIComponent(id)}`);
+          if (!dialog.isConnected) return;
+          body.innerHTML = `<p class="small source-id">Case ${esc(caseId)} · frozen ${runID ? "batch run" : "single review"} ${esc(runID || reviewID)}</p>` + renderStoredVTSource(data);
+          wireExternalCitations(body, caseId);
+        } catch (_) {
+          if (dialog.isConnected) body.textContent = "Frozen stored VirusTotal source unavailable. It may be missing from this snapshot or unusable. No current lookup was substituted; inspection makes no provider request.";
+        }
+      } else if (kind === "event") {
         await loadProvenanceInto(caseId, id, body);
       } else if (kind === "correlation" || kind === "coverage") {
         try {
@@ -5721,6 +5764,7 @@ function mountBatchReview(card, caseId, provider) {
   const ranges = {requests:[8,1,8],input_bytes:[1280000,4096,1280000],output_bytes:[131072,1024,131072],per_request_seconds:[120,1,120],overall_seconds:[900,1,900],concurrency:[1,1,1],retries:[0,0,0]};
   root.innerHTML = `<summary>Parsed-case batch review · optional bounded snapshot</summary>
     <p>Build a local plan, inspect its packets, then deliberately start. No navigation, planning, inspection or polling calls a model. Provider login and privacy receipts are not case egress permission or run consent.</p>
+    <p class="small">Stored VirusTotal results may be included as secondary context in packets and synthesis. Stored results only: opening, planning and review never call VirusTotal; no VT key required. Hash-only permission for VT does not authorize LLM transmission. Current model egress permission and per-run approval still apply. VT is an outside opinion at lookup time, not primary evidence; zero detections and not_found are not proof of safety. Plans are frozen; later lookups do not replace old citations.</p>
     <p class="small">Frozen parsed snapshot, not raw-image completeness or forensic correctness. Successful means structurally validated commentary, not that every included event was semantically examined. Repeated context is not extra coverage. GET does not certify freshness; Start rechecks source, provider and policy. No automatic retry or resume after restart.</p>
     <form id="br-budget"><fieldset><legend>Hard-bounded run budget</legend><div class="batch-budget">${Object.entries(ranges).map(([key,[value,min,max]])=>`<label>${key.replaceAll("_"," ")} (${min}–${max}) <input id="br-${key}" name="${key}" type="number" min="${min}" max="${max}" step="1" value="${value}" required ${min===max ? "readonly" : ""}></label>`).join("")}</div>
     <label><input type="checkbox" name="synthesis" id="br-synthesis" checked> Request separate synthesis (reserves one request and 160000 input bytes)</label></fieldset>
@@ -5779,6 +5823,7 @@ function mountBatchReview(card, caseId, provider) {
       <p class="small">Requests attempted ${n(progress.requests_attempted)} · input bytes admitted ${n(progress.input_bytes_admitted)} · output bytes retained ${n(progress.output_bytes_retained)}. Attempts are durable admission, not proof of delivery or billing.</p>
       <p class="small">Whole catalog: ${n(c.sources_imported)} imported, ${n(c.sources_failed)} failed, ${n(c.sources_unsupported)} unsupported, ${n(c.sources_not_imported)} not imported. Parse gaps ${n(p.snapshot?.source_parse_gaps)}; parse coverage not recorded ${n(c.parse_coverage_not_recorded)}; undated ${n(c.undated_total)}. These totals remain applicable when sampled source details are omitted.</p>
       <p class="small">Findings included ${n(p.findings_included)} / omitted ${n(p.findings_omitted)}; correlations included ${n(p.correlations_included)} / omitted ${n(p.correlations_omitted)}.</p>
+      <p class="small">Distinct stored VT included ${n(p.vt_included)} / omitted ${n(p.vt_omitted)} across this plan. Not primary or successful event coverage.</p>${renderStoredVTCoverage({...c,vt_included:p.vt_included,vt_omitted:p.vt_omitted})}
       <p class="small">Synthesis ${n(p.synthesis_state||"not prepared")} · omitted sentences ${n(p.synthesis_omitted_sentences)} · unsynthesized successful batches ${n(p.unsynthesized_batches)}. Reservation: ${p.budget?.synthesis ? "one request + 160000 input bytes" : "disabled"}; output/time remaining and a newly prepared privacy namespace can still prevent synthesis. Omitted, failed or budget-exhausted work is not whole-case completion.</p>`;
     sync(); schedule();
   };
@@ -5826,12 +5871,15 @@ function mountBatchReview(card, caseId, provider) {
         node.querySelector("summary").textContent=`Packet ${packet.seq} · ${packet.kind} · ${packet.state}`;
         node.querySelector(".batch-packet-identity").textContent=`Namespace: ${packet.namespace||"not prepared"}. Aliases and pseudonyms are local to this namespace, never merge equal-looking tokens. Offset ${packet.offset}; primary events ${packet.primary_events}; event/context references ${(packet.event_ids||[]).length}.`;
         node.querySelector(".batch-packet-status").textContent=`Privacy receipt: ${packet.privacy?.status||"not recorded"} · ${packet.privacy?.contract||"not recorded"}; ${packet.privacy?.payload_bytes||0} payload bytes. Not consent or anonymity. ${packet.error||""} Rejected lines ${packet.rejected||0}; rejection reasons ${JSON.stringify(packet.reasons||{})}. ${packet.actual_model ? "Reported model: "+packet.actual_model : ""} ${packet.prompt_tokens||packet.completion_tokens ? "Reported tokens in "+(packet.prompt_tokens??"unknown")+", out "+(packet.completion_tokens??"unknown") : "Usage not reported."} ${packet.omitted_source_batches?.length ? "Synthesis omitted source batches: "+packet.omitted_source_batches.join(", ") : ""}`;
-        node.querySelector(".batch-coverage pre").textContent=JSON.stringify(packet.coverage,null,2);
+        node.querySelector(".batch-coverage pre").textContent=JSON.stringify(packet.coverage ?? "not recorded",null,2);
+        let vtCoverage=node.querySelector(".batch-vt-coverage");
+        if(!vtCoverage){vtCoverage=document.createElement("div");vtCoverage.className="batch-vt-coverage";node.querySelector(".batch-coverage pre").before(vtCoverage);}
+        vtCoverage.innerHTML=renderStoredVTCoverage(packet.coverage);
         node.querySelector(".batch-originals").innerHTML=`<p>Original same-case references: ${packet.kind==="event" ? "event membership is primary" : "events are supporting context, not additional primary event coverage"}.</p>`+
           ["event","finding","correlation"].map(kind=>(packet[kind+"_ids"]||[]).map(ref=>externalCitation(kind,ref)).join(" ")).join(" ");
         wireExternalCitations(node.querySelector(".batch-originals"),caseId);
         const commentary=node.querySelector(".batch-commentary");
-        commentary.innerHTML=`<p><strong>Validated commentary — not evidence; anchoring is not truth.</strong></p>`+(packet.sentences?.length ? renderReviewClaimGroups(packet.sentences, (kind,id)=>kind==="coverage"&&id==="selection" ? '<button type="button" class="source-link batch-selection">coverage selection (this packet)</button>' : externalCitation(kind,id)) : `<p>No usable commentary recorded for this packet (${esc(packet.state)}).</p>`);
+        commentary.innerHTML=`<p><strong>Validated commentary — not evidence; anchoring is not truth.</strong></p>`+(packet.sentences?.length ? renderReviewClaimGroups(packet.sentences, (kind,ref)=>kind==="coverage"&&ref==="selection" ? '<button type="button" class="source-link batch-selection">coverage selection (this packet)</button>' : externalCitation(kind,ref,{runID:id})) : `<p>No usable commentary recorded for this packet (${esc(packet.state)}).</p>`);
         commentary.querySelectorAll(".batch-selection").forEach(b=>{
           // Deliberately bypass legacy latest-review coverage resolution.
           b.classList.remove("source-link");b.onclick=()=>{
@@ -5902,11 +5950,12 @@ function renderReviewClaimGroups(sentences, citation = externalCitation) {
 function renderCaseReviewSection(rv) {
   const running = rv.run?.state === "running";
   const l = rv.latest;
-  const coverage = (c) => c ? `<p class="small review-coverage"><strong>Bounded partial selection:</strong> ${c.events_included} of ${c.events_total} parsed events included; ${c.events_omitted} omitted. ${c.findings_included} of ${c.findings_total} findings (${c.findings_omitted} omitted); ${c.correlations_included} of ${c.correlations_total} correlations (${c.correlations_omitted} omitted); ${c.sources_included} of ${c.sources_total} source coverage records (${c.sources_omitted} omitted). ${c.undated_total} undated events in the case. Missing supporting references: ${c.missing_supporting_refs}; available supporting events omitted: ${c.supporting_refs_omitted}; unflagged observations included: ${c.unflagged_included}; source parse coverage not recorded: ${c.parse_coverage_not_recorded}. Global source statuses: ${c.sources_imported ?? "not recorded"} imported, ${c.sources_failed ?? "not recorded"} parse failures, ${c.sources_unsupported ?? "not recorded"} unsupported, ${c.sources_not_imported ?? "not recorded"} supported but not imported. Command lines omitted by the body guard: ${c.command_lines_omitted ?? "not recorded"}.</p>` : "";
+  const coverage = (c) => { const n = key => Number.isSafeInteger(c?.[key]) && c[key] >= 0 ? String(c[key]) : "not recorded"; return c ? `<p class="small review-coverage"><strong>Bounded partial selection:</strong> ${n("events_included")} of ${n("events_total")} parsed events included; ${n("events_omitted")} omitted. ${n("findings_included")} of ${n("findings_total")} findings (${n("findings_omitted")} omitted); ${n("correlations_included")} of ${n("correlations_total")} correlations (${n("correlations_omitted")} omitted); ${n("sources_included")} of ${n("sources_total")} source coverage records (${n("sources_omitted")} omitted). ${n("undated_total")} undated events in the case. Missing supporting references: ${n("missing_supporting_refs")}; available supporting events omitted: ${n("supporting_refs_omitted")}; unflagged observations included: ${n("unflagged_included")}; source parse coverage not recorded: ${n("parse_coverage_not_recorded")}. Global source statuses: ${n("sources_imported")} imported, ${n("sources_failed")} parse failures, ${n("sources_unsupported")} unsupported, ${n("sources_not_imported")} supported but not imported. Command lines omitted by the body guard: ${n("command_lines_omitted")}.</p>` : ""; };
   let why = !rv.configured ? "Set up a provider in Settings → Integrations." : !rv.allowed ? "Choose pseudonymized egress for an external destination." : rv.events === 0 ? "No parsed events are available." : running ? "A bounded review is running." : "Inspect a preview before starting.";
   return `<h3>AI Case Review <span class="external-optional">Optional · bounded</span></h3>
     <p class="small"><strong>Optional AI commentary, not a finding or evidence.</strong> A single request reviews selected parsed findings, correlations, supporting events, context and unflagged observations. It never changes findings or severity.</p>
     <p class="small muted">Not exhaustive case analysis; no raw-image coverage. Use the separate parsed-case batch section below to plan multiple bounded requests. Unknown or tied times do not establish order; unknown hosts are acquisition-scoped. Validation checks references, entities and numbers, not semantic truth.</p>
+    <p class="small">Stored VirusTotal context is optional secondary context. Stored results only: opening, previewing, planning and review never call VirusTotal; no VT key required. VT is an outside opinion at lookup time, not primary evidence. Zero detections and not_found are not proof of safety. Lookup age differs from case-source freshness; no age threshold is inferred. Frozen citations never substitute a later live lookup.</p>
     <p class="small">Destination: ${rv.configured ? `${esc(rv.destination)} · ${esc(rv.model)} · ${rv.local ? "local model; nothing leaves this machine" : "another machine"}` : `<a href="#/settings/integrations">Settings → Integrations</a>`}.</p>
     <p id="rv-caps" class="small"><strong>1. Evidence selection — request caps:</strong> 25 findings · 25 correlations · 120 parsed events · 60 source coverage records · 160000 payload bytes. One request, always limited in scope.</p>
     <details id="rv-selection" class="external-details"><summary>How evidence is selected</summary>
@@ -5914,6 +5963,7 @@ function renderCaseReviewSection(rv) {
     </details>
     <p id="rv-privacy-status" class="small" role="status"><strong>2. Privacy preparation:</strong> Not checked for a current preview. A privacy check is not permission to transmit.</p>
     <details id="rv-privacy" class="external-details"><summary>Privacy contract and limitations</summary>
+      <p class="small">Stored VT numeric verdicts, status, lookup time and linked references can be part of the sanitized model context; hashes remain tokenized for the model. Raw hashes in the source dialog are local only. No raw provider JSON, error text or free-text labels. Hash-only VT permission does not authorize LLM transmission: retain model egress permission, this exact preview and per-request acknowledgement (or per-run approval for batches).</p>
       <p class="small">Only allowlisted normalized fields and numeric parse coverage are used. Names, addresses and hashes become stable tokens; secrets are removed. Bounded normalized command lines are secret-redacted; recognizable SQL/cookie bodies are omitted and counted. Original partial/local time readings stay labelled, never treated as UTC. No raw file bodies, SQL statements, cookies, notes, case names, evidence names, server paths or raw parser errors. URL userinfo, query strings and fragments are removed before tokenization. Recognized request bodies and private-key blocks are excluded. These are pattern-based protections, not a guarantee that arbitrary text contains no sensitive information. Pseudonymized does not mean anonymous. Missing parse coverage means not recorded, not complete.</p>
     </details>
     <p id="rv-permission" class="small"><strong>3. Transmission permission:</strong> Provider login is not consent. ${!rv.configured ? "No provider is active." : rv.local ? "Local destination; explicitly starting is still required. No external acknowledgement is needed." : rv.allowed ? "Case policy permits pseudonymized facts, but each external request still requires the current preview and your acknowledgement." : "Case policy blocks external case facts. A successful privacy check cannot override it."} Choosing a policy or inspecting a preview never starts a request. Revocation cancels an in-flight external review where possible; bytes already delivered cannot be recalled.</p>
@@ -5925,11 +5975,11 @@ function renderCaseReviewSection(rv) {
     <div id="rv-plan" hidden></div><pre id="rv-preview-box" hidden tabindex="0" aria-label="Pre-send bounded review payload" class="small" style="white-space:pre-wrap;overflow-wrap:anywhere;max-height:24em;overflow:auto"></pre>
     ${rv.run ? `<p class="small">Last bounded request: <strong>${esc(rv.run.state)}</strong> ${esc(rv.run.reason || "")}</p>` : ""}
     ${l ? `<div class="review-commentary"><p><strong>Optional AI commentary — not evidence or a new finding.</strong></p>
-      ${l.stale ? `<p class="field-error-box">Stale: parsed events, correlations, findings or source coverage changed since this request.</p>` : ""}
+      ${l.stale ? `<p class="field-error-box">Stale: relevant parsed events, correlations, findings, source coverage or stored VirusTotal context changed since this request. This does not measure the age or freshness of the outside opinion.</p>` : ""}
       <p class="small">Privacy preparation at this attempt: ${l.privacy ? `${esc(l.privacy.status)} · ${esc(l.privacy.contract)} · ${esc(l.privacy.payload_bytes)} payload bytes. A local check, not proof of anonymity.` : "not recorded (older result)."}</p>
-      ${coverage(l.coverage)}
+      ${coverage(l.coverage)}${renderStoredVTCoverage(l.coverage)}
       <p class="small">${esc(l.created_at)} · ${esc(l.destination)} · ${esc(l.model)}${l.prompt_tokens || l.completion_tokens ? ` · ${l.prompt_tokens} tokens in, ${l.completion_tokens} out` : ""}</p>
-      ${l.status === "ok" ? renderReviewClaimGroups(l.sentences) : `<p>No usable commentary: ${esc(l.error || "request failed or interrupted")}. The request payload is recorded separately.</p>`}
+      ${l.status === "ok" ? renderReviewClaimGroups(l.sentences,(kind,id)=>externalCitation(kind,id,{reviewID:l.id})) : `<p>No usable commentary: ${esc(l.error || "request failed or interrupted")}. The request payload is recorded separately.</p>`}
       <p class="small">${l.rejected || 0} line(s) rejected. Anchoring validation does not prove truth. Read every claim against its references.</p>
       <button type="button" class="secondary" id="rv-payload">Show exactly what was sent</button>
       <pre id="rv-payload-box" data-hash="${esc(l.payload_sha256)}" hidden tabindex="0" aria-label="Exact bounded review payload" class="small" style="white-space:pre-wrap;overflow-wrap:anywhere;max-height:24em;overflow:auto"></pre></div>` : `<p class="empty">No bounded case review has been requested.</p>`}`;
@@ -5964,7 +6014,7 @@ function wireCaseReviewSection(content, caseId, rv, say) {
       card.dataset.fingerprint = p.source_fingerprint;
       const box = card.querySelector("#rv-preview-box");
       box.textContent = `Destination: ${p.destination} · Model: ${p.model}\nPayload SHA-256: ${p.sha256}\n\n${p.system}\n\n${p.user}`; box.hidden = false;
-      const plan = card.querySelector("#rv-plan"); plan.textContent = "Actual selection and coverage (not exhaustive): " + JSON.stringify(p.coverage); plan.hidden = false;
+      const plan = card.querySelector("#rv-plan"); plan.innerHTML = '<p>Actual selection and coverage (not exhaustive); stored VT only, no lookup or model call on preview.</p>' + renderStoredVTCoverage(p.coverage) + '<pre class="small"></pre>'; plan.querySelector("pre").textContent = JSON.stringify(p.coverage ?? "not recorded"); plan.hidden = false;
       if (ack) ack.checked = false;
       card.querySelector("#rv-why").textContent = "Preview built locally; nothing sent. Starting recomputes and refuses a changed payload.";
       sync();

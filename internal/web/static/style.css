@@ -2695,7 +2695,7 @@ body.deletion-open { overflow: hidden; }
 .batch-budget label { display: flex; flex-direction: column; gap: var(--space-1); font-size: .85rem; }
 .batch-budget input { width: 100%; min-width: 0; box-sizing: border-box; }
 .batch-review button { white-space: normal; overflow-wrap: anywhere; max-width: 100%; margin: var(--space-1); }
-.batch-review pre, .external-source-dialog > pre { white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; max-height: 24em; overflow: auto; min-width: 0; max-width: 100%; }
+.batch-review pre, #rv-plan pre, .external-source-dialog > pre { white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; max-height: 24em; overflow: auto; min-width: 0; max-width: 100%; }
 .batch-packet { border: 1px solid var(--border); border-radius: var(--radius-md); padding: var(--space-3); margin: var(--space-3) 0; min-width: 0; }
 .batch-packet > summary { cursor: pointer; font-weight: 600; }
 .batch-payload { background: var(--bg); padding: var(--space-3); }

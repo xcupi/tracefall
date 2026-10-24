@@ -12,7 +12,7 @@ function extract(name){const start=source.indexOf('function '+name+'(');assert.o
  const page=await browser.newPage({viewport:{width:1440,height:1000}});const errors=[];page.on('pageerror',e=>errors.push(e.message));
  await page.setContent('<main><div id="single"></div></main>');
  await page.addStyleTag({path:path.resolve(__dirname,'../internal/web/static/style.css')});
- const names=['esc','externalCitation','renderCaseReviewSection'];
+ const names=['esc','externalCitation','renderStoredVTCoverage','renderCaseReviewSection'];
  if(source.includes('function renderReviewClaimGroups('))names.push('renderReviewClaimGroups');
  await page.addScriptTag({content:names.map(extract).join('\n')});
  await page.evaluate(()=>{
