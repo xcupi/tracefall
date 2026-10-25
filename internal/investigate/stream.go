@@ -35,11 +35,20 @@ func NeedsExtra(eventType string) bool { return narrativeTypes[eventType] }
 
 // member is one event of a group, kept for ordering, bounds and the narrative.
 type member struct {
-	ts   time.Time
-	id   string
-	host string
-	typ  string
-	ev   *model.Event // set for narrative types only
+	ts                               time.Time
+	id, host, typ                    string
+	user, coll, sourceFile, artifact string
+	ev                               *model.Event // set for narrative types only
+}
+
+func newMember(e model.Event) member {
+	m := member{ts: e.Timestamp, id: e.ID, host: e.Host, typ: e.EventType,
+		user: e.User, coll: e.CollectionID, sourceFile: e.SourceFileID, artifact: e.ArtifactType}
+	if narrativeTypes[e.EventType] {
+		ev := e
+		m.ev = &ev
+	}
+	return m
 }
 
 // seqItem is one step of a group's chronological sequence, as the narrative
@@ -67,25 +76,25 @@ func newGroupAcc() *groupAcc {
 	}
 }
 
-func (a *groupAcc) add(e model.Event) {
-	m := member{ts: e.Timestamp, id: e.ID, host: e.Host, typ: e.EventType}
-	if narrativeTypes[e.EventType] {
-		ev := e
-		m.ev = &ev
-	}
+func (a *groupAcc) add(m member) {
 	a.members = append(a.members, m)
-	a.hosts[e.Host] = true
-	a.users[e.User] = true
-	a.colls[e.CollectionID] = true
-	a.sfs[e.SourceFileID] = true
-	a.artifacts[e.ArtifactType] = true
+	a.hosts[m.host] = true
+	a.users[m.user] = true
+	a.colls[m.coll] = true
+	a.sfs[m.sourceFile] = true
+	a.artifacts[m.artifact] = true
 }
 
-// finish orders the members by timestamp, then id, and derives the sequence,
-// the process names and the bounds. It must run once, after every event.
+// finish orders the members -- dated ones by timestamp, then id, followed by
+// the undated ones by id -- and derives the sequence, the process names and
+// the bounds. It must run once, after every event.
 func (a *groupAcc) finish() {
 	sort.SliceStable(a.members, func(i, j int) bool {
-		if !a.members[i].ts.Equal(a.members[j].ts) {
+		di, dj := isDated(a.members[i].ts), isDated(a.members[j].ts)
+		if di != dj {
+			return di
+		}
+		if di && !a.members[i].ts.Equal(a.members[j].ts) {
 			return a.members[i].ts.Before(a.members[j].ts)
 		}
 		return a.members[i].id < a.members[j].id
@@ -106,20 +115,32 @@ func (a *groupAcc) finish() {
 	}
 }
 
-// bounds returns the first and last timestamps, zero for an empty group.
+// bounds returns the first and last recorded timestamps. Events with no
+// recorded time are not part of a window; a group with none dated has the
+// zero time for both.
 func (a *groupAcc) bounds() (time.Time, time.Time) {
-	if len(a.members) == 0 {
-		return time.Time{}, time.Time{}
+	var first, last time.Time
+	for _, m := range a.members {
+		if !isDated(m.ts) {
+			continue
+		}
+		if first.IsZero() {
+			first = m.ts
+		}
+		last = m.ts
 	}
-	return a.members[0].ts, a.members[len(a.members)-1].ts
+	return first, last
 }
 
-// primaryHost is the host of the group's first event, empty for no events.
+// primaryHost is the host of the group's first event that records one, empty
+// when none does.
 func (a *groupAcc) primaryHost() string {
-	if len(a.members) == 0 {
-		return ""
+	for _, m := range a.members {
+		if m.host != "" {
+			return m.host
+		}
 	}
-	return a.members[0].host
+	return ""
 }
 
 func setKeys(m map[string]bool) []string {
@@ -144,25 +165,39 @@ func RunStreamed(caseID string, each EachEvent, findings []model.Finding, correl
 		correlationsByID[c.ID] = c
 	}
 
-	groups := buildGroups(findings, correlations)
-	memberOf := map[string][]int{}
-	for gi, g := range groups {
-		for id := range g.eventIDs {
-			memberOf[id] = append(memberOf[id], gi)
+	// Events are read once, keeping only those a finding or correlation names.
+	// Their host and acquisition decide which events a correlation may join.
+	referenced := map[string]bool{}
+	for _, f := range findings {
+		for _, id := range f.SupportingEvents {
+			referenced[id] = true
 		}
 	}
-	accs := make([]*groupAcc, len(groups))
-	for i := range accs {
-		accs[i] = newGroupAcc()
+	for _, c := range correlations {
+		for _, id := range c.EventIDs {
+			referenced[id] = true
+		}
 	}
+	members := make(map[string]member, len(referenced))
 	err := each(func(e model.Event) error {
-		for _, gi := range memberOf[e.ID] {
-			accs[gi].add(e)
+		if referenced[e.ID] {
+			members[e.ID] = newMember(e)
 		}
 		return nil
 	})
 	if err != nil {
 		return nil, err
+	}
+
+	groups := buildGroups(findings, correlations, newIdentities(members))
+	accs := make([]*groupAcc, len(groups))
+	for gi, g := range groups {
+		accs[gi] = newGroupAcc()
+		for _, id := range sortedKeys(g.eventIDs) {
+			if m, ok := members[id]; ok {
+				accs[gi].add(m)
+			}
+		}
 	}
 
 	out := make([]model.Investigation, 0, len(groups))
@@ -174,12 +209,20 @@ func RunStreamed(caseID string, each EachEvent, findings []model.Finding, correl
 	return out, nil
 }
 
-// sortInvestigations orders investigations by start time, then title.
+// sortInvestigations orders investigations by start time, then title; those
+// with no recorded time come last, ordered by title and id.
 func sortInvestigations(out []model.Investigation) {
 	sort.SliceStable(out, func(i, j int) bool {
-		if !out[i].StartTime.Equal(out[j].StartTime) {
+		di, dj := isDated(out[i].StartTime), isDated(out[j].StartTime)
+		if di != dj {
+			return di
+		}
+		if di && !out[i].StartTime.Equal(out[j].StartTime) {
 			return out[i].StartTime.Before(out[j].StartTime)
 		}
-		return out[i].Title < out[j].Title
+		if out[i].Title != out[j].Title {
+			return out[i].Title < out[j].Title
+		}
+		return out[i].ID < out[j].ID
 	})
 }

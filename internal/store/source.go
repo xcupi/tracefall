@@ -93,7 +93,7 @@ func (c caseEvents) Load(f model.EventFilter) ([]model.Event, error) {
 // Refs reads every event as an EventRef. It never builds the parsed Extra
 // maps, which is where most of a full event's memory goes.
 func (c caseEvents) Refs() ([]model.EventRef, error) {
-	rows, err := c.s.db.Query(`SELECT id, host, process_name, artifact_type, timestamp FROM events WHERE case_id = ? ORDER BY timestamp ASC, id ASC`, c.caseID)
+	rows, err := c.s.db.Query(`SELECT id, collection_id, host, process_name, artifact_type, timestamp FROM events WHERE case_id = ? ORDER BY timestamp ASC, id ASC`, c.caseID)
 	if err != nil {
 		return nil, fmt.Errorf("loading event references: %w", err)
 	}
@@ -102,7 +102,7 @@ func (c caseEvents) Refs() ([]model.EventRef, error) {
 	for rows.Next() {
 		var r model.EventRef
 		var ts string
-		if err := rows.Scan(&r.ID, &r.Host, &r.ProcessName, &r.ArtifactType, &ts); err != nil {
+		if err := rows.Scan(&r.ID, &r.CollectionID, &r.Host, &r.ProcessName, &r.ArtifactType, &ts); err != nil {
 			return nil, err
 		}
 		r.Timestamp = parseTime(ts)

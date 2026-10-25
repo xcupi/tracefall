@@ -19,6 +19,10 @@ type group struct {
 // a persistence finding's event pulls those two findings into one
 // group).
 //
+// A correlation joins only events of one machine (see identities): events of
+// a correlation that belong to different, or to unknown, machines are not
+// joined by it. A finding is never split.
+//
 // This is deliberately the ONLY grouping signal. "Same host" and "same
 // user" are NOT used to merge groups -- two unrelated findings on the
 // same host that share no event and no correlation stay separate
@@ -44,7 +48,7 @@ type group struct {
 // activity is a real example of this) would get merged into one
 // artificially inflated "multi-stage" investigation -- exactly the
 // false-positive failure mode this package must avoid.
-func buildGroups(findings []model.Finding, correlations []model.Correlation) []group {
+func buildGroups(findings []model.Finding, correlations []model.Correlation, idn identities) []group {
 	uf := newUnionFind()
 
 	for _, f := range findings {
@@ -54,7 +58,9 @@ func buildGroups(findings []model.Finding, correlations []model.Correlation) []g
 		if !mergeworthy(c.Type) {
 			continue
 		}
-		uf.unionAll(c.EventIDs)
+		for _, bucket := range idn.buckets(c.Type, c.EventIDs) {
+			uf.unionAll(bucket)
+		}
 	}
 
 	byRoot := map[string]*group{}
@@ -82,10 +88,12 @@ func buildGroups(findings []model.Finding, correlations []model.Correlation) []g
 		if !mergeworthy(c.Type) || len(c.EventIDs) == 0 {
 			continue
 		}
-		g := groupFor(c.EventIDs[0])
-		g.correlationIDs[c.ID] = true
-		for _, e := range c.EventIDs {
-			g.eventIDs[e] = true
+		for _, bucket := range idn.buckets(c.Type, c.EventIDs) {
+			g := groupFor(bucket[0])
+			g.correlationIDs[c.ID] = true
+			for _, e := range bucket {
+				g.eventIDs[e] = true
+			}
 		}
 	}
 

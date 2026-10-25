@@ -17,6 +17,7 @@ package api
 import (
 	"strings"
 
+	"tracefall/internal/hostid"
 	"tracefall/internal/model"
 )
 
@@ -30,7 +31,7 @@ func normalizeHost(h string) string {
 
 // unambiguousHost returns the one host that every host-bearing event
 // across scopes agrees on, or "" if those events name no host at all or
-// name more than one.
+// name more than one machine.
 //
 // "More than one" deliberately yields "" rather than a majority vote: a
 // scope containing two genuine hosts gives Tracefall no evidence at all
@@ -39,29 +40,30 @@ func normalizeHost(h string) string {
 // evidence doesn't support. Blank is the honest answer, and it's what
 // internal/correlate then correctly declines to match on.
 //
-// When one host is named with inconsistent spelling/casing across events
-// (all normalizing equal), the lexicographically smallest spelling
-// actually observed is returned -- a real observed value, never a
-// synthesized one, chosen by a rule that can't depend on event order.
+// The short and the fully qualified form of one name (an event log records
+// the qualified name, a SYSTEM hive the short computer name) are one
+// machine; hostid.Resolve states the rule and its refusals. A casing
+// variant resolves to a real observed spelling chosen independent of event
+// order, never a synthesized one.
 func unambiguousHost(scopes ...[]model.Event) string {
-	var norm, spelling string
+	var names []string
 	for _, events := range scopes {
 		for _, e := range events {
-			n := normalizeHost(e.Host)
-			if n == "" {
-				continue
-			}
-			switch {
-			case norm == "":
-				norm, spelling = n, e.Host
-			case n != norm:
-				return "" // two distinct hosts in scope -- ambiguous
-			case e.Host < spelling:
-				spelling = e.Host
-			}
+			names = append(names, e.Host)
 		}
 	}
-	return spelling
+	h, _ := hostid.Resolve(names)
+	return h
+}
+
+// markInheritedHost fills a blank host and records on the event where the
+// value came from, so a reader can tell a recorded host from an inherited one.
+func markInheritedHost(e *model.Event, host, scope string) {
+	e.Host = host
+	if e.Extra == nil {
+		e.Extra = map[string]string{}
+	}
+	e.Extra["host_inherited_from"] = scope
 }
 
 // pendingImport is one source file parsed but not yet persisted -- see
@@ -162,16 +164,16 @@ func (s *Service) enrichBatchHosts(caseID, collectionID string, batch []pendingI
 
 	for i := range batch {
 		events := batch[i].events
-		host := unambiguousHost(events)
+		host, scope := unambiguousHost(events), "source_file"
 		if host == "" {
-			host = collectionHost
+			host, scope = collectionHost, "collection"
 		}
 		if host == "" {
 			continue // genuinely unknown -- never fabricated
 		}
 		for j := range events {
 			if normalizeHost(events[j].Host) == "" {
-				events[j].Host = host
+				markInheritedHost(&events[j], host, scope)
 			}
 		}
 	}

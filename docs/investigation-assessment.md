@@ -266,3 +266,31 @@ each fixed and covered by a regression test:
 3. Add tests in `internal/investigate/investigate_test.go` covering the
    trigger case, a case that must *not* fire, and — for anything
    touching severity — the exact score/threshold boundary.
+
+## Machine identity, unknown hosts and undated events
+
+- **A case is not a machine.** A correlation joins two findings only when its
+  events are one machine (`internal/investigate/identity.go`): the same
+  recorded host, or both host-less in the *same* acquisition. Host-less
+  events of different acquisitions, host-less against host-named events, and
+  events with neither host nor acquisition are never joined by a correlation
+  (a finding is never split). Cross-host correlation types (credential,
+  host-relation, web-to-host) may still join two *recorded* hosts. Entity
+  correlations are scoped the same way (`internal/correlate/entity.go`).
+- **Short and qualified names.** Inside one acquisition the short and the
+  fully qualified form of a name (`HOST01`, `host01.example.test`) are one
+  machine (`hostid.Resolve`). Two different qualified names, or a short
+  name matching two qualified ones, are ambiguous and resolve to nothing.
+  Across acquisitions only identical names match; a recorded host string is
+  never rewritten.
+- **Host inheritance** (`internal/api/hostenrich.go`) stays inside one
+  acquisition and only when its own records name exactly one machine. The
+  inherited value is marked `Extra["host_inherited_from"]` = `source_file`
+  or `collection`. Already stored cases are not rewritten; re-import to get it.
+- **Undated events.** Investigation bounds use dated events only; with none
+  the bounds are the zero time (shown as "no timestamp"). The narrative says
+  "time not recorded" instead of a time, and makes no "followed by",
+  "subsequently", "began with" or "which spawned" claim across an undated
+  step. An unknown host reads "host not recorded".
+- **Known limitation.** One 4688-style rule finding is still emitted per
+  event; repeated identical parent/child chains are not aggregated.

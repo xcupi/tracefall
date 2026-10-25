@@ -147,6 +147,8 @@ func buildTitle(category string, chainTitle string, processNames []string, host 
 		return fmt.Sprintf("%s: %s", label, chainTitle)
 	case len(processNames) > 0:
 		return fmt.Sprintf("%s: %s", label, strings.Join(processNames, " -> "))
+	case host == "":
+		return fmt.Sprintf("%s (host not recorded)", label)
 	default:
 		return fmt.Sprintf("%s on %s", label, host)
 	}

@@ -12,6 +12,7 @@ import (
 // case's worth of full events does not.
 type EventRef struct {
 	ID           string
+	CollectionID string
 	Host         string
 	ProcessName  string
 	ArtifactType string
@@ -22,6 +23,7 @@ type EventRef struct {
 func RefOf(e Event) EventRef {
 	return EventRef{
 		ID:           e.ID,
+		CollectionID: e.CollectionID,
 		Host:         e.Host,
 		ProcessName:  e.ProcessName,
 		ArtifactType: e.ArtifactType,
