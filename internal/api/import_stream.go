@@ -42,7 +42,7 @@ func newParsedSpool(budget *stagingBudget, artifact ...string) (*parsedSpool, er
 		return nil, err
 	}
 	p := &parsedSpool{file: f, hosts: map[string]bool{}, budget: budget}
-	if len(artifact) > 0 && (artifact[0] == model.ArtifactMFT || artifact[0] == model.ArtifactUsnJournal) {
+	if len(artifact) > 0 && (artifact[0] == model.ArtifactMFT || artifact[0] == model.ArtifactUsnJournal || artifact[0] == model.ArtifactSRUM) {
 		p.compressed = true
 		p.compressor = gzip.NewWriter(&p.buffer)
 	}

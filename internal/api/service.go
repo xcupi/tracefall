@@ -43,6 +43,7 @@ import (
 	"tracefall/internal/casefiles"
 	"tracefall/internal/correlate"
 	"tracefall/internal/detect"
+	"tracefall/internal/ese"
 	"tracefall/internal/evtx"
 	"tracefall/internal/gate"
 	"tracefall/internal/ingest"
@@ -55,6 +56,7 @@ import (
 	"tracefall/internal/parsers/browserhistory"
 	"tracefall/internal/parsers/mssqlxe"
 	"tracefall/internal/parsers/pshistory"
+	"tracefall/internal/parsers/srum"
 	"tracefall/internal/prefetch"
 	"tracefall/internal/regf"
 	"tracefall/internal/store"
@@ -3265,6 +3267,10 @@ func classifyParseError(err error) (category, message string) {
 			"This file was cataloged as a registry hive but is not a primary hive. Registry transaction logs (.LOG1/.LOG2) share the hive signature and are cataloged separately."
 	case errors.Is(err, pshistory.ErrEncoding):
 		return ParseFailureCorrupt, "This PowerShell history file is not readable as UTF-8 or UTF-16 text."
+	case errors.Is(err, srum.ErrLimitExceeded):
+		return ParseFailureLimit, "This SRUM source exceeded a bounded reader or temporary ID-index budget and was not imported."
+	case errors.Is(err, ese.ErrCorrupt):
+		return ParseFailureCorrupt, "The ESE database contains unreadable or structurally invalid records and was not imported."
 	case errors.Is(err, evtx.ErrCorrupt), errors.Is(err, regf.ErrCorrupt), errors.Is(err, ad1.ErrCorrupt), errors.Is(err, prefetch.ErrCorrupt):
 		return ParseFailureCorrupt, "The file is corrupt, truncated, or structurally invalid, so it could not be parsed."
 	case errors.Is(err, browsercache.ErrUnsupportedVersion):

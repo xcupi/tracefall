@@ -23,8 +23,10 @@ package srum
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -40,6 +42,9 @@ import (
 )
 
 const parserName = "srum@1"
+
+// ErrLimitExceeded is a reader/index resource ceiling, not source corruption.
+var ErrLimitExceeded = errors.New("srum: reader or id index safety limit exceeded")
 
 const (
 	maxFileBytes = 8 << 30
@@ -92,7 +97,26 @@ type idEntry struct {
 
 var ifTypes = map[uint64]string{6: "ethernet", 71: "wifi", 24: "loopback", 131: "tunnel", 243: "wwan", 244: "wwan"}
 
-func (Parser) Parse(absPath string) (parsers.ParseResult, error) {
+func (p Parser) Parse(absPath string) (parsers.ParseResult, error) {
+	return p.parse(context.Background(), absPath, nil)
+}
+
+func (p Parser) ParseStream(ctx context.Context, path string, _ parsers.ParseContext, sink parsers.RecordSink) (*model.ParseCoverage, error) {
+	res, err := p.parse(ctx, path, sink)
+	err = idIndexError(err)
+	if res.Coverage == nil {
+		res.Coverage = &model.ParseCoverage{}
+	}
+	if errors.Is(err, ErrLimitExceeded) {
+		res.Coverage.LimitReached = true
+	}
+	return res.Coverage, err
+}
+
+func (Parser) parse(ctx context.Context, absPath string, sink parsers.RecordSink) (parsers.ParseResult, error) {
+	if err := ctx.Err(); err != nil {
+		return parsers.ParseResult{}, err
+	}
 	f, err := os.Open(absPath)
 	if err != nil {
 		return parsers.ParseResult{}, err
@@ -103,6 +127,9 @@ func (Parser) Parse(absPath string) (parsers.ParseResult, error) {
 		return parsers.ParseResult{}, err
 	}
 	if st.Size() > maxFileBytes {
+		if sink != nil {
+			return parsers.ParseResult{Coverage: &model.ParseCoverage{LimitReached: true}}, fmt.Errorf("%w: input exceeds %d bytes", ErrLimitExceeded, int64(maxFileBytes))
+		}
 		return parsers.ParseResult{}, fmt.Errorf("srum: %d bytes is larger than the %d byte limit", st.Size(), int64(maxFileBytes))
 	}
 	db, err := ese.Open(f, st.Size())
@@ -130,7 +157,29 @@ func (Parser) Parse(absPath string) (parsers.ParseResult, error) {
 	}
 
 	ids := map[int64]idEntry{}
+	var disk *idStore
+	if sink != nil {
+		disk, err = openIDStore(ctx)
+		if err != nil {
+			return parsers.ParseResult{Coverage: cov}, err
+		}
+		defer disk.close()
+	}
+	flush := func() error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if sink == nil || len(res.Events) == 0 {
+			return nil
+		}
+		err := sink(res)
+		res = parsers.ParseResult{}
+		return err
+	}
 	idStats, err := idTable.Scan(func(r ese.Row) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if r.Defunct {
 			return nil
 		}
@@ -138,7 +187,15 @@ func (Parser) Parse(absPath string) (parsers.ParseResult, error) {
 		ty, _ := r.Get("IdType")
 		bl, _ := r.Get("IdBlob")
 		if ix.Null || ix.Err != nil {
+			if disk != nil {
+				cov.RecordsFailed++
+				return fmt.Errorf("%w: missing or unreadable id index", ese.ErrCorrupt)
+			}
 			return nil
+		}
+		if disk != nil && (ty.Err != nil || bl.Err != nil) {
+			cov.RecordsFailed++
+			return fmt.Errorf("%w: unreadable id value", ese.ErrCorrupt)
 		}
 		e := idEntry{typ: -1}
 		if !ty.Null && ty.Err == nil {
@@ -147,11 +204,28 @@ func (Parser) Parse(absPath string) (parsers.ParseResult, error) {
 		if !bl.Null && bl.Err == nil {
 			e.blob = bl.Raw
 		}
+		if disk != nil {
+			if len(e.blob) > 64<<10 {
+				return fmt.Errorf("%w: id blob exceeds 64 KiB", ErrLimitExceeded)
+			}
+			_, err := disk.put.ExecContext(ctx, ix.Int(), e.typ, e.blob)
+			return err
+		}
 		ids[ix.Int()] = e
 		return nil
 	})
 	if err != nil {
-		return parsers.ParseResult{}, fmt.Errorf("srum: reading the id map: %w", err)
+		return parsers.ParseResult{Coverage: cov}, fmt.Errorf("srum: reading the id map: %w", err)
+	}
+	if disk != nil {
+		note(fmt.Sprintf("id map: %d live records, %d deleted records; excluded from provider record counts", idStats.Live, idStats.Defunct))
+		if idStats.Unreadable > 0 {
+			cov.RecordsFailed = idStats.Unreadable
+			return parsers.ParseResult{Coverage: cov}, fmt.Errorf("%w: unreadable SRUM id map records", ese.ErrCorrupt)
+		}
+		if err = disk.finish(ctx); err != nil {
+			return parsers.ParseResult{Coverage: cov}, err
+		}
 	}
 	if idStats.Unreadable > 0 {
 		note(fmt.Sprintf("%d entries of the id map could not be read; the applications and users they name are shown as numbers", idStats.Unreadable))
@@ -171,9 +245,9 @@ func (Parser) Parse(absPath string) (parsers.ParseResult, error) {
 			continue // the engine's own tables, the id map, the checkpoint table
 		}
 		if !known {
-			stats, err := t.Scan(func(ese.Row) error { return nil })
+			stats, err := t.Scan(func(ese.Row) error { return ctx.Err() })
 			if err != nil {
-				return parsers.ParseResult{}, fmt.Errorf("srum: reading table %s: %w", name, err)
+				return parsers.ParseResult{Coverage: cov}, fmt.Errorf("srum: reading table %s: %w", name, err)
 			}
 			cov.RecordsRead += stats.Live
 			cov.Unmapped += stats.Live
@@ -189,13 +263,32 @@ func (Parser) Parse(absPath string) (parsers.ParseResult, error) {
 			continue
 		}
 		stats, err := t.Scan(func(r ese.Row) error {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			if r.Defunct {
 				return nil
 			}
 			cov.RecordsRead++
-			if len(res.Events) >= maxEvents {
+			if sink == nil && len(res.Events) >= maxEvents {
 				cov.LimitReached = true
 				return nil
+			}
+			if disk != nil {
+				clear(ids)
+				for _, col := range []string{"AppId", "UserId"} {
+					v, _ := r.Get(col)
+					if v.Null || v.Err != nil {
+						continue
+					}
+					e, ok, err := disk.lookup(ctx, v.Int())
+					if err != nil {
+						return err
+					}
+					if ok {
+						ids[v.Int()] = e
+					}
+				}
 			}
 			ev, raw, ok := build(r, k, name, ids, state)
 			if !ok {
@@ -205,12 +298,16 @@ func (Parser) Parse(absPath string) (parsers.ParseResult, error) {
 			if ev.Timestamp.IsZero() {
 				cov.Undated++
 			}
+			cov.Mapped++
 			res.Events = append(res.Events, ev)
 			res.Raw = append(res.Raw, raw)
+			if sink != nil && len(res.Events) >= 128 {
+				return flush()
+			}
 			return nil
 		})
 		if err != nil {
-			return parsers.ParseResult{}, fmt.Errorf("srum: reading table %s: %w", name, err)
+			return parsers.ParseResult{Coverage: cov}, fmt.Errorf("srum: reading table %s: %w", name, err)
 		}
 		deleted += stats.Defunct
 		unreadable += stats.Unreadable
@@ -225,8 +322,15 @@ func (Parser) Parse(absPath string) (parsers.ParseResult, error) {
 		cov.RecordsFailed += unreadable
 		note(fmt.Sprintf("%d entries could not be decoded as records", unreadable))
 	}
-	cov.Mapped = len(res.Events)
 	cov.Notes = notes
+	if sink != nil {
+		if cov.RecordsFailed > 0 {
+			return parsers.ParseResult{Coverage: cov}, fmt.Errorf("srum: %d unreadable provider records", cov.RecordsFailed)
+		}
+		if err := flush(); err != nil {
+			return parsers.ParseResult{Coverage: cov}, err
+		}
+	}
 	res.Coverage = cov
 	return res, nil
 }

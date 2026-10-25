@@ -313,7 +313,7 @@ func WorkerMain(in io.Reader, out io.Writer, classify func(error) (category, mes
 		var packed bytes.Buffer
 		z := gzip.NewWriter(&packed)
 		cov, err := sp.ParseStream(context.Background(), req.Path, req.Context, func(batch parsers.ParseResult) error {
-			if p.ArtifactType() == model.ArtifactMFT || p.ArtifactType() == model.ArtifactUsnJournal {
+			if p.ArtifactType() == model.ArtifactMFT || p.ArtifactType() == model.ArtifactUsnJournal || p.ArtifactType() == model.ArtifactSRUM {
 				data, err := json.Marshal(batch)
 				if err != nil {
 					return err
