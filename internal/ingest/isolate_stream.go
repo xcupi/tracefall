@@ -195,7 +195,10 @@ func (s Subprocess) RunStream(parent context.Context, p parsers.ArtifactParser, 
 	if cov.EmittedEvents != nil {
 		emitted = *cov.EmittedEvents
 	}
-	if emitted != received || (emitted > 0 && cov.Mapped == 0) || emitted < cov.Mapped || cov.RecordsRead < cov.Mapped || cov.Mapped < 0 || cov.Unmapped < 0 || cov.Undated != undated {
+	// Reconcile physical records separately from emitted events (MFT may
+	// emit several events per mapped record). Subtract only after checking
+	// nonnegative bounds, so hostile counters cannot wrap an addition.
+	if emitted != received || (emitted > 0 && cov.Mapped == 0) || emitted < cov.Mapped || cov.RecordsRead < 0 || cov.Mapped < 0 || cov.Unmapped < 0 || cov.Mapped > cov.RecordsRead || cov.Unmapped != cov.RecordsRead-cov.Mapped || cov.Undated != undated {
 		return cov, &ProcessFailure{Reason: "stream coverage does not match received records"}
 	}
 	if cov.LimitReached || cov.RecordsFailed != 0 || cov.ChunksFailed != 0 {

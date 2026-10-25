@@ -366,7 +366,15 @@ func parseChunkHeader(buf []byte) (*chunk, error) {
 // corrupting the file-level walk.
 func (f *File) walkChunk(c *chunk, buf []byte, chunkNum int, chunkOffset int64, stats *Stats, fn func(Record) error) (read, failed int, stop bool, err error) {
 	pos := chunkHeaderSize
-	for pos+recordHeaderLen <= int(c.freeSpace) {
+	for pos < int(c.freeSpace) {
+		// freeSpace marks the first unused byte. Slack after it is legitimate,
+		// but bytes before it must form complete records, even when all zero.
+		if int(c.freeSpace)-pos < recordHeaderLen {
+			if f.lim.Strict {
+				failed++
+			}
+			break
+		}
 		if stats.RecordsRead+read >= f.lim.MaxRecords {
 			return read, failed, true, nil
 		}
