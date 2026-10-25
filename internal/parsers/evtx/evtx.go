@@ -11,7 +11,9 @@
 package evtx
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"sort"
@@ -60,6 +62,30 @@ func (Parser) DetectContent(header []byte) bool { return evtx.Sniff(header) }
 // through the summary event's Extra rather than being passed over in
 // silence: a partially recovered log must never look like a clean one.
 func (p Parser) Parse(absPath string) (parsers.ParseResult, error) {
+	return p.parse(context.Background(), absPath, nil)
+}
+
+func (p Parser) ParseStream(ctx context.Context, path string, _ parsers.ParseContext, sink parsers.RecordSink) (*model.ParseCoverage, error) {
+	// The bounded import reader may scan larger logs than the compatibility
+	// whole-result API. Derive record count from the byte ceiling and the minimum
+	// physical record size; process, deadline, nesting and output caps are unchanged.
+	p.limits.Strict = true
+	p.limits.MaxFileBytes = 8 << 30
+	p.limits.MaxRecords = int(p.limits.MaxFileBytes/28) + 1
+	out, err := p.parse(ctx, path, sink)
+	if out.Coverage == nil {
+		out.Coverage = &model.ParseCoverage{}
+	}
+	if errors.Is(err, evtx.ErrLimitExceeded) {
+		out.Coverage.LimitReached = true
+	}
+	return out.Coverage, err
+}
+
+func (p Parser) parse(ctx context.Context, absPath string, sink parsers.RecordSink) (parsers.ParseResult, error) {
+	if err := ctx.Err(); err != nil {
+		return parsers.ParseResult{}, err
+	}
 	f, err := evtx.Open(absPath, p.limits)
 	if err != nil {
 		return parsers.ParseResult{}, fmt.Errorf("evtx: %w", err)
@@ -67,6 +93,21 @@ func (p Parser) Parse(absPath string) (parsers.ParseResult, error) {
 	defer f.Close()
 
 	out := parsers.ParseResult{Coverage: &model.ParseCoverage{}}
+	coverage := out.Coverage
+	batchBytes := 0
+	flush := func() error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if sink == nil || len(out.Events) == 0 {
+			return nil
+		}
+		err := sink(parsers.ParseResult{Events: out.Events, Raw: out.Raw})
+		out.Events = nil
+		out.Raw = nil
+		batchBytes = 0
+		return err
+	}
 	type kind struct {
 		provider, channel string
 		id                int
@@ -74,9 +115,12 @@ func (p Parser) Parse(absPath string) (parsers.ParseResult, error) {
 	kinds := map[kind]*model.CoverageEvent{}
 	const maxKinds = 512
 	stats, err := f.Walk(func(rec evtx.Record) error {
-		c := out.Coverage
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		c := coverage
 		ev, ok := toEvent(rec)
-		if rec.System.TimeCreated.IsZero() {
+		if rec.System.TimeCreated.IsZero() && (sink == nil || ok) {
 			c.Undated++
 		}
 		k := kind{rec.System.Provider, rec.System.Channel, rec.System.EventID}
@@ -98,7 +142,6 @@ func (p Parser) Parse(absPath string) (parsers.ParseResult, error) {
 			return nil
 		}
 		c.Mapped++
-		out.Events = append(out.Events, ev)
 
 		// The raw record is preserved as the resolved System + EventData
 		// pairs, not as re-serialized BinXML: that is what was actually
@@ -111,16 +154,32 @@ func (p Parser) Parse(absPath string) (parsers.ParseResult, error) {
 			"chunk":      rec.ChunkNumber,
 			"offset":     rec.Offset,
 		})
-		out.Raw = append(out.Raw, model.RawEvidence{
-			SourceReference: ev.SourceReference,
-			Raw:             string(rawJSON),
-		})
+		raw := model.RawEvidence{SourceReference: ev.SourceReference, Raw: string(rawJSON)}
+		if sink != nil {
+			if len(rawJSON) > 4<<20 {
+				return fmt.Errorf("%w: resolved raw record exceeds 4 MiB", evtx.ErrLimitExceeded)
+			}
+			pair, err := json.Marshal([]any{ev, raw})
+			if err != nil {
+				return err
+			}
+			if len(pair) > 8<<20 {
+				return fmt.Errorf("%w: resolved event/raw pair exceeds 8 MiB", evtx.ErrLimitExceeded)
+			}
+			if batchBytes+len(pair) > 1<<20 {
+				if err := flush(); err != nil {
+					return err
+				}
+			}
+			batchBytes += len(pair)
+		}
+		out.Events = append(out.Events, ev)
+		out.Raw = append(out.Raw, raw)
+		if sink != nil && len(out.Events) >= 128 {
+			return flush()
+		}
 		return nil
 	})
-	if err != nil {
-		return parsers.ParseResult{}, fmt.Errorf("evtx: %w", err)
-	}
-
 	// Recovery facts belong on every event from this file, so an analyst
 	// looking at any one of them can see the file it came from was not
 	// fully readable.
@@ -133,6 +192,9 @@ func (p Parser) Parse(absPath string) (parsers.ParseResult, error) {
 		}
 	}
 	c := out.Coverage
+	if stats.ZeroChunks > 0 {
+		c.Notes = append(c.Notes, fmt.Sprintf("%d zero-filled preallocated chunks; no physical records in these chunks", stats.ZeroChunks))
+	}
 	c.RecordsRead, c.RecordsFailed, c.ChunksRead, c.ChunksFailed, c.LimitReached = stats.RecordsRead, stats.RecordsFailed, stats.ChunksRead, stats.ChunksFailed, stats.LimitReached
 	for _, v := range kinds {
 		c.ByEvent = append(c.ByEvent, *v)
@@ -147,6 +209,20 @@ func (p Parser) Parse(absPath string) (parsers.ParseResult, error) {
 		}
 		return a.EventID < b.EventID
 	})
+	if err != nil {
+		return parsers.ParseResult{Coverage: c}, fmt.Errorf("evtx: %w", err)
+	}
+	if sink != nil {
+		if stats.LimitReached {
+			return parsers.ParseResult{Coverage: c}, evtx.ErrLimitExceeded
+		}
+		if stats.Partial() {
+			return parsers.ParseResult{Coverage: c}, fmt.Errorf("%w: incomplete record/chunk coverage", evtx.ErrCorrupt)
+		}
+		if err := flush(); err != nil {
+			return parsers.ParseResult{Coverage: c}, err
+		}
+	}
 	return out, nil
 }
 

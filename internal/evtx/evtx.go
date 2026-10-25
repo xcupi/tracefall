@@ -37,6 +37,7 @@
 package evtx
 
 import (
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -95,6 +96,9 @@ const (
 // event log. Each is a hard ceiling that stops the operation rather than
 // degrading it silently.
 type Limits struct {
+	// Strict refuses trailing partial chunks; compatibility callers retain
+	// historical recovery behavior unless they explicitly opt in.
+	Strict           bool
 	MaxFileBytes     int64 // reject a file larger than this outright
 	MaxRecords       int   // stop after this many records
 	MaxDepth         int   // maximum BinXML element nesting
@@ -176,6 +180,7 @@ type Record struct {
 // and callers are expected to surface that rather than present the
 // result as a complete parse.
 type Stats struct {
+	ZeroChunks    int // physical zero-filled preallocation, not failed records
 	ChunksRead    int
 	ChunksFailed  int
 	RecordsRead   int
@@ -256,12 +261,16 @@ func Open(path string, lim Limits) (*File, error) {
 	claimed := int(binary.LittleEndian.Uint32(hdr[42:46]))
 	available := int((info.Size() - fileHeaderSize) / chunkSize)
 	if (info.Size()-fileHeaderSize)%chunkSize != 0 {
+		if lim.Strict {
+			f.Close()
+			return nil, fmt.Errorf("%w: trailing partial chunk", ErrCorrupt)
+		}
 		// A trailing partial chunk is normal in a log copied while in
 		// use; it is simply not iterated.
 		_ = available
 	}
 	ev.chunkCount = available
-	if claimed >= 0 && claimed < available {
+	if !lim.Strict && claimed >= 0 && claimed < available {
 		ev.chunkCount = claimed
 	}
 	if ev.chunkCount < 0 {
@@ -286,6 +295,7 @@ func (f *File) Walk(fn func(Record) error) (Stats, error) {
 	var stats Stats
 
 	buf := make([]byte, chunkSize) // one chunk at a time, whatever the file size
+	var zero [chunkSize]byte
 	for i := 0; i < f.chunkCount; i++ {
 		if stats.RecordsRead >= f.lim.MaxRecords {
 			stats.LimitReached = true
@@ -294,6 +304,10 @@ func (f *File) Walk(fn func(Record) error) (Stats, error) {
 		offset := int64(fileHeaderSize) + int64(i)*chunkSize
 		if _, err := f.f.ReadAt(buf, offset); err != nil {
 			stats.ChunksFailed++
+			continue
+		}
+		if f.lim.Strict && bytes.Equal(buf, zero[:]) {
+			stats.ZeroChunks++
 			continue
 		}
 		c, err := parseChunkHeader(buf)
@@ -357,6 +371,9 @@ func (f *File) walkChunk(c *chunk, buf []byte, chunkNum int, chunkOffset int64, 
 			return read, failed, true, nil
 		}
 		if string(buf[pos:pos+4]) != recordSignature {
+			if f.lim.Strict {
+				failed++
+			}
 			break // end of records in this chunk
 		}
 		size := int(binary.LittleEndian.Uint32(buf[pos+4 : pos+8]))
