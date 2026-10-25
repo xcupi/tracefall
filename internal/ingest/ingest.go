@@ -507,6 +507,10 @@ func ParseFileWithContext(caseID, collectionID, sourceFileID, root, relPath stri
 		return ParsedFile{}, err
 	}
 
+	return stampResult(caseID, collectionID, sourceFileID, parsed), nil
+}
+
+func stampResult(caseID, collectionID, sourceFileID string, parsed parsers.ParseResult) ParsedFile {
 	events := make([]model.Event, len(parsed.Events))
 	raw := make([]model.RawEvidence, 0, len(parsed.Raw))
 	for i := range parsed.Events {
@@ -550,7 +554,7 @@ func ParseFileWithContext(caseID, collectionID, sourceFileID, root, relPath stri
 		r.SourceFileID = sourceFileID
 		raw = append(raw, r)
 	}
-	return ParsedFile{Events: events, Raw: raw, Coverage: parsed.Coverage}, nil
+	return ParsedFile{Events: events, Raw: raw, Coverage: parsed.Coverage}
 }
 
 func sha256File(path string) string {

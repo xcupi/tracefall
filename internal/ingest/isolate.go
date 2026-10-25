@@ -109,6 +109,7 @@ type Subprocess struct {
 }
 
 type workerRequest struct {
+	Stream  bool                 `json:"stream,omitempty"`
 	Parser  string               `json:"parser"`
 	Path    string               `json:"path"`
 	Context parsers.ParseContext `json:"context"`
@@ -301,6 +302,21 @@ func WorkerMain(in io.Reader, out io.Writer, classify func(error) (category, mes
 		return enc.Encode(workerResponse{Error: &workerError{
 			Category: "internal_error", Message: "The file could not be parsed.", Detail: "unknown parser " + req.Parser,
 		}})
+	}
+	if req.Stream {
+		sp, ok := p.(parsers.StreamingParser)
+		if !ok {
+			return fmt.Errorf("parser does not support streaming")
+		}
+		cov, err := sp.ParseStream(context.Background(), req.Path, req.Context, func(batch parsers.ParseResult) error {
+			return enc.Encode(streamFrame{Batch: &batch})
+		})
+		frame := streamFrame{Done: true, Coverage: cov}
+		if err != nil {
+			cat, msg := classify(err)
+			frame.Error = &workerError{Category: cat, Message: msg, Detail: err.Error()}
+		}
+		return enc.Encode(frame)
 	}
 	res, err := inProcess{}.Run(p, "", req.Path, req.Context)
 	if err != nil {

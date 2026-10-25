@@ -70,6 +70,7 @@ func markInheritedHost(e *model.Event, host, scope string) {
 // Service.ImportEvidence, which parses every selected file up front
 // precisely so enrichBatchHosts below can see the whole batch at once.
 type pendingImport struct {
+	spool      *parsedSpool
 	sourceFile model.SourceFile
 	events     []model.Event
 	raw        []model.RawEvidence
@@ -121,39 +122,13 @@ func (s *Service) enrichBatchHosts(caseID, collectionID string, batch []pendingI
 		return nil
 	}
 
-	persisted, err := s.store.ListEvents(caseID)
+	hosts, err := s.store.CollectionHosts(caseID, collectionID)
 	if err != nil {
 		return err
 	}
-	var persistedThisCollection []model.Event
-	byID := make(map[string]model.Event, len(persisted))
-	for _, e := range persisted {
-		byID[e.ID] = e
-		if e.CollectionID == collectionID {
-			persistedThisCollection = append(persistedThisCollection, e)
-		}
-	}
-	// A recollected event is deduplicated against its first sighting, so it
-	// is not persisted under this collection. Its host is part of its
-	// identity hash, so an observation in THIS collection pointing at it is
-	// a strong, explicit statement of this collection's host.
-	sfs, err := s.store.ListSourceFilesByCollection(collectionID)
-	if err != nil {
-		return err
-	}
-	for _, sf := range sfs {
-		obs, err := s.store.ListEventObservationsBySourceFile(sf.ID)
-		if err != nil {
-			return err
-		}
-		for _, o := range obs {
-			if o.CollectionID != collectionID {
-				continue
-			}
-			if e, ok := byID[o.EventID]; ok && e.CollectionID != collectionID {
-				persistedThisCollection = append(persistedThisCollection, e)
-			}
-		}
+	persistedThisCollection := make([]model.Event, 0, len(hosts))
+	for _, host := range hosts {
+		persistedThisCollection = append(persistedThisCollection, model.Event{Host: host})
 	}
 	batchEvents := make([]model.Event, 0, len(batch))
 	for _, p := range batch {

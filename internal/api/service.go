@@ -1296,6 +1296,11 @@ func (s *Service) importEvidence(caseID, collectionID string, sourceFileIDs []st
 	// be saved under the wrong dedup identity. Per-file skips and parse
 	// failures are recorded exactly as before and don't abort the batch.
 	pending := make([]pendingImport, 0, len(sourceFileIDs))
+	defer func() {
+		for _, pf := range pending {
+			pf.spool.close()
+		}
+	}()
 	prog.phase(PhaseParsing)
 	prog.setTotal(len(sourceFileIDs))
 
@@ -1452,6 +1457,24 @@ func (s *Service) importEvidence(caseID, collectionID string, sourceFileIDs []st
 			continue
 		}
 
+		if _, streaming := p.(parsers.StreamingParser); streaming {
+			pf, err := s.stageStream(caseID, collectionID, sf, collection.EvidenceDirectory, p, parseCtx, prog)
+			if err != nil {
+				if prog.cancelled() {
+					cancelled = true
+					unprocessed = len(sourceFileIDs) - i
+					break
+				}
+				_ = s.store.MarkSourceFileFailed(id)
+				errs = append(errs, fmt.Sprintf("%s: %v", sf.Path, err))
+				failures = append(failures, parseFailure(sf, ParseStageParse, err))
+				prog.fileParsed(0, true)
+				continue
+			}
+			pending = append(pending, pf)
+			prog.fileParsed(pf.eventCount(), false)
+			continue
+		}
 		parsed, err := ingest.ParseFileWithContext(caseID, collectionID, id, collection.EvidenceDirectory, sf.Path, p, parseCtx)
 		if err != nil {
 			_ = s.store.MarkSourceFileFailed(id)
@@ -1497,21 +1520,29 @@ func (s *Service) importEvidence(caseID, collectionID string, sourceFileIDs []st
 		id := sf.ID
 		prog.startFile(sf.Path)
 
-		if err := s.store.SaveRawEvidence(pf.raw); err != nil {
-			return ImportResult{}, fmt.Errorf("saving raw evidence: %w", err)
-		}
-		newEvents, observations, err := s.deduplicate(caseID, collectionID, pf.events, pf.raw)
+		newCount := 0
+		err := pf.eachBatch(func(events []model.Event, raw []model.RawEvidence) error {
+			if err := s.store.SaveRawEvidence(raw); err != nil {
+				return fmt.Errorf("saving raw evidence: %w", err)
+			}
+			newEvents, observations, err := s.deduplicate(caseID, collectionID, events, raw)
+			if err != nil {
+				return err
+			}
+			if err = s.store.SaveEvents(newEvents); err != nil {
+				return err
+			}
+			if err = s.store.SaveEventObservations(observations); err != nil {
+				return err
+			}
+			newCount += len(newEvents)
+			return nil
+		})
 		if err != nil {
-			return ImportResult{}, fmt.Errorf("deduplicating events: %w", err)
-		}
-		if err := s.store.SaveEvents(newEvents); err != nil {
-			return ImportResult{}, fmt.Errorf("saving events: %w", err)
-		}
-		if err := s.store.SaveEventObservations(observations); err != nil {
-			return ImportResult{}, fmt.Errorf("saving event observations: %w", err)
+			return ImportResult{}, fmt.Errorf("persisting parsed source: %w", err)
 		}
 
-		applied, err := s.store.MarkSourceFileImported(id, len(pf.events), time.Now().UTC(), sf.ParseCoverage)
+		applied, err := s.store.MarkSourceFileImported(id, pf.eventCount(), time.Now().UTC(), sf.ParseCoverage)
 		if errors.Is(err, store.ErrDuplicateSourceFile) {
 			// This file's content is byte-identical to another file
 			// already imported into this same collection -- the events
@@ -1529,7 +1560,7 @@ func (s *Service) importEvidence(caseID, collectionID string, sourceFileIDs []st
 			// specifically to keep that weaker guarantee from turning
 			// into a request-aborting error instead of a per-file skip.
 			skipped = append(skipped, ImportSkip{SourceFileID: id, Reason: "duplicate content already imported in this collection"})
-			prog.filePersisted(0, len(pf.events))
+			prog.filePersisted(0, pf.eventCount())
 			continue
 		}
 		if err != nil {
@@ -1541,7 +1572,7 @@ func (s *Service) importEvidence(caseID, collectionID string, sourceFileIDs []st
 			// (deduplicate already collapses them against whatever the
 			// winner just saved) and this file is already evidence.
 			skipped = append(skipped, ImportSkip{SourceFileID: id, Reason: "already imported"})
-			prog.filePersisted(0, len(pf.events))
+			prog.filePersisted(0, pf.eventCount())
 			continue
 		}
 
@@ -1550,9 +1581,9 @@ func (s *Service) importEvidence(caseID, collectionID string, sourceFileIDs []st
 			return ImportResult{}, fmt.Errorf("reloading imported file: %w", err)
 		}
 		imported = append(imported, refreshed)
-		totalNew += len(newEvents)
-		totalDup += len(pf.events) - len(newEvents)
-		prog.filePersisted(len(newEvents), len(pf.events)-len(newEvents))
+		totalNew += newCount
+		totalDup += pf.eventCount() - newCount
+		prog.filePersisted(newCount, pf.eventCount()-newCount)
 	}
 
 	prog.phase(PhaseFinalizing)
