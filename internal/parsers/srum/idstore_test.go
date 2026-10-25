@@ -13,6 +13,14 @@ import (
 	"tracefall/internal/parsers"
 )
 
+func TestStreamMalformedProviderFailsClosed(t *testing.T) {
+	path := write(t, []esegen.Table{standardIDs(), appTable(esegen.Record{Fixed: map[uint32][]byte{2: ole(t0)}})}, esegen.Options{})
+	cov, err := New().ParseStream(context.Background(), path, parsers.ParseContext{}, func(parsers.ParseResult) error { t.Fatal("malformed provider emitted"); return nil })
+	if !errors.Is(err, ese.ErrCorrupt) || cov.RecordsFailed != 1 {
+		t.Fatalf("provider corruption not classified: %v %+v", err, cov)
+	}
+}
+
 func TestStreamOversizedIDIsVisibleLimit(t *testing.T) {
 	table := idMapTable(idRow(0, 1, nil))
 	table.Records[0].Tagged = []esegen.Tagged{{ID: 256, Flags: esegen.TagSeparated, Data: esegen.Le32(1)}}

@@ -325,7 +325,7 @@ func (Parser) parse(ctx context.Context, absPath string, sink parsers.RecordSink
 	cov.Notes = notes
 	if sink != nil {
 		if cov.RecordsFailed > 0 {
-			return parsers.ParseResult{Coverage: cov}, fmt.Errorf("srum: %d unreadable provider records", cov.RecordsFailed)
+			return parsers.ParseResult{Coverage: cov}, fmt.Errorf("%w: %d unreadable SRUM provider records", ese.ErrCorrupt, cov.RecordsFailed)
 		}
 		if err := flush(); err != nil {
 			return parsers.ParseResult{Coverage: cov}, err
