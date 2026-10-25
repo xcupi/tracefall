@@ -116,6 +116,7 @@ what the binary can actually parse:
 | `iis_w3c_log` | IIS web log (W3C) | Log | High | `iislog@1` |
 | `cryptnet_url_cache` | CryptoAPI URL cache (CryptnetUrlCache) | Execution | High | `cryptneturl@1` |
 | `defender_cmd_log` | Defender command-line log (MpCmdRun.log) | Execution | High | `defendercmd@1` |
+| `defender_mplog` | Defender antimalware support log (MPLog / MPDetection) | Log | High | `defendermplog@1` |
 | `srum_db` | System Resource Usage Monitor (SRUM) | Execution | High | `srum@1` |
 | `webcache_db` | IE / Edge Legacy web cache (WebCache) | Browser | Medium | `webcache@1` |
 | `package_log` | Package log (dpkg) | Log | Medium | `packagelog@1` |
@@ -164,7 +165,7 @@ claim a file — see `parsers.ContentDetector`.)
 | SRUM database | High | Only a file named `SRUDB.dat` that is not an ESE database lands here; a real one is read (see SRUM below). |
 | PowerShell transcript | High | No transcript parser; console history *is* parsed. |
 | USB / device install log (SetupAPI) | High | No SetupAPI log parser. |
-| Antimalware detection log | High | No antimalware log parser. |
+| Antimalware detection log | High | Only `MPLog-*.log` and `MPDetection-*.log` are read, and only their detection and blocked-process lines (see below). Other Defender text logs and the binary `DetectionHistory` files are not read. |
 | Web server log (IIS / W3C) | High | No web server log parser. |
 | Page / swap file | High | No memory analysis. |
 | Windows Search index (`Windows.edb`) | Medium | An ESE database. The ESE reader opens it; the Windows Search tables are not interpreted, and no real `Windows.edb` was available to validate an interpretation against. |
@@ -1680,12 +1681,67 @@ Limitations:
 
 - The log records the command, not that a download succeeded or what happened to
   the file.
-- Only MpCmdRun.log is read. MPLog, MPDetection and the other Defender text logs
-  are not, and neither is the Defender event log's detection history beyond the
-  existing event-log mappings.
+- Only MpCmdRun.log is read here. The support logs (MPLog, MPDetection) have their own
+  reader, below.
 - Validated on a real log of 16 runs (verbs, error runs, start times and the
   absence of any instant equal a separate pass over the raw bytes); it contains
   only signature updates, so the rule is tested on constructed runs.
+
+### Defender antimalware telemetry (Operational log 1116-1119 and `defendermplog@1`)
+
+Three event types, shared by two sources of the same engine:
+
+- `antimalware_detection`: Defender Operational EventID **1116**, and the
+  support log's `DETECTIONEVENT` line.
+- `antimalware_action`: Operational **1117**, **1118** (failed), **1119** (failed,
+  critical).
+- `antimalware_process_blocked`: the support log's `Process creation blocked:`
+  line.
+
+Operational records (provider and channel `Microsoft-Windows-Windows Defender` and
+`.../Operational`, both required) keep the recorded fields in `Extra`:
+`threat_name`, `threat_id`, `severity_name/id`, `category_name/id`,
+`detection_id`, `detection_time_recorded`, `detection_user`, `resource`,
+`resource_kind` (`command_line` for a `CmdLine:` path, `file` for `file:`, else
+`other`), `action_name/id`, `error_code`, `error_description`,
+`remediation_user`, `process_name_recorded`, `source_name`. The resource goes
+through `cmdsem.Redact`, is capped at 2 KiB, and never enters `CommandLine` or
+`FilePath` of the event: a CmdLine resource is a command-line string, not a file
+and not a process start. `detection_id` is carried so several records of one
+detection are counted once by the rule; the records themselves stay separate
+events (the EVTX record id is part of their identity). Every other Defender ID
+(5007 configuration change, scan and update records, 1000-1002, 1150/1151) stays
+unmapped on purpose.
+
+The support log reader streams the file (UTF-16LE/BE with or without a BOM, or
+UTF-8) with caps: 1 GiB scanned, 32K characters per line, 100000 events. Past a
+cap the rest is counted and written to the parse coverage notes. It reads only
+the two line kinds above and says in its coverage note that all other lines are
+skipped by design. Each event carries `line_number` and `byte_offset` of the
+record for citation. `Process creation blocked` keeps `process_name`,
+`process_id`, `parent_pid`, `reason_code` and the two `ProcessCreationTime`
+tokens exactly as written, plus a separately labelled FILETIME reading
+(`*_utc_derived`). The line prefix time has no zone: it is kept in
+`timestamp_local`, the event is undated, and nothing is converted. PIDs are
+neither set as the event's PID/PPID nor joined across hosts. The rule
+`av-threat-detected` reports detection groups (per host and threat label, with
+record and detection-ID counts kept apart and the two sources never added) and
+blocked creations (per host) with the engine's recorded severity.
+
+Limitations:
+
+- A detection is the engine's record under its own label; it does not show the
+  resource ran. An action of Remove with error code 0 describes the engine's
+  action, not a completed transfer or command, and not removal or recovery of a
+  payload.
+- 1118 and 1119 share the 1117 template in the provider manifest; no real record of
+  either was read, so their layout is not verified. 1015 (behavior detection) and
+  5001 (protection disabled) are not mapped: no real record to ground their fields.
+- The EvtxECmd CSV path maps these IDs only when it carries the same field names;
+  this was not verified. Use the raw EVTX.
+- `DetectionHistory` binary files are not decoded.
+- Verified on real Operational logs and support logs of two hosts: the per-ID
+  record counts and the blocked-line counts equal an independent decode.
 
 ### ESE databases (`internal/ese`)
 
@@ -1866,8 +1922,7 @@ browser ones.
 - **BITS** (`qmgr.db` and `qmgr*.dat`). The Windows 10 database is an ESE file and
   the ESE reader opens it, but there was no real `qmgr.db` to validate an
   interpretation of its tables against, so none was written.
-- **Windows Firewall log** (`pfirewall.log`) and **Defender MPLog**. No real
-  sample was available.
+- **Windows Firewall log** (`pfirewall.log`). No real sample was available.
 
 ### Package log (`packagelog@1`)
 

@@ -338,6 +338,11 @@ const (
 	// ArtifactDefenderCmdLog is MpCmdRun.log, the Defender command-line tool's
 	// own log. It records each run with its command line.
 	ArtifactDefenderCmdLog = "defender_cmd_log"
+	// ArtifactDefenderMPLog is the Microsoft Defender antimalware support log
+	// (MPLog-*.log, MPDetection-*.log). Only the lines that name a detection or
+	// state that a process creation was blocked are read; the rest is skipped
+	// and counted. Prefix times carry no zone.
+	ArtifactDefenderMPLog = "defender_mplog"
 	// ArtifactSRUM is the System Resource Usage Monitor database (SRUDB.dat),
 	// an ESE database. Windows writes, about once an hour, what each
 	// application and service used in that interval: CPU, I/O, and bytes sent
@@ -975,6 +980,20 @@ const (
 	// log recorded it: the command line, and the start and end it printed in
 	// the machine's local time.
 	EventDefenderCommand = "defender_command"
+	// EventAntimalwareDetection is the antimalware engine's record that it
+	// detected a threat in a resource (a file or a command-line string). It
+	// is the engine's own label for what it saw. It does not prove the
+	// resource ran, and a CmdLine resource is a command-line string, not a file.
+	EventAntimalwareDetection = "antimalware_detection"
+	// EventAntimalwareAction is the antimalware engine's record of an action
+	// it took, or failed to take, on a detection. The action status
+	// (including a zero error code) describes the engine's action, not
+	// whether any other path (a transfer, a command) completed.
+	EventAntimalwareAction = "antimalware_action"
+	// EventAntimalwareBlock is a real-time protection record that a process
+	// creation was blocked. It states that creation was blocked; it is not a
+	// process start and must never be treated as one.
+	EventAntimalwareBlock = "antimalware_process_blocked"
 	// EventSRUMAppUsage is one SRUM application resource record: CPU cycles,
 	// foreground time and disk I/O an application used in the interval ending
 	// at the record's time.

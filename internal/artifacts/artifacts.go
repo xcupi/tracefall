@@ -435,7 +435,12 @@ var supportedTypeInfo = map[string]typeInfo{
 	model.ArtifactDefenderCmdLog: {
 		label: "Defender command-line log (MpCmdRun.log)", family: FamilyExecution, priority: PriorityHigh,
 		why:  "Records each run of MpCmdRun.exe with its command line. MpCmdRun.exe -DownloadFile can fetch a file with a signed Microsoft binary.",
-		note: "Times are the machine's local time with no zone, so a run has no instant unless the collection's SYSTEM hive records the zone (then a UTC reading is derived with one fixed offset). Only English day and month names are read. Other Defender text logs (MPLog, MPDetection) are not read.",
+		note: "Times are the machine's local time with no zone, so a run has no instant unless the collection's SYSTEM hive records the zone (then a UTC reading is derived with one fixed offset). Only English day and month names are read. MPLog and MPDetection are read by their own parser (Defender antimalware support log).",
+	},
+	model.ArtifactDefenderMPLog: {
+		label: "Defender antimalware support log (MPLog / MPDetection)", family: FamilyLog, priority: PriorityHigh,
+		why:  "The engine's own log of detections and blocked process creations, often retained when the Operational event log has rolled over. A 'Process creation blocked' line states that real-time protection stopped a process, which no other log records.",
+		note: "Selective reader: only 'Process creation blocked' lines and DETECTIONEVENT lines are read; every other line (the great majority) is skipped by design and counted. Line prefix times carry no zone and are kept as written, so these events are undated. A blocked creation is not a process start. DetectionHistory binary files and the other Defender text logs are not read.",
 	},
 	model.ArtifactSRUM: {
 		label: "System Resource Usage Monitor (SRUM)", family: FamilyExecution, priority: PriorityHigh,
@@ -953,7 +958,7 @@ var unsupportedRules = []unsupportedRule{
 	{
 		label: "Antimalware detection log", family: FamilyLog, priority: PriorityHigh,
 		why:    "Detection and remediation history names malicious files and the time they were seen, often the earliest signal available.",
-		reason: "Tracefall reads MpCmdRun.log only. This Defender text log (MPLog, MPDetection and others) is not read.",
+		reason: "Tracefall reads MpCmdRun.log and the detection and blocked-process lines of MPLog / MPDetection. This Defender text log is another kind (or is not named like those) and is not read.",
 		match:  matchDefenderLog,
 	},
 	{

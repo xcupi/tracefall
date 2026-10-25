@@ -16,7 +16,7 @@ import (
 // URL was retrieved or that a command was run, not what the file did afterwards.
 
 func windowsToolRules() []Rule {
-	return []Rule{cryptnetExecutableRetrieval{}, defenderMpCmdRunMisuse{}}
+	return []Rule{cryptnetExecutableRetrieval{}, defenderMpCmdRunMisuse{}, avThreatDetected{}}
 }
 
 // ---------- cryptnet-executable-retrieval ----------

@@ -37,6 +37,7 @@ import (
 	"tracefall/internal/parsers/browserhistory"
 	"tracefall/internal/parsers/cryptneturl"
 	"tracefall/internal/parsers/defendercmd"
+	"tracefall/internal/parsers/defendermplog"
 	"tracefall/internal/parsers/dockercontainer"
 	evtxnative "tracefall/internal/parsers/evtx"
 	"tracefall/internal/parsers/evtxcsv"
@@ -124,6 +125,9 @@ func Registry() []parsers.ArtifactParser {
 		srum.New(),
 		webcache.New(),
 		defendercmd.New(),
+		// Name-claimed (MPLog-*.log, MPDetection-*.log) and confirmed by the
+		// engine's timestamp prefix; reads only detection and blocked-process lines.
+		defendermplog.New(),
 		// Packet captures: claimed by extension and confirmed by their magic
 		// number, and also found by magic number under any name.
 		netcapture.New(),

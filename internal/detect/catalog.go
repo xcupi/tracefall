@@ -267,6 +267,15 @@ var ruleDocs = map[string]RuleDoc{
 		Basis:      "The log records the command and a local time with no zone, not the outcome. Administrators also remove all signatures to repair a broken update.",
 		Techniques: []string{"T1105", "T1562"},
 	},
+	"av-threat-detected": {
+		Title:        "The antimalware engine recorded a threat detection or a blocked process creation",
+		Detects:      "Detection (1116), action (1117, 1118, 1119) records of the Defender Operational log and DETECTIONEVENT lines of the Defender support log, grouped by host and threat label; and, separately per host, 'Process creation blocked' lines of the support log.",
+		BaseSeverity: "low", BaseConfidence: "medium",
+		MaxSeverity: "high", MaxConfidence: "medium",
+		Escalates:  []string{"The engine's recorded severity: Low (low), Moderate (medium), High or Severe (high). A group with no recorded severity, and a blocked process creation, are medium"},
+		Basis:      "The finding states what the engine recorded: it detected or blocked something under its own label. It does not show that the resource ran, that a command or transfer completed, or that a payload was removed or recovered: a Remove action with error code 0 describes the engine's action only. A CmdLine resource is a command-line string, not a file. Repeated records of one detection ID are counted once as a detection. Support-log lines carry no zone and stay undated.",
+		Techniques: nil,
+	},
 	"grafana-extra-server-admin": {
 		Title:        "Grafana account with server-administrator rights besides the first account",
 		Detects:      "A non-service account flagged as Grafana server administrator in grafana.db whose id is not the lowest in that database.",
