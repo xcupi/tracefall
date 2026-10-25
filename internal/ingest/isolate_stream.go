@@ -80,6 +80,7 @@ func (s Subprocess) RunStream(parent context.Context, p parsers.ArtifactParser, 
 	scan.Buffer(make([]byte, 64<<10), 16<<20)
 	var cov *model.ParseCoverage
 	done := false
+	received, undated := 0, 0
 	var readErr error
 	var consumerErr error
 	for scan.Scan() {
@@ -93,10 +94,29 @@ func (s Subprocess) RunStream(parent context.Context, p parsers.ArtifactParser, 
 			break
 		}
 		if frame.Batch != nil && !frame.Done && frame.Error == nil && frame.Coverage == nil {
+			if len(frame.Batch.Events) != len(frame.Batch.Raw) {
+				readErr = fmt.Errorf("stream event/raw count mismatch")
+				break
+			}
+			for i, e := range frame.Batch.Events {
+				if e.SourceReference == "" || e.SourceReference != frame.Batch.Raw[i].SourceReference {
+					readErr = fmt.Errorf("stream event/raw source reference mismatch")
+					break
+				}
+			}
+			if readErr != nil {
+				break
+			}
 			if err = sink(*frame.Batch); err != nil {
 				consumerErr = err
 				readErr = err
 				break
+			}
+			received += len(frame.Batch.Events)
+			for _, e := range frame.Batch.Events {
+				if e.Timestamp.IsZero() {
+					undated++
+				}
 			}
 		} else if frame.Done && frame.Batch == nil {
 			done = true
@@ -138,6 +158,12 @@ func (s Subprocess) RunStream(parent context.Context, p parsers.ArtifactParser, 
 	}
 	if cov == nil {
 		return nil, &ProcessFailure{Reason: "missing stream coverage"}
+	}
+	if cov.Mapped != received || cov.RecordsRead < cov.Mapped || cov.Mapped < 0 || cov.Unmapped < 0 || cov.Undated != undated {
+		return cov, &ProcessFailure{Reason: "stream coverage does not match received records"}
+	}
+	if cov.LimitReached || cov.RecordsFailed != 0 || cov.ChunksFailed != 0 {
+		return cov, &ProcessFailure{Reason: "worker reported incomplete stream coverage without an error"}
 	}
 	return cov, nil
 }

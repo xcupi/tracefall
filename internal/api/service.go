@@ -1142,12 +1142,10 @@ type ParseFailure struct {
 	Category     string `json:"category"`
 	// Message is a sanitized, human-readable explanation.
 	Message string `json:"message"`
-	// PartialEvents records whether any events from this file were
-	// persisted before it failed. Parsing completes fully or not at all
-	// before anything is written (see the three-phase import), so this is
-	// always false today -- it is reported explicitly rather than left to
-	// be assumed, because "did this file half-land in my evidence?" is a
-	// question an investigator must never have to guess at.
+	// PartialEvents is false for parse-stage failures: staging must finish
+	// before persistence starts. Persistence errors instead abort the import
+	// with an error explicitly warning that partial evidence may remain;
+	// they are not represented by a successful ParseFailure result.
 	PartialEvents bool `json:"partial_events"`
 }
 
@@ -1296,6 +1294,7 @@ func (s *Service) importEvidence(caseID, collectionID string, sourceFileIDs []st
 	// be saved under the wrong dedup identity. Per-file skips and parse
 	// failures are recorded exactly as before and don't abort the batch.
 	pending := make([]pendingImport, 0, len(sourceFileIDs))
+	staging := &stagingBudget{limit: 1 << 30}
 	defer func() {
 		for _, pf := range pending {
 			pf.spool.close()
@@ -1458,7 +1457,7 @@ func (s *Service) importEvidence(caseID, collectionID string, sourceFileIDs []st
 		}
 
 		if _, streaming := p.(parsers.StreamingParser); streaming {
-			pf, err := s.stageStream(caseID, collectionID, sf, collection.EvidenceDirectory, p, parseCtx, prog)
+			pf, err := s.stageStream(caseID, collectionID, sf, collection.EvidenceDirectory, p, parseCtx, prog, staging)
 			if err != nil {
 				if prog.cancelled() {
 					cancelled = true
@@ -1509,8 +1508,9 @@ func (s *Service) importEvidence(caseID, collectionID string, sourceFileIDs []st
 		// reached was parsed into memory only: nothing about it was
 		// written, so it stays "discovered" rather than half-imported.
 		//
-		// This is why cancellation needs no rollback: the existing
-		// per-file write order is already the transaction boundary.
+		// Cancellation is checked only between files, not between batches.
+		// A persistence error or process crash can still leave partial batches;
+		// this is NOT a source-wide database transaction.
 		if prog.cancelled() {
 			cancelled = true
 			unprocessed += len(pending) - i
@@ -1539,7 +1539,10 @@ func (s *Service) importEvidence(caseID, collectionID string, sourceFileIDs []st
 			return nil
 		})
 		if err != nil {
-			return ImportResult{}, fmt.Errorf("persisting parsed source: %w", err)
+			// Earlier batches may already be committed. Never leave this
+			// source labelled discovered (or imply a source-wide transaction).
+			_ = s.store.MarkSourceFileFailed(id)
+			return ImportResult{}, fmt.Errorf("persisting parsed source failed; partial evidence may remain: %w", err)
 		}
 
 		applied, err := s.store.MarkSourceFileImported(id, pf.eventCount(), time.Now().UTC(), sf.ParseCoverage)

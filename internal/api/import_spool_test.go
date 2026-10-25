@@ -9,7 +9,7 @@ import (
 )
 
 func TestParsedSpoolBudgetAndCleanup(t *testing.T) {
-	p, err := newParsedSpool()
+	p, err := newParsedSpool(nil)
 	if err != nil {
 		t.Fatal(err)
 	}

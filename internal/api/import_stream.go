@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 
 	"io"
 	"os"
@@ -15,9 +16,12 @@ import (
 
 // parsedSpool stages complete sources before persistence so a stopped/failed
 // parser never leaves a source labelled imported. Disk, batches and host census
-// are bounded separately. The 1 GiB budget matches the existing worker output
-// ceiling; reaching it is a disclosed parse failure, never successful EOF.
+// are bounded separately. Both a source and all staged sources in an import
+// have a 1 GiB ceiling; reaching either is a disclosed parse failure, never
+// successful EOF. Completed staging retains a closed file handle for its path
+// only; each reader reopens it for the duration of one persistence pass.
 type parsedSpool struct {
+	budget  *stagingBudget
 	file    *os.File
 	bytes   int64
 	count   int
@@ -25,12 +29,14 @@ type parsedSpool struct {
 	summary []model.Event
 }
 
-func newParsedSpool() (*parsedSpool, error) {
+type stagingBudget struct{ used, limit int64 }
+
+func newParsedSpool(budget *stagingBudget) (*parsedSpool, error) {
 	f, err := os.CreateTemp("", "tracefall-parse-*.partial")
 	if err != nil {
 		return nil, err
 	}
-	return &parsedSpool{file: f, hosts: map[string]bool{}}, nil
+	return &parsedSpool{file: f, hosts: map[string]bool{}, budget: budget}, nil
 }
 func (p *parsedSpool) close() {
 	if p == nil {
@@ -38,6 +44,10 @@ func (p *parsedSpool) close() {
 	}
 	_ = p.file.Close()
 	_ = os.Remove(p.file.Name())
+	if p.budget != nil {
+		p.budget.used -= p.bytes
+		p.bytes = 0
+	}
 }
 func (p *parsedSpool) append(b ingest.ParsedFile) error {
 	data, err := json.Marshal(b)
@@ -46,6 +56,10 @@ func (p *parsedSpool) append(b ingest.ParsedFile) error {
 	}
 	if p.bytes+int64(len(data))+1 > 1<<30 {
 		return &ingest.ProcessFailure{Reason: "parser staging reached the 1 GiB job budget; source not imported"}
+	}
+	size := int64(len(data)) + 1
+	if p.budget != nil && size > p.budget.limit-p.budget.used {
+		return &ingest.ProcessFailure{Reason: fmt.Sprintf("parser staging reached aggregate per-import byte budget (%d bytes); source not imported", p.budget.limit)}
 	}
 	for _, e := range b.Events {
 		if !p.hosts[e.Host] {
@@ -59,15 +73,20 @@ func (p *parsedSpool) append(b ingest.ParsedFile) error {
 	if _, err = p.file.Write(append(data, '\n')); err != nil {
 		return err
 	}
-	p.bytes += int64(len(data)) + 1
+	p.bytes += size
+	if p.budget != nil {
+		p.budget.used += size
+	}
 	p.count += len(b.Events)
 	return nil
 }
 func (p *parsedSpool) each(visit func(ingest.ParsedFile) error) error {
-	if _, err := p.file.Seek(0, io.SeekStart); err != nil {
+	f, err := os.Open(p.file.Name())
+	if err != nil {
 		return err
 	}
-	dec := json.NewDecoder(p.file)
+	defer f.Close()
+	dec := json.NewDecoder(f)
 	for {
 		var b ingest.ParsedFile
 		err := dec.Decode(&b)
@@ -83,8 +102,8 @@ func (p *parsedSpool) each(visit func(ingest.ParsedFile) error) error {
 	}
 }
 
-func (s *Service) stageStream(caseID, collectionID string, sf model.SourceFile, root string, p parsers.ArtifactParser, pc parsers.ParseContext, prog *progressSink) (pendingImport, error) {
-	spool, err := newParsedSpool()
+func (s *Service) stageStream(caseID, collectionID string, sf model.SourceFile, root string, p parsers.ArtifactParser, pc parsers.ParseContext, prog *progressSink, budget *stagingBudget) (pendingImport, error) {
+	spool, err := newParsedSpool(budget)
 	if err != nil {
 		return pendingImport{}, err
 	}
@@ -117,6 +136,10 @@ func (s *Service) stageStream(caseID, collectionID string, sf model.SourceFile, 
 		if cov != nil && cov.LimitReached {
 			return pendingImport{}, &ingest.ProcessFailure{Reason: err.Error()}
 		}
+		return pendingImport{}, err
+	}
+	if err := spool.file.Close(); err != nil {
+		spool.close()
 		return pendingImport{}, err
 	}
 	sf.ParseCoverage = cov
