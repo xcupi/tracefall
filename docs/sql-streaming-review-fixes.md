@@ -45,6 +45,9 @@ classification/cleanup, partial persistence and malformed stream frames. These
 are software checks, not real-evidence fidelity or analytical completeness.
 The full suite is reserved for integration by the parent task.
 
-The largest SQL source/rotations remain NOT VERIFIED. MFT, SRUM, USN and EVTX
-scalability are unchanged and NOT COMPLETE. This SQL slice does not close the
-global multi-parser resource or recovery defect.
+The largest SQL source/rotations remain NOT VERIFIED. At this SQL-slice revision,
+MFT, SRUM, USN and EVTX scalability were unchanged and NOT COMPLETE. Subsequent
+MFT/USN work is tracked in [bounded native NTFS import](bounded-ntfs-import.md);
+subsequent SRUM/diagnostic EVTX work is tracked in
+[bounded SRUM and EVTX import](bounded-srum-evtx-import.md). Neither slice closes
+crash recovery or the entire multi-parser acceptance scope.

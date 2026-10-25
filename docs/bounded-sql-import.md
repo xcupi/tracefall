@@ -40,8 +40,11 @@ artifact parsers still use their existing paths.
 ## Limits and remaining acceptance gates
 
 This is a validated SQL vertical slice, not completion of large-artifact work.
-The original-host MFT, SRUM, USN and diagnostic EVTX readers are unchanged and
-still need bounded-reader/result implementations and real-file verification.
+At the SQL-slice revision, the MFT, SRUM, USN and diagnostic EVTX readers were
+unchanged. Later MFT/USN bounded import work is documented separately in
+[bounded native NTFS import](bounded-ntfs-import.md); subsequent SRUM/diagnostic
+EVTX implementation and validation are tracked in
+[bounded SRUM and EVTX import](bounded-srum-evtx-import.md).
 SQL sources whose normalized output exceeds the existing 1 GiB per-job budget
 still fail without import. Resumable bounded jobs and the largest SQL rotations
 remain unverified; this change must not be described as unlimited ingestion.
