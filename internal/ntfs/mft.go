@@ -464,6 +464,9 @@ func ParseRecord(buf []byte, recordNumber uint64, lim Limits) (rec Record, ok bo
 				break
 			}
 			if len(rec.Names) >= lim.MaxNamesPerRecord {
+				if lim.StrictNames {
+					return Record{}, false, fmt.Errorf("%w: FILE_NAME attribute count at record %d", ErrLimitExceeded, recordNumber)
+				}
 				rec.Warnings = append(rec.Warnings, "record carries more $FILE_NAME attributes than the limit allows")
 				break
 			}
@@ -475,7 +478,10 @@ func ParseRecord(buf []byte, recordNumber uint64, lim Limits) (rec Record, ok bo
 			parentRef, parentSeq := fileRef(u64(content, 0x00))
 			nameChars := int(content[0x40])
 			namespace := content[0x41]
-			if lim.StrictNames && (nameChars > lim.MaxNameChars || nameChars*2 > len(content)-66 || !validUTF16LE(content[66:66+nameChars*2])) {
+			if lim.StrictNames && nameChars > lim.MaxNameChars {
+				return Record{}, false, fmt.Errorf("%w: FILE_NAME character count at record %d", ErrLimitExceeded, recordNumber)
+			}
+			if lim.StrictNames && (nameChars*2 > len(content)-66 || !validUTF16LE(content[66:66+nameChars*2])) {
 				return Record{}, false, fmt.Errorf("%w: invalid FILE_NAME UTF-16 or bounds at record %d", ErrCorrupt, recordNumber)
 			}
 			name := decodeUTF16(content[0x42:], nameChars, lim.MaxNameChars)
@@ -730,6 +736,9 @@ func Scan(path string, opts ScanOptions, fn func(Record) error) error {
 		}
 		rec, ok, perr := ParseRecord(buf, uint64(index), lim)
 		if perr != nil {
+			if opts.Strict {
+				return perr
+			}
 			// One unparseable record must not end the scan.
 			rec = Record{RecordNumber: uint64(index), Warnings: []string{perr.Error()}}
 			ok = true

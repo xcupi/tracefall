@@ -3284,7 +3284,7 @@ func classifyParseError(err error) (category, message string) {
 	case errors.Is(err, ntfs.ErrCorrupt):
 		return ParseFailureCorrupt, "The NTFS $MFT is corrupt or truncated, so it could not be parsed."
 	case errors.Is(err, ntfs.ErrLimitExceeded):
-		return ParseFailureUnsupported, "This NTFS $MFT exceeds Tracefall's size or record limits and was not parsed."
+		return ParseFailureLimit, "This NTFS artifact exceeds a reader safety limit (file size, record count, or filename bounds) and was not parsed."
 	case errors.Is(err, evtx.ErrNotEVTX):
 		return ParseFailureUnsupported, "This file is not a Windows Event Log despite being cataloged as one."
 	case errors.Is(err, evtx.ErrLimitExceeded), errors.Is(err, regf.ErrLimitExceeded), errors.Is(err, ad1.ErrLimitExceeded),

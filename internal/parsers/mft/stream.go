@@ -136,7 +136,10 @@ func (p Parser) ParseStream(ctx context.Context, path string, _ parsers.ParseCon
 	lim.MaxRecords = int(lim.MaxFileBytes/512) + 1
 	d, err := openDirectories(path, lim)
 	if err != nil {
-		cov.RecordsFailed++
+		cov.LimitReached = errors.Is(err, ntfs.ErrLimitExceeded)
+		if !cov.LimitReached {
+			cov.RecordsFailed++
+		}
 		return cov, err
 	}
 	defer d.f.Close()
