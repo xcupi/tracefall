@@ -1,10 +1,13 @@
 package api
 
 import (
+	"context"
+	"fmt"
 	"os"
 	"sync/atomic"
 	"testing"
 	"time"
+	"tracefall/internal/model"
 
 	"tracefall/internal/ingest"
 	"tracefall/internal/parsers"
@@ -42,6 +45,17 @@ type countingRunner struct {
 func (c *countingRunner) Run(p parsers.ArtifactParser, root, abs string, ctx parsers.ParseContext) (parsers.ParseResult, error) {
 	c.n.Add(1)
 	return c.inner.Run(p, root, abs, ctx)
+}
+
+func (c *countingRunner) RunStream(ctx context.Context, p parsers.ArtifactParser, root, abs string, pc parsers.ParseContext, sink parsers.RecordSink) (*model.ParseCoverage, error) {
+	inner, ok := c.inner.(interface {
+		RunStream(context.Context, parsers.ArtifactParser, string, string, parsers.ParseContext, parsers.RecordSink) (*model.ParseCoverage, error)
+	})
+	if !ok {
+		return nil, fmt.Errorf("wrapped runner does not support streaming")
+	}
+	c.n.Add(1)
+	return inner.RunStream(ctx, p, root, abs, pc, sink)
 }
 
 func TestIsolation_ImportOfEvidenceUsesTheChildProcess(t *testing.T) {
