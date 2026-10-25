@@ -95,6 +95,12 @@ func (e Event) ComputeDedupHash() string {
 	if e.ArtifactType == ArtifactMSSQLLog || e.ArtifactType == ArtifactSQLAgentLog {
 		parts = append(parts, e.SourceReference, e.Extra["timestamp_local"], e.Extra["message"], e.Extra["instance"], e.Extra["sql_source"], e.Extra["agent_message_id"])
 	}
+	// NTFS records can share names and timestamps, including reused MFT slots.
+	// Recorded record/sequence (MFT) or USN/offset (journal) distinguishes them;
+	// collection and storage path do not, so recollections still deduplicate.
+	if e.ArtifactType == ArtifactMFT || e.ArtifactType == ArtifactUsnJournal {
+		parts = append(parts, e.SourceReference, e.Extra["mft_file_reference"])
+	}
 	// Journal entries are timestamped at microsecond resolution, so two
 	// entries from the same process in the same microsecond would collapse
 	// under the timestamped rule above. The per-file sequence number is what

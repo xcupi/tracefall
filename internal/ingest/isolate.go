@@ -3,6 +3,7 @@ package ingest
 import (
 	"bufio"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"errors"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"tracefall/internal/gate"
+	"tracefall/internal/model"
 	"tracefall/internal/parsers"
 )
 
@@ -308,7 +310,27 @@ func WorkerMain(in io.Reader, out io.Writer, classify func(error) (category, mes
 		if !ok {
 			return fmt.Errorf("parser does not support streaming")
 		}
+		var packed bytes.Buffer
+		z := gzip.NewWriter(&packed)
 		cov, err := sp.ParseStream(context.Background(), req.Path, req.Context, func(batch parsers.ParseResult) error {
+			if p.ArtifactType() == model.ArtifactMFT || p.ArtifactType() == model.ArtifactUsnJournal {
+				data, err := json.Marshal(batch)
+				if err != nil {
+					return err
+				}
+				if len(data) > 16<<20 {
+					return &ProcessFailure{Reason: "decoded stream frame exceeds 16 MiB"}
+				}
+				packed.Reset()
+				z.Reset(&packed)
+				if _, err = z.Write(data); err != nil {
+					return err
+				}
+				if err = z.Close(); err != nil {
+					return err
+				}
+				return enc.Encode(streamFrame{CompressedBatch: packed.Bytes()})
+			}
 			return enc.Encode(streamFrame{Batch: &batch})
 		})
 		frame := streamFrame{Done: true, Coverage: cov}

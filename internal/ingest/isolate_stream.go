@@ -3,6 +3,7 @@ package ingest
 import (
 	"bufio"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"errors"
@@ -17,10 +18,11 @@ import (
 )
 
 type streamFrame struct {
-	Batch    *parsers.ParseResult `json:"batch,omitempty"`
-	Coverage *model.ParseCoverage `json:"coverage,omitempty"`
-	Error    *workerError         `json:"error,omitempty"`
-	Done     bool                 `json:"done,omitempty"`
+	CompressedBatch []byte               `json:"compressed_batch,omitempty"`
+	Batch           *parsers.ParseResult `json:"batch,omitempty"`
+	Coverage        *model.ParseCoverage `json:"coverage,omitempty"`
+	Error           *workerError         `json:"error,omitempty"`
+	Done            bool                 `json:"done,omitempty"`
 }
 
 // RunStream preserves synchronous sink backpressure across the worker pipe.
@@ -93,6 +95,36 @@ func (s Subprocess) RunStream(parent context.Context, p parsers.ArtifactParser, 
 			readErr = err
 			break
 		}
+		if frame.CompressedBatch != nil {
+			if frame.Batch != nil || frame.Done || frame.Error != nil || frame.Coverage != nil {
+				readErr = fmt.Errorf("invalid compressed stream frame")
+				break
+			}
+			z, e := gzip.NewReader(bytes.NewReader(frame.CompressedBatch))
+			if e != nil {
+				readErr = e
+				break
+			}
+			data, e := io.ReadAll(io.LimitReader(z, (16<<20)+1))
+			closeErr := z.Close()
+			if e != nil {
+				readErr = e
+				break
+			}
+			if closeErr != nil {
+				readErr = closeErr
+				break
+			}
+			if len(data) > 16<<20 {
+				readErr = fmt.Errorf("decoded stream frame exceeds 16 MiB")
+				break
+			}
+			frame.Batch = &parsers.ParseResult{}
+			if e = json.Unmarshal(data, frame.Batch); e != nil {
+				readErr = e
+				break
+			}
+		}
 		if frame.Batch != nil && !frame.Done && frame.Error == nil && frame.Coverage == nil {
 			if len(frame.Batch.Events) != len(frame.Batch.Raw) {
 				readErr = fmt.Errorf("stream event/raw count mismatch")
@@ -159,7 +191,11 @@ func (s Subprocess) RunStream(parent context.Context, p parsers.ArtifactParser, 
 	if cov == nil {
 		return nil, &ProcessFailure{Reason: "missing stream coverage"}
 	}
-	if cov.Mapped != received || cov.RecordsRead < cov.Mapped || cov.Mapped < 0 || cov.Unmapped < 0 || cov.Undated != undated {
+	emitted := cov.Mapped
+	if cov.EmittedEvents != nil {
+		emitted = *cov.EmittedEvents
+	}
+	if emitted != received || (emitted > 0 && cov.Mapped == 0) || emitted < cov.Mapped || cov.RecordsRead < cov.Mapped || cov.Mapped < 0 || cov.Unmapped < 0 || cov.Undated != undated {
 		return cov, &ProcessFailure{Reason: "stream coverage does not match received records"}
 	}
 	if cov.LimitReached || cov.RecordsFailed != 0 || cov.ChunksFailed != 0 {

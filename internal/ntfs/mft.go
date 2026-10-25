@@ -88,6 +88,8 @@ const (
 
 // Limits bounds what one $MFT may consume.
 type Limits struct {
+	// StrictNames refuses lossy filename decoding; compatibility readers may opt out.
+	StrictNames       bool
 	MaxFileBytes      int64
 	MaxRecords        int
 	MaxNamesPerRecord int
@@ -253,6 +255,23 @@ func fileTime(ft uint64) time.Time {
 	return t
 }
 
+func validUTF16LE(b []byte) bool {
+	if len(b)%2 != 0 {
+		return false
+	}
+	for i := 0; i < len(b); i += 2 {
+		c := u16(b, i)
+		if c >= 0xd800 && c <= 0xdbff {
+			if i+2 >= len(b) || u16(b, i+2) < 0xdc00 || u16(b, i+2) > 0xdfff {
+				return false
+			}
+			i += 2
+		} else if c >= 0xdc00 && c <= 0xdfff {
+			return false
+		}
+	}
+	return true
+}
 func u16(b []byte, off int) uint16 { return binary.LittleEndian.Uint16(b[off : off+2]) }
 func u32(b []byte, off int) uint32 { return binary.LittleEndian.Uint32(b[off : off+4]) }
 func u64(b []byte, off int) uint64 { return binary.LittleEndian.Uint64(b[off : off+8]) }
@@ -456,6 +475,9 @@ func ParseRecord(buf []byte, recordNumber uint64, lim Limits) (rec Record, ok bo
 			parentRef, parentSeq := fileRef(u64(content, 0x00))
 			nameChars := int(content[0x40])
 			namespace := content[0x41]
+			if lim.StrictNames && (nameChars > lim.MaxNameChars || nameChars*2 > len(content)-66 || !validUTF16LE(content[66:66+nameChars*2])) {
+				return Record{}, false, fmt.Errorf("%w: invalid FILE_NAME UTF-16 or bounds at record %d", ErrCorrupt, recordNumber)
+			}
 			name := decodeUTF16(content[0x42:], nameChars, lim.MaxNameChars)
 			if name == "" {
 				rec.Warnings = append(rec.Warnings, "$FILE_NAME carries an empty or undecodable name")
@@ -590,6 +612,8 @@ func Sniff(header []byte) bool {
 
 // ScanOptions configures a streaming scan.
 type ScanOptions struct {
+	// Strict rejects structural damage rather than returning a partial table.
+	Strict bool
 	Limits Limits
 	// Cancelled is polled between records so a long scan can be stopped
 	// by the ingestion pipeline. Nil means never cancelled.
@@ -687,6 +711,22 @@ func Scan(path string, opts ScanOptions, fn func(Record) error) error {
 		}
 		if rerr != nil {
 			return rerr
+		}
+		if opts.Strict {
+			if string(buf[:4]) != "FILE" {
+				nonzero := false
+				for _, v := range buf {
+					if v != 0 {
+						nonzero = true
+						break
+					}
+				}
+				if nonzero {
+					return fmt.Errorf("%w: non-FILE nonzero slot %d", ErrCorrupt, index)
+				}
+			} else if !Sniff(buf) {
+				return fmt.Errorf("%w: inconsistent FILE header at slot %d", ErrCorrupt, index)
+			}
 		}
 		rec, ok, perr := ParseRecord(buf, uint64(index), lim)
 		if perr != nil {

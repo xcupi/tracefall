@@ -1,6 +1,7 @@
 package ntfs
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -307,9 +308,14 @@ func ParseUsnRecord(buf []byte, offset int64, lim Limits) (rec UsnRecord, size i
 
 // UsnScanOptions configures a journal scan.
 type UsnScanOptions struct {
-	Limits    Limits
-	Cancelled func() bool
-	Progress  func(recordsRead int, bytesRead int64)
+	// Strict rejects undecodable nonzero regions instead of resynchronizing.
+	Strict bool
+	// NonRecordRegion records unrecognized aligned bytes while preserving the
+	// legacy sparse/resynchronizing scan. Identifiable malformed records still fail.
+	NonRecordRegion func(offset int64, bytes int)
+	Limits          Limits
+	Cancelled       func() bool
+	Progress        func(recordsRead int, bytesRead int64)
 }
 
 // ScanUsnJournal streams a $UsnJrnl:$J file, calling fn for each record.
@@ -347,6 +353,8 @@ func ScanUsnJournal(path string, opts UsnScanOptions, fn func(UsnRecord) error) 
 		found      bool
 		eof        bool
 	)
+	steps := 0
+	resync := false
 	for {
 		if !eof && len(buf) < usnMaxRecord {
 			n, rerr := f.Read(chunk)
@@ -362,13 +370,47 @@ func ScanUsnJournal(path string, opts UsnScanOptions, fn func(UsnRecord) error) 
 		if len(buf) == 0 {
 			break
 		}
-		if opts.Cancelled != nil && records%256 == 0 && opts.Cancelled() {
+		steps++
+		if opts.Cancelled != nil && (steps == 1 || steps%256 == 0) && opts.Cancelled() {
 			return ErrCancelled
 		}
 		if records >= lim.MaxRecords {
 			return fmt.Errorf("%w: more than %d USN records", ErrLimitExceeded, lim.MaxRecords)
 		}
 
+		// Once framing is lost, arbitrary words are not record headers merely
+		// because one field resembles a version. Restore framing only after a
+		// complete independently bounded V2/V3 header and UTF-16 name validate.
+		if opts.Strict && opts.NonRecordRegion != nil && resync && !coherentUsnCandidate(buf) {
+			n := 8
+			if len(buf) < n {
+				n = len(buf)
+			}
+			if !bytes.Equal(buf[:n], make([]byte, n)) {
+				opts.NonRecordRegion(fileOffset, n)
+			}
+			buf, fileOffset = advance(buf, fileOffset, 8)
+			continue
+		}
+		if opts.Strict && len(buf) >= 8 {
+			major := u16(buf, 4)
+			length := u32(buf, 0)
+			plausibleLength := length >= usnMinRecordV2 && length <= usnMaxRecord && length%8 == 0
+			if opts.NonRecordRegion != nil && (major < 2 || major > 4 || (major == 4 && !plausibleLength)) {
+				if !bytes.Equal(buf[:8], make([]byte, 8)) {
+					resync = true
+					opts.NonRecordRegion(fileOffset, 8)
+				}
+				buf, fileOffset = advance(buf, fileOffset, 8)
+				continue
+			}
+			if major >= 2 && major <= 4 {
+				length := u32(buf, 0)
+				if length < usnMinRecordV2 || length > usnMaxRecord || length%8 != 0 {
+					return fmt.Errorf("%w: invalid USN record length at %d", ErrCorrupt, fileOffset)
+				}
+			}
+		}
 		rec, size, perr := ParseUsnRecord(buf, fileOffset, lim)
 		switch {
 		case perr != nil && !eof:
@@ -389,15 +431,59 @@ func ScanUsnJournal(path string, opts UsnScanOptions, fn func(UsnRecord) error) 
 			}
 			return rerr
 		case perr != nil:
+			if opts.Strict {
+				return perr
+			}
 			// Truncated tail. Everything before it stands.
 			return nil
 		case size == 0:
+			n := 8
+			if len(buf) < n {
+				n = len(buf)
+			}
+			if !bytes.Equal(buf[:n], make([]byte, n)) {
+				if opts.NonRecordRegion != nil {
+					opts.NonRecordRegion(fileOffset, n)
+				} else if opts.Strict {
+					return fmt.Errorf("%w: nonzero undecodable USN bytes at %d", ErrCorrupt, fileOffset)
+				}
+			}
 			// Sparse zeros or an unrecognizable region: step to the next
 			// 8-byte boundary and keep looking.
 			buf, fileOffset = advance(buf, fileOffset, 8)
 			continue
 		}
 
+		if opts.Strict {
+			if (rec.MajorVersion != 2 && rec.MajorVersion != 3) || rec.MinorVersion != 0 {
+				return ErrUnsupportedUSNVersion
+			}
+			no := 58
+			nl := 56
+			if rec.MajorVersion == 3 {
+				no = 74
+				nl = 72
+			}
+			off, n := int(u16(buf, no)), int(u16(buf, nl))
+			if n/2 > lim.MaxNameChars {
+				return fmt.Errorf("%w: USN filename exceeds %d UTF-16 code units at %d", ErrLimitExceeded, lim.MaxNameChars, fileOffset)
+			}
+			if n == 0 || n%2 != 0 || off%2 != 0 || off < no+2 || off+n > size {
+				return fmt.Errorf("%w: invalid USN filename at %d", ErrCorrupt, fileOffset)
+			}
+			for i := off; i < off+n; i += 2 {
+				c := u16(buf, i)
+				if c >= 0xd800 && c <= 0xdbff {
+					if i+2 >= off+n || u16(buf, i+2) < 0xdc00 || u16(buf, i+2) > 0xdfff {
+						return fmt.Errorf("%w: invalid UTF-16 at %d", ErrCorrupt, fileOffset)
+					}
+					i += 2
+				} else if c >= 0xdc00 && c <= 0xdfff {
+					return fmt.Errorf("%w: invalid UTF-16 at %d", ErrCorrupt, fileOffset)
+				}
+			}
+		}
+		resync = false
 		found = true
 		records++
 		if err := fn(rec); err != nil {
@@ -412,6 +498,36 @@ func ScanUsnJournal(path string, opts UsnScanOptions, fn func(UsnRecord) error) 
 		return ErrNotUSN
 	}
 	return nil
+}
+
+// coherentUsnCandidate is used only to regain lost framing. It does not
+// authorize relaxed decoding of a malformed record at an established boundary.
+func coherentUsnCandidate(b []byte) bool {
+	if len(b) < 8 {
+		return false
+	}
+	length := int(u32(b, 0))
+	major := u16(b, 4)
+	if length < usnMinRecordV2 || length > usnMaxRecord || length%8 != 0 || length > len(b) || u16(b, 6) != 0 || (major != 2 && major != 3) {
+		return false
+	}
+	nl, no := 56, 58
+	timestampOffset := 32
+	if major == 3 {
+		if length < usnMinRecordV3 {
+			return false
+		}
+		nl, no = 72, 74
+		timestampOffset = 48
+	}
+	// A plausible recorded instant is necessary to identify a new boundary
+	// inside arbitrary non-record bytes. At an established boundary the strict
+	// decoder still accepts genuinely undated records and reports them unmapped.
+	if fileTime(u64(b, timestampOffset)).IsZero() {
+		return false
+	}
+	n, off := int(u16(b, nl)), int(u16(b, no))
+	return n > 0 && n%2 == 0 && off%2 == 0 && off >= no+2 && off+n <= length && validUTF16LE(b[off:off+n])
 }
 
 // advance drops n bytes from the front of the window.

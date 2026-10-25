@@ -3,6 +3,10 @@ package model
 // ParseCoverage records what a parser actually read, separately from timeline
 // events. Nil means not recorded (including older imports), never complete.
 type ParseCoverage struct {
+	// EmittedEvents separates output cardinality from mapped source records for
+	// one-to-many parsers. Nil preserves the historical one-event-per-record contract.
+	EmittedEvents *int `json:"emitted_events,omitempty"`
+
 	// Notes are bounded parser-generated caveats, never raw evidence text.
 	Notes           []string        `json:"notes,omitempty"`
 	RecordsRead     int             `json:"records_read"`

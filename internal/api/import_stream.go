@@ -1,6 +1,8 @@
 package api
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -21,22 +23,36 @@ import (
 // successful EOF. Completed staging retains a closed file handle for its path
 // only; each reader reopens it for the duration of one persistence pass.
 type parsedSpool struct {
-	budget  *stagingBudget
-	file    *os.File
-	bytes   int64
-	count   int
-	hosts   map[string]bool
-	summary []model.Event
+	compressed bool
+	compressor *gzip.Writer
+	buffer     bytes.Buffer
+	budget     *stagingBudget
+	file       *os.File
+	bytes      int64
+	count      int
+	hosts      map[string]bool
+	summary    []model.Event
 }
 
 type stagingBudget struct{ used, limit int64 }
 
-func newParsedSpool(budget *stagingBudget) (*parsedSpool, error) {
+func newParsedSpool(budget *stagingBudget, artifact ...string) (*parsedSpool, error) {
 	f, err := os.CreateTemp("", "tracefall-parse-*.partial")
 	if err != nil {
 		return nil, err
 	}
-	return &parsedSpool{file: f, hosts: map[string]bool{}, budget: budget}, nil
+	p := &parsedSpool{file: f, hosts: map[string]bool{}, budget: budget}
+	if len(artifact) > 0 && (artifact[0] == model.ArtifactMFT || artifact[0] == model.ArtifactUsnJournal) {
+		p.compressed = true
+		p.compressor = gzip.NewWriter(&p.buffer)
+	}
+	return p, nil
+}
+func (p *parsedSpool) finishWrite() error {
+	err := p.file.Close()
+	p.compressor = nil
+	p.buffer = bytes.Buffer{}
+	return err
 }
 func (p *parsedSpool) close() {
 	if p == nil {
@@ -54,10 +70,26 @@ func (p *parsedSpool) append(b ingest.ParsedFile) error {
 	if err != nil {
 		return err
 	}
-	if p.bytes+int64(len(data))+1 > 1<<30 {
+	if p.compressed {
+		if len(data) > 16<<20 {
+			return &ingest.ProcessFailure{Reason: "decoded staging batch exceeds 16 MiB"}
+		}
+		p.buffer.Reset()
+		p.compressor.Reset(&p.buffer)
+		if _, err = p.compressor.Write(append(data, '\n')); err != nil {
+			return err
+		}
+		if err = p.compressor.Close(); err != nil {
+			return err
+		}
+		data = p.buffer.Bytes()
+	} else {
+		data = append(data, '\n')
+	}
+	if p.bytes+int64(len(data)) > 1<<30 {
 		return &ingest.ProcessFailure{Reason: "parser staging reached the 1 GiB job budget; source not imported"}
 	}
-	size := int64(len(data)) + 1
+	size := int64(len(data))
 	if p.budget != nil && size > p.budget.limit-p.budget.used {
 		return &ingest.ProcessFailure{Reason: fmt.Sprintf("parser staging reached aggregate per-import byte budget (%d bytes); source not imported", p.budget.limit)}
 	}
@@ -70,7 +102,7 @@ func (p *parsedSpool) append(b ingest.ParsedFile) error {
 			p.summary = append(p.summary, model.Event{Host: e.Host})
 		}
 	}
-	if _, err = p.file.Write(append(data, '\n')); err != nil {
+	if _, err = p.file.Write(data); err != nil {
 		return err
 	}
 	p.bytes += size
@@ -86,24 +118,66 @@ func (p *parsedSpool) each(visit func(ingest.ParsedFile) error) error {
 		return err
 	}
 	defer f.Close()
-	dec := json.NewDecoder(f)
-	for {
-		var b ingest.ParsedFile
-		err := dec.Decode(&b)
+	var reader io.Reader = f
+	if p.compressed {
+		z, err := gzip.NewReader(f)
 		if err == io.EOF {
 			return nil
 		}
 		if err != nil {
 			return err
 		}
-		if err = visit(b); err != nil {
+		defer z.Close()
+		reader = z
+	}
+	dec := json.NewDecoder(reader)
+	// Native transport batches stay small for pipe backpressure. Coalesce only
+	// during persistence to amortize commits, with independent 1024-event and
+	// 16 MiB decoded-serialization bounds; never collect a complete source.
+	var pending ingest.ParsedFile
+	var pendingBytes int64
+	flush := func() error {
+		if len(pending.Events) == 0 && len(pending.Raw) == 0 {
+			return nil
+		}
+		err := visit(pending)
+		pending = ingest.ParsedFile{}
+		pendingBytes = 0
+		return err
+	}
+	for {
+		var b ingest.ParsedFile
+		before := dec.InputOffset()
+		err := dec.Decode(&b)
+		if err == io.EOF {
+			return flush()
+		}
+		if err != nil {
 			return err
 		}
+		if !p.compressed || b.Coverage != nil {
+			if err := flush(); err != nil {
+				return err
+			}
+			if err = visit(b); err != nil {
+				return err
+			}
+			continue
+		}
+		size := dec.InputOffset() - before
+		if len(pending.Events)+len(b.Events) > 1024 || pendingBytes+size > 16<<20 {
+			if err := flush(); err != nil {
+				return err
+			}
+		}
+		pending.Events = append(pending.Events, b.Events...)
+		pending.Raw = append(pending.Raw, b.Raw...)
+		pendingBytes += size
 	}
 }
 
 func (s *Service) stageStream(caseID, collectionID string, sf model.SourceFile, root string, p parsers.ArtifactParser, pc parsers.ParseContext, prog *progressSink, budget *stagingBudget) (pendingImport, error) {
-	spool, err := newParsedSpool(budget)
+	spool, err := newParsedSpool(budget, sf.ArtifactType)
 	if err != nil {
 		return pendingImport{}, err
 	}
@@ -138,7 +212,7 @@ func (s *Service) stageStream(caseID, collectionID string, sf model.SourceFile, 
 		}
 		return pendingImport{}, err
 	}
-	if err := spool.file.Close(); err != nil {
+	if err := spool.finishWrite(); err != nil {
 		spool.close()
 		return pendingImport{}, err
 	}
