@@ -57,6 +57,10 @@ func TestPipelineResumeReportsHistoricalPartialSource(t *testing.T) {
 	if done.Status != model.JobSucceeded || done.Attempts != 2 || num(done.Result, "events") != 0 || num(done.Result, "files_failed") != 1 || num(done.Result, "files_skipped") != 0 {
 		t.Fatalf("failed source omitted on resume: %+v", done)
 	}
+	colAfter, err := svc.store.GetCollection(d.Collection.ID)
+	if err != nil || colAfter.ImportedFileCount != 0 || colAfter.ParsedEventCount != 0 || colAfter.IngestionStatus != model.CollectionStatusPending {
+		t.Fatalf("partial source counted as committed import: %+v err=%v", colAfter, err)
+	}
 	var n int
 	if err := svc.store.DB().QueryRow("SELECT count(*) FROM raw_evidence").Scan(&n); err != nil || n != 1 {
 		t.Fatalf("historical raw evidence changed: count=%d err=%v", n, err)

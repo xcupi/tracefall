@@ -49,7 +49,10 @@ func (s *Service) persistSource(ctx context.Context, pf pendingImport, caseID, c
 		if !applied {
 			return errSourceAlreadyImported
 		}
-		return nil
+		// Stale analysis in the SAME transaction as source admission, even
+		// for a zero-event source. Rollup repair must not be the only signal:
+		// startup migrations can already have refreshed imported-file counts.
+		return st.UpdateCaseStatus(caseID, model.CaseStatusIngested)
 	})
 	if err != nil {
 		return 0, false, err

@@ -1594,17 +1594,8 @@ func (s *Service) importEvidence(caseID, collectionID string, sourceFileIDs []st
 	}
 
 	prog.phase(PhaseFinalizing)
-	if len(imported) > 0 {
-		if err := s.recomputeCollectionCounts(collectionID); err != nil {
-			return ImportResult{}, fmt.Errorf("recomputing collection counts: %w", err)
-		}
-		// A case with at least one imported file always moves to
-		// "ingested" -- including when it was already "analyzed":
-		// importing more evidence makes the prior analysis stale, and
-		// this is the signal the dashboard uses to prompt re-running it.
-		if err := s.store.UpdateCaseStatus(caseID, model.CaseStatusIngested); err != nil {
-			return ImportResult{}, fmt.Errorf("updating case status: %w", err)
-		}
+	if err := s.store.ReconcileCollectionImports(caseID, collectionID); err != nil {
+		return ImportResult{}, fmt.Errorf("reconciling collection imports: %w", err)
 	}
 	full, err := s.store.GetCollection(collectionID)
 	if err != nil {

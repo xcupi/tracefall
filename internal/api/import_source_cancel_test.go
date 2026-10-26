@@ -67,8 +67,34 @@ func TestPersistSourceCancellationRollsBackAndRetries(t *testing.T) {
 	if err != nil || sf.ImportStatus != model.SourceFileDiscovered {
 		t.Fatalf("cancel status=%s err=%v", sf.ImportStatus, err)
 	}
+	if err := svc.store.UpdateCaseStatus(c.ID, model.CaseStatusAnalyzed); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.store.DB().Exec(`CREATE TRIGGER reject_source_invalidation BEFORE UPDATE ON cases BEGIN SELECT RAISE(ABORT,'injected case write failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := svc.persistSource(context.Background(), pf, c.ID, d.Collection.ID, func() bool { return false }); err == nil {
+		t.Fatal("source admission ignored failed invalidation")
+	}
+	for _, table := range []string{"events", "raw_evidence", "event_observations"} {
+		var count int
+		if err := svc.store.DB().QueryRow("SELECT count(*) FROM " + table).Scan(&count); err != nil || count != 0 {
+			t.Fatalf("failed invalidation leaked %s=%d err=%v", table, count, err)
+		}
+	}
+	sf, err = svc.store.GetSourceFile(files[0].ID)
+	if err != nil || sf.ImportStatus != model.SourceFileDiscovered {
+		t.Fatalf("failed invalidation committed source: %+v %v", sf, err)
+	}
+	if _, err := svc.store.DB().Exec(`DROP TRIGGER reject_source_invalidation`); err != nil {
+		t.Fatal(err)
+	}
 	n, applied, err := svc.persistSource(context.Background(), pf, c.ID, d.Collection.ID, func() bool { return false })
 	if err != nil || !applied || n != 3 {
 		t.Fatalf("retry new=%d applied=%v err=%v", n, applied, err)
+	}
+	var status string
+	if err := svc.store.DB().QueryRow(`SELECT status FROM cases WHERE id=?`, c.ID).Scan(&status); err != nil || status != model.CaseStatusIngested {
+		t.Fatalf("source committed without analysis invalidation: status=%s err=%v", status, err)
 	}
 }

@@ -186,7 +186,7 @@ func (s *Store) FindCaseByName(name string) (model.Case, bool, error) {
 }
 
 func (s *Store) UpdateCaseStatus(id, status string) error {
-	_, err := s.db.Exec(`UPDATE cases SET status = ?, updated_at = ? WHERE id = ?`,
+	_, err := s.sourceExecutor().Exec(`UPDATE cases SET status = ?, updated_at = ? WHERE id = ?`,
 		status, fmtTime(time.Now()), id)
 	return err
 }

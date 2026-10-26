@@ -8,7 +8,7 @@ import (
 // WithSourceTransaction admits a source's raw records, deduplicated events,
 // observations and final imported status together. The callback receives a
 // private transaction-bound view; the shared Store is never mutated. Only the
-// source-write methods and FindEventByDedupHash may be used on this view.
+// source-write methods, UpdateCaseStatus and FindEventByDedupHash may be used on this view.
 // SQLite owns rollback recovery after process death. Batches still bound memory,
 // but the transaction holds the database's writer/connection until completion.
 func (s *Store) WithSourceTransaction(ctx context.Context, fn func(*Store) error) error {

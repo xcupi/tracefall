@@ -372,6 +372,11 @@ func (s *Service) executeIngest(job model.PipelineJob, res *PipelineResult) *pip
 	res.CollectionID = collectionID
 
 	// ---- import
+	// Repair a committed source even if no IDs remain, or cancellation was
+	// requested after admission. Never leave counts/analysis stale on resume.
+	if err := svc.store.ReconcileCollectionImports(job.CaseID, collectionID); err != nil {
+		return fail(err)
+	}
 	if st := cancelled(); st != nil {
 		return st
 	}
@@ -425,6 +430,9 @@ func (s *Service) executeIngest(job model.PipelineJob, res *PipelineResult) *pip
 	for _, rc := range svc.nestedMemoryCollections(job.CaseID, p.LocalPath) {
 		if st := cancelled(); st != nil {
 			return st
+		}
+		if err := svc.store.ReconcileCollectionImports(job.CaseID, rc.CollectionID); err != nil {
+			return fail(err)
 		}
 		rids, err := svc.EvidenceFileIDs(job.CaseID, rc.CollectionID, EvidenceFilter{})
 		if err != nil || len(rids) == 0 {
