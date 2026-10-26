@@ -1,5 +1,9 @@
 # Bounded SRUM and EVTX import
 
+**Update:** [source-atomic admission and owned staging recovery](source-atomic-parser-import.md)
+supersede the corresponding shared-path limitations below. Reader-specific
+limits and unverified largest-source gates remain unchanged.
+
 SRUM and native EVTX now implement `StreamingParser`. Imports automatically use
 that path through the existing isolated-worker, normalization, staging, host
 census and bounded-persistence pipeline. Legacy `Parse` callers retain the

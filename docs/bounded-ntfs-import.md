@@ -1,5 +1,9 @@
 # Bounded native NTFS import
 
+**Update:** [source-atomic admission and owned staging recovery](source-atomic-parser-import.md)
+supersede the corresponding shared-path limitations below. Reader-specific
+limits and unverified largest-source gates remain unchanged.
+
 MFT and USN now opt into the existing `StreamingParser` import path. Legacy
 `Parse` callers keep their existing result shape and event ceilings; normal
 imports no longer collect those whole-file results or silently stop at those

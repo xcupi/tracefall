@@ -61,17 +61,34 @@ and an `ok` integrity check. The driver stopped its servers and verified the por
 closed. This synthetic test does not prove real-file fidelity or resource peaks.
 
 Import progress jobs are still memory-only: after restart the old import-job URL
-returns 404, not a fabricated success. Persisted pipeline job recovery exists
-separately and was not re-proven by this test. A second compiled-binary test killed an isolated worker group after staging
+returns 404, not a fabricated success. Two durable pipeline tests killed the
+compiled server during staging and during source persistence. In both, the
+persisted source was discovered with zero evidence rows, the job was running at
+import on attempt one, and restart recovered the same job to successful attempt
+two with exactly 20,000 rows in each evidence table and no staging leftovers.
+Recovery also retries evidence-free failed sources; historical partial sources
+remain failed and are counted as failed rather than silently skipped or counted
+twice. These latter accounting cases have assertion and race regressions.
+
+A second compiled-binary test killed an isolated worker group after staging
 started: the source was failed, all three tables stayed empty, and staging was
 removed. Explicit retry then persisted 100,000 events/raw records/observations
 with no orphan/reference mismatch and an `ok` integrity check. The parent
 sampled VmHWM was 37,580 KiB after retry; actual worker VmHWM at the early kill
 checkpoint was 23,944 KiB (not a full successful-worker peak).
 
-Server crashes during staging/final admission, durable import-job recovery,
-responsive database reads during a source transaction, all-parser real boundary
-regressions, and the largest SQL rotations remain acceptance work. The existing
+Another compiled-binary test requested cancellation during source persistence:
+the request returned in under a millisecond and rollback completed in about
+42 ms in that run; all tables were empty, the source remained discovered and a
+restart/retry retained every record. Independent all-row verification compares
+exact raw text, source references and complete SQL Extra dictionaries against
+the synthetic generator, checks ownership and distinct raw/event/observation
+pairing, and preserves the legacy final-empty-line continuation convention.
+
+Crashes exactly after final admission, durable recovery for the memory-only
+import-progress endpoint, responsive database reads during a source transaction,
+all-parser real boundary regressions, and the largest SQL rotations remain
+acceptance work. The existing
 1 GiB output/staging caps, worker sandbox, deadlines and memory limits are not
 increased. No complete import or resumable EOF proof exists for the largest SQL
 rotations in this slice. Full-suite integration is reserved for the parent.
