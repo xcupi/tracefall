@@ -125,9 +125,8 @@ func TestSQLStreamPartialPersistenceIsFailed(t *testing.T) {
 	if err == nil {
 		t.Fatal("persistence failure hidden")
 	}
-	if !strings.Contains(err.Error(), "partial evidence may remain") {
-		t.Fatalf("partial status missing: %v", err)
-	}
+	// A later batch failure must roll back the whole source, including raw
+	// evidence and observations, not merely mark a visible prefix failed.
 	entries, e := os.ReadDir(spools)
 	if e != nil || len(entries) != 0 {
 		t.Fatalf("persistence failure leaked spool: files=%d err=%v", len(entries), e)
@@ -140,8 +139,13 @@ func TestSQLStreamPartialPersistenceIsFailed(t *testing.T) {
 	if err = svc.store.DB().QueryRow("SELECT count(*) FROM events").Scan(&n); err != nil {
 		t.Fatal(err)
 	}
-	if n != 128 || sf.ImportStatus != model.SourceFileFailed {
-		t.Fatalf("partial commit mislabelled: persisted=%d status=%s", n, sf.ImportStatus)
+	for _, table := range []string{"events", "raw_evidence", "event_observations"} {
+		if err = svc.store.DB().QueryRow("SELECT count(*) FROM " + table).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		if n != 0 || sf.ImportStatus != model.SourceFileFailed {
+			t.Fatalf("source rollback: table=%s persisted=%d status=%s", table, n, sf.ImportStatus)
+		}
 	}
 }
 

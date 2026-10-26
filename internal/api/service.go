@@ -1510,9 +1510,8 @@ func (s *Service) importEvidence(caseID, collectionID string, sourceFileIDs []st
 		// reached was parsed into memory only: nothing about it was
 		// written, so it stays "discovered" rather than half-imported.
 		//
-		// Cancellation is checked only between files, not between batches.
-		// A persistence error or process crash can still leave partial batches;
-		// this is NOT a source-wide database transaction.
+		// Each source is admitted in one transaction, with bounded row batches.
+		// No raw/event/observation prefix is committed if a later batch fails.
 		if prog.cancelled() {
 			cancelled = true
 			unprocessed += len(pending) - i
@@ -1523,31 +1522,42 @@ func (s *Service) importEvidence(caseID, collectionID string, sourceFileIDs []st
 		prog.startFile(sf.Path)
 
 		newCount := 0
-		err := pf.eachBatch(func(events []model.Event, raw []model.RawEvidence) error {
-			if err := s.store.SaveRawEvidence(raw); err != nil {
-				return fmt.Errorf("saving raw evidence: %w", err)
+		var applied bool
+		err := s.store.WithSourceTransaction(context.Background(), func(st *store.Store) error {
+			if err := pf.eachBatch(func(events []model.Event, raw []model.RawEvidence) error {
+				if err := st.SaveRawEvidence(raw); err != nil {
+					return fmt.Errorf("saving raw evidence: %w", err)
+				}
+				newEvents, observations, err := deduplicateIn(st, caseID, collectionID, events, raw)
+				if err != nil {
+					return err
+				}
+				if err = st.SaveEvents(newEvents); err != nil {
+					return err
+				}
+				if err = st.SaveEventObservations(observations); err != nil {
+					return err
+				}
+				newCount += len(newEvents)
+				return nil
+			}); err != nil {
+				return err
 			}
-			newEvents, observations, err := s.deduplicate(caseID, collectionID, events, raw)
+			var err error
+			applied, err = st.MarkSourceFileImported(id, pf.eventCount(), time.Now().UTC(), sf.ParseCoverage)
 			if err != nil {
 				return err
 			}
-			if err = s.store.SaveEvents(newEvents); err != nil {
-				return err
+			if !applied {
+				return errSourceAlreadyImported
 			}
-			if err = s.store.SaveEventObservations(observations); err != nil {
-				return err
-			}
-			newCount += len(newEvents)
 			return nil
 		})
-		if err != nil {
-			// Earlier batches may already be committed. Never leave this
-			// source labelled discovered (or imply a source-wide transaction).
-			_ = s.store.MarkSourceFileFailed(id)
-			return ImportResult{}, fmt.Errorf("persisting parsed source failed; partial evidence may remain: %w", err)
+		if errors.Is(err, errSourceAlreadyImported) {
+			skipped = append(skipped, ImportSkip{SourceFileID: id, Reason: "already imported"})
+			prog.filePersisted(0, pf.eventCount())
+			continue
 		}
-
-		applied, err := s.store.MarkSourceFileImported(id, pf.eventCount(), time.Now().UTC(), sf.ParseCoverage)
 		if errors.Is(err, store.ErrDuplicateSourceFile) {
 			// This file's content is byte-identical to another file
 			// already imported into this same collection -- the events
@@ -1569,7 +1579,8 @@ func (s *Service) importEvidence(caseID, collectionID string, sourceFileIDs []st
 			continue
 		}
 		if err != nil {
-			return ImportResult{}, fmt.Errorf("marking file imported: %w", err)
+			_ = s.store.MarkSourceFileFailed(id)
+			return ImportResult{}, fmt.Errorf("persisting source rolled back: %w", err)
 		}
 		if !applied {
 			// Lost a race with a concurrent import of the same file ID --
@@ -1702,7 +1713,13 @@ func (s *Service) recomputeCollectionCounts(collectionID string) error {
 // doc comment. Matches are checked first against events parsed earlier
 // in this same batch (in case one file's records overlap another's
 // within a single collection), then against the store.
+var errSourceAlreadyImported = errors.New("source already imported")
+
 func (s *Service) deduplicate(caseID, collectionID string, events []model.Event, raw []model.RawEvidence) ([]model.Event, []model.EventObservation, error) {
+	return deduplicateIn(s.store, caseID, collectionID, events, raw)
+}
+
+func deduplicateIn(st *store.Store, caseID, collectionID string, events []model.Event, raw []model.RawEvidence) ([]model.Event, []model.EventObservation, error) {
 	newEvents := make([]model.Event, 0, len(events))
 	observations := make([]model.EventObservation, 0, len(events))
 	canonicalID := make(map[string]string, len(events)) // dedup hash -> event ID, within this batch
@@ -1713,7 +1730,7 @@ func (s *Service) deduplicate(caseID, collectionID string, events []model.Event,
 
 		eventID, ok := canonicalID[hash]
 		if !ok {
-			existing, found, err := s.store.FindEventByDedupHash(caseID, hash)
+			existing, found, err := st.FindEventByDedupHash(caseID, hash)
 			if err != nil {
 				return nil, nil, err
 			}

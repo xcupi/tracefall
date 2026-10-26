@@ -50,6 +50,7 @@ func isUniqueConstraintViolation(err error) bool {
 }
 
 type Store struct {
+	sourceTx            *sql.Tx // private source-transaction view only
 	db                  *sql.DB
 	reviewFingerprintMu sync.Mutex
 	reviewFingerprints  map[string]reviewFingerprintCache
@@ -609,7 +610,7 @@ func (s *Store) MarkSourceFileImported(id string, eventCount int, importedAt tim
 		}
 		diagnostic = string(b)
 	}
-	res, err := s.db.Exec(`UPDATE source_files SET import_status = ?, event_count = ?, imported_at = ?, parse_coverage_json = ?
+	res, err := s.sourceExecutor().Exec(`UPDATE source_files SET import_status = ?, event_count = ?, imported_at = ?, parse_coverage_json = ?
  WHERE id = ? AND import_status = ?`,
 		model.SourceFileImported, eventCount, fmtTime(importedAt), diagnostic, id, model.SourceFileDiscovered)
 	if isUniqueConstraintViolation(err) {
@@ -647,7 +648,7 @@ func (s *Store) SoftDeleteSourceFile(id string, deletedAt time.Time) error {
 // ---------- Raw evidence ----------
 
 func (s *Store) SaveRawEvidence(items []model.RawEvidence) error {
-	tx, err := s.db.Begin()
+	tx, err := s.beginSourceWrite()
 	if err != nil {
 		return err
 	}
@@ -679,7 +680,7 @@ func (s *Store) GetRawEvidence(id string) (model.RawEvidence, error) {
 // ---------- Events ----------
 
 func (s *Store) SaveEvents(events []model.Event) error {
-	tx, err := s.db.Begin()
+	tx, err := s.beginSourceWrite()
 	if err != nil {
 		return err
 	}
@@ -754,7 +755,7 @@ func (s *Store) FindEventByDedupHash(caseID, hash string) (model.Event, bool, er
 	if hash == "" {
 		return model.Event{}, false, nil
 	}
-	row := s.db.QueryRow(`SELECT `+eventCols+` FROM events WHERE case_id = ? AND dedup_hash = ? LIMIT 1`, caseID, hash)
+	row := s.sourceExecutor().QueryRow(`SELECT `+eventCols+` FROM events WHERE case_id = ? AND dedup_hash = ? LIMIT 1`, caseID, hash)
 	e, err := scanEvent(row)
 	if err == sql.ErrNoRows {
 		return model.Event{}, false, nil
@@ -951,7 +952,7 @@ func (s *Store) DeleteRawEvidenceBySourceFile(sourceFileID string) error {
 // ---------- Event observations ----------
 
 func (s *Store) SaveEventObservations(observations []model.EventObservation) error {
-	tx, err := s.db.Begin()
+	tx, err := s.beginSourceWrite()
 	if err != nil {
 		return err
 	}
