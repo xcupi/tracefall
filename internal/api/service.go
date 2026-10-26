@@ -1521,38 +1521,12 @@ func (s *Service) importEvidence(caseID, collectionID string, sourceFileIDs []st
 		id := sf.ID
 		prog.startFile(sf.Path)
 
-		newCount := 0
-		var applied bool
-		err := s.store.WithSourceTransaction(context.Background(), func(st *store.Store) error {
-			if err := pf.eachBatch(func(events []model.Event, raw []model.RawEvidence) error {
-				if err := st.SaveRawEvidence(raw); err != nil {
-					return fmt.Errorf("saving raw evidence: %w", err)
-				}
-				newEvents, observations, err := deduplicateIn(st, caseID, collectionID, events, raw)
-				if err != nil {
-					return err
-				}
-				if err = st.SaveEvents(newEvents); err != nil {
-					return err
-				}
-				if err = st.SaveEventObservations(observations); err != nil {
-					return err
-				}
-				newCount += len(newEvents)
-				return nil
-			}); err != nil {
-				return err
-			}
-			var err error
-			applied, err = st.MarkSourceFileImported(id, pf.eventCount(), time.Now().UTC(), sf.ParseCoverage)
-			if err != nil {
-				return err
-			}
-			if !applied {
-				return errSourceAlreadyImported
-			}
-			return nil
-		})
+		newCount, applied, err := s.persistSource(context.Background(), pf, caseID, collectionID, prog.cancelled)
+		if errors.Is(err, context.Canceled) && prog.cancelled() {
+			cancelled = true
+			unprocessed += len(pending) - i
+			break
+		}
 		if errors.Is(err, errSourceAlreadyImported) {
 			skipped = append(skipped, ImportSkip{SourceFileID: id, Reason: "already imported"})
 			prog.filePersisted(0, pf.eventCount())
