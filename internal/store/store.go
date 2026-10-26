@@ -626,9 +626,24 @@ func (s *Store) MarkSourceFileImported(id string, eventCount int, importedAt tim
 	return n > 0, nil
 }
 
-// MarkSourceFileFailed records that a selected file's parser returned an
-// error, so it stays visible in the evidence list as failed rather than
-// silently vanishing.
+// RetryFailedSource permits an explicit retry only when no evidence from the
+// failed attempt exists. Old non-atomic failed imports must be repaired in a
+// fresh case, not silently combined with a second attempt. The state and row
+// absence checks are one statement, so a stale caller cannot revive admission.
+func (s *Store) RetryFailedSource(id string) (bool, error) {
+	res, err := s.db.Exec(`UPDATE source_files SET import_status = ?, event_count = 0, imported_at = '', parse_coverage_json = ''
+ WHERE id = ? AND import_status = ?
+ AND NOT EXISTS (SELECT 1 FROM raw_evidence WHERE source_file_id = ?)
+ AND NOT EXISTS (SELECT 1 FROM event_observations WHERE source_file_id = ?)
+ AND NOT EXISTS (SELECT 1 FROM events WHERE source_file_id = ?)`, model.SourceFileDiscovered, id, model.SourceFileFailed, id, id, id)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
+}
+
+// MarkSourceFileFailed records that a selected file failed, keeping it visible.
 func (s *Store) MarkSourceFileFailed(id string) error {
 	_, err := s.db.Exec(`UPDATE source_files SET import_status = ? WHERE id = ?`, model.SourceFileFailed, id)
 	return err

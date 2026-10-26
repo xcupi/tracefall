@@ -18,7 +18,10 @@ An interrupted source remains discovered and can be retried; earlier complete
 sources remain valid. Cancellation is not an interrupt inside an individual row
 statement or batch. SQLite recovery discards an uncommitted source transaction
 after server death. A persistence error attempts to mark the source failed only
-after rollback. Existing partial rows from older revisions are not repaired.
+after rollback. Explicitly selecting a failed source permits retry only if no
+raw/event/observation rows exist for it; the status transition and absence guards
+are one SQL statement. Existing partial rows from older revisions are not
+repaired or silently combined with retry output.
 
 The database still has one shared connection. The transaction holds it for the
 whole source: other database-backed requests wait. In-memory import progress and
@@ -59,8 +62,14 @@ closed. This synthetic test does not prove real-file fidelity or resource peaks.
 
 Import progress jobs are still memory-only: after restart the old import-job URL
 returns 404, not a fabricated success. Persisted pipeline job recovery exists
-separately and was not re-proven by this test. Worker-kill checkpoints, server
-crashes during staging/final admission, durable per-source retry status,
+separately and was not re-proven by this test. A second compiled-binary test killed an isolated worker group after staging
+started: the source was failed, all three tables stayed empty, and staging was
+removed. Explicit retry then persisted 100,000 events/raw records/observations
+with no orphan/reference mismatch and an `ok` integrity check. The parent
+sampled VmHWM was 37,580 KiB after retry; actual worker VmHWM at the early kill
+checkpoint was 23,944 KiB (not a full successful-worker peak).
+
+Server crashes during staging/final admission, durable import-job recovery,
 responsive database reads during a source transaction, all-parser real boundary
 regressions, and the largest SQL rotations remain acceptance work. The existing
 1 GiB output/staging caps, worker sandbox, deadlines and memory limits are not

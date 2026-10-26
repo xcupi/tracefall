@@ -1392,6 +1392,18 @@ func (s *Service) importEvidence(caseID, collectionID string, sourceFileIDs []st
 			prog.fileParsed(0, true)
 			continue
 		}
+		if sf.ImportStatus == model.SourceFileFailed {
+			applied, err := s.store.RetryFailedSource(id)
+			if err != nil {
+				return ImportResult{}, fmt.Errorf("preparing failed source retry: %w", err)
+			}
+			if !applied {
+				skipped = append(skipped, ImportSkip{SourceFileID: id, Reason: "failed source has prior evidence or changed state; use a fresh-case reimport"})
+				prog.fileParsed(0, true)
+				continue
+			}
+			sf.ImportStatus = model.SourceFileDiscovered
+		}
 		if sf.ImportStatus != model.SourceFileDiscovered {
 			skipped = append(skipped, ImportSkip{SourceFileID: id, Reason: skipReasonFor(sf.ImportStatus)})
 			prog.fileParsed(0, true)

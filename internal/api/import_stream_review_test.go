@@ -147,6 +147,21 @@ func TestSQLStreamPartialPersistenceIsFailed(t *testing.T) {
 			t.Fatalf("source rollback: table=%s persisted=%d status=%s", table, n, sf.ImportStatus)
 		}
 	}
+	if _, err := svc.store.DB().Exec(`DROP TRIGGER reject_later_batch`); err != nil {
+		t.Fatal(err)
+	}
+	retry, err := svc.ImportEvidence(c.ID, d.Collection.ID, []string{files[0].ID})
+	if err != nil || len(retry.Imported) != 1 {
+		t.Fatalf("failed source retry: imported=%d err=%v", len(retry.Imported), err)
+	}
+	for _, table := range []string{"events", "raw_evidence", "event_observations"} {
+		if err := svc.store.DB().QueryRow("SELECT count(*) FROM " + table).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		if n != 300 {
+			t.Fatalf("retry table=%s count=%d", table, n)
+		}
+	}
 }
 
 func TestSQLStreamAggregateStagingBudget(t *testing.T) {
