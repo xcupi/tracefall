@@ -1,5 +1,9 @@
 # SQL streaming review fixes: scope and remaining gates
 
+**Update:** source-atomic admission and owned staging recovery supersede the
+corresponding limitations below; see [current persistence gate](source-atomic-parser-import.md).
+Other acceptance limitations remain in force.
+
 The SQL streaming import stages normalized batches on disk before persistence.
 Completed sources now close their staging writer immediately; persistence opens
 one staging reader at a time. Ordinary success, parser failure, cancellation,

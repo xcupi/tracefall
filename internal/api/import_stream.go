@@ -37,7 +37,11 @@ type parsedSpool struct {
 type stagingBudget struct{ used, limit int64 }
 
 func newParsedSpool(budget *stagingBudget, artifact ...string) (*parsedSpool, error) {
-	f, err := os.CreateTemp("", "tracefall-parse-*.partial")
+	return newParsedSpoolIn("", budget, artifact...)
+}
+
+func newParsedSpoolIn(dir string, budget *stagingBudget, artifact ...string) (*parsedSpool, error) {
+	f, err := os.CreateTemp(dir, "tracefall-parse-*.partial")
 	if err != nil {
 		return nil, err
 	}
@@ -177,7 +181,7 @@ func (p *parsedSpool) each(visit func(ingest.ParsedFile) error) error {
 }
 
 func (s *Service) stageStream(caseID, collectionID string, sf model.SourceFile, root string, p parsers.ArtifactParser, pc parsers.ParseContext, prog *progressSink, budget *stagingBudget) (pendingImport, error) {
-	spool, err := newParsedSpool(budget, sf.ArtifactType)
+	spool, err := newParsedSpoolIn(s.parserStagingDir, budget, sf.ArtifactType)
 	if err != nil {
 		return pendingImport{}, err
 	}

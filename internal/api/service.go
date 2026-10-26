@@ -157,8 +157,9 @@ func (e *DuplicateCaseError) Error() string {
 func (e *DuplicateCaseError) Unwrap() error { return ErrDuplicateCase }
 
 type Service struct {
-	store *store.Store
-	files *casefiles.Store
+	parserStagingDir string
+	store            *store.Store
+	files            *casefiles.Store
 	// extractLimits bounds ZIP extraction (file count, per-file/total
 	// size, compression ratio) -- see internal/archive. Defaults to
 	// archive.DefaultLimits; overridable for tests.
@@ -259,6 +260,10 @@ func (s *Service) heavyOp() (release func(), err error) {
 	}
 	return s.heavy.Acquire(ctx)
 }
+
+// SetParserStagingDir is configured once before serving, with a workspace
+// exclusively owned for the entire server lifetime.
+func (s *Service) SetParserStagingDir(dir string) { s.parserStagingDir = dir }
 
 func NewService(s *store.Store, files *casefiles.Store) *Service {
 	return &Service{

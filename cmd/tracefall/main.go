@@ -29,6 +29,7 @@ import (
 	"tracefall/internal/config"
 	"tracefall/internal/enrich/llm"
 	"tracefall/internal/memory"
+	"tracefall/internal/parsestaging"
 	"tracefall/internal/store"
 	"tracefall/internal/web"
 )
@@ -67,8 +68,16 @@ func main() {
 	}
 	defer db.Close()
 
+	stagingDir := filepath.Join(cfg.DataDir, ".parser-staging")
+	staging, err := parsestaging.Open(stagingDir)
+	if err != nil {
+		logger.Error("failed to recover parser staging", "error", err)
+		os.Exit(1)
+	}
+	defer staging.Close()
 	files := casefiles.NewStore(cfg.DataDir)
 	svc := api.NewService(db, files)
+	svc.SetParserStagingDir(stagingDir)
 	capacity.apply(svc, logger)
 
 	// Server-path ingest reads folders that already sit on this machine. The

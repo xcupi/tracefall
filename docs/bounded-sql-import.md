@@ -1,5 +1,9 @@
 # Bounded SQL text-log import (partial scalability work)
 
+**Update:** source-atomic admission and owned staging recovery supersede the
+corresponding limitations below; see [current persistence gate](source-atomic-parser-import.md).
+Other acceptance limitations remain in force.
+
 The SQL engine and Agent text parsers expose an optional `StreamingParser`
 contract. Import uses it automatically; the existing `Parse`/`ParseWithContext`
 API remains compatible and retains its 64 MiB whole-result ceiling. Other
