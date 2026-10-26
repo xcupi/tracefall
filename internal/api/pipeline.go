@@ -380,6 +380,13 @@ func (s *Service) executeIngest(job model.PipelineJob, res *PipelineResult) *pip
 	if err != nil {
 		return fail(err)
 	}
+	if job.Attempts > 1 {
+		failedIDs, err := svc.store.FailedSourceFileIDs(collectionID)
+		if err != nil {
+			return fail(err)
+		}
+		ids = append(ids, failedIDs...)
+	}
 	if len(ids) > 0 {
 		imp, err := svc.ImportEvidence(job.CaseID, collectionID, ids)
 		if err != nil {
@@ -388,6 +395,16 @@ func (s *Service) executeIngest(job model.PipelineJob, res *PipelineResult) *pip
 		}
 		res.FilesImported, res.FilesSkipped = len(imp.Imported), len(imp.Skipped)
 		res.FilesFailed = len(imp.ParseFailures)
+	}
+	// Persisted failures may predate this attempt (including a crash after
+	// recording failure but before finishing the job). Never report zero
+	// failures merely because the importable-ID filter omitted those sources.
+	failedCount, err := svc.store.CountFailedSourceFiles(collectionID)
+	if err != nil {
+		return fail(err)
+	}
+	if failedCount > res.FilesFailed {
+		res.FilesFailed = failedCount
 	}
 	// A memory image found inside the folder is its own collection; import it
 	// like the folder so an unattended run does not leave it unanalysed. The
