@@ -54,7 +54,7 @@ func TestPipelineResumeReportsHistoricalPartialSource(t *testing.T) {
 	}
 	startWorker(t, svc)
 	done := waitPipelineJob(t, routerFor(svc), c.ID, j.ID)
-	if done.Status != model.JobSucceeded || done.Attempts != 2 || num(done.Result, "events") != 0 || num(done.Result, "files_failed") != 1 {
+	if done.Status != model.JobSucceeded || done.Attempts != 2 || num(done.Result, "events") != 0 || num(done.Result, "files_failed") != 1 || num(done.Result, "files_skipped") != 0 {
 		t.Fatalf("failed source omitted on resume: %+v", done)
 	}
 	var n int

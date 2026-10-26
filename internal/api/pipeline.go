@@ -395,6 +395,17 @@ func (s *Service) executeIngest(job model.PipelineJob, res *PipelineResult) *pip
 		}
 		res.FilesImported, res.FilesSkipped = len(imp.Imported), len(imp.Skipped)
 		res.FilesFailed = len(imp.ParseFailures)
+		// A refused retry of historical partial evidence is counted below
+		// as failed, not also as skipped. Keep file outcomes disjoint.
+		for _, skipped := range imp.Skipped {
+			sf, err := svc.store.GetSourceFile(skipped.SourceFileID)
+			if err != nil {
+				return fail(err)
+			}
+			if sf.ImportStatus == model.SourceFileFailed {
+				res.FilesSkipped--
+			}
+		}
 	}
 	// Persisted failures may predate this attempt (including a crash after
 	// recording failure but before finishing the job). Never report zero
