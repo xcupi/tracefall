@@ -138,7 +138,7 @@ func logonObservations(events []model.Event, reg *hostid.Registry) []clockskew.O
 			// The session's server must be this host, when the case can say
 			// whose address that is; a reused client port on another server is
 			// not this logon.
-			if r := reg.ByIP(s.NetworkDest); r.Identity != nil && !strings.EqualFold(r.Identity.Name, l.Host) {
+			if r := reg.ByIP(s.NetworkDest); r.Identity == nil || reg.ByName(l.Host) != r.Identity {
 				continue
 			}
 			first, ok1 := parseUTC(s.Extra["first_seen_utc"])
@@ -150,7 +150,7 @@ func logonObservations(events []model.Event, reg *hostid.Registry) []clockskew.O
 				continue
 			}
 			out = append(out, clockskew.Observation{
-				Subject: "host:" + strings.ToLower(l.Host), Reference: captureClock(s), Method: "logon inside a captured connection",
+				Subject: "host:" + strings.ToLower(reg.ByName(l.Host).Name), Reference: captureClock(s), Method: "logon inside a captured connection",
 				Lo: l.Timestamp.Sub(last), Hi: l.Timestamp.Sub(first), EventIDs: []string{l.ID, s.ID},
 			})
 		}

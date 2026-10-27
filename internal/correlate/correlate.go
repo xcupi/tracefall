@@ -72,6 +72,7 @@ var typedInputTypes = []string{
 	// readings from a capture, and the registry events that name a machine
 	// (its hostname, addresses and operating system).
 	model.EventClockObservation,
+	model.EventDNSQuery,
 	model.EventRegistryKeyLastWrite,
 	sqlXEEvent,
 	sqlAuditEvent,
@@ -89,6 +90,21 @@ func RunFrom(caseID string, src model.EventSource) ([]model.Correlation, error) 
 	refs, err := src.Refs()
 	if err != nil {
 		return nil, fmt.Errorf("loading event references: %w", err)
+	}
+	// Supply host-only projections for the untyped records too: a filtered
+	// load must not hide an incompatible host spelling from identity checks.
+	// These are projections of real referenced events, not new observations.
+	seenNames := map[string]bool{}
+	nameKey := func(coll, host string) string { return coll + "\x00" + host }
+	for _, e := range typed {
+		seenNames[nameKey(e.CollectionID, e.Host)] = true
+	}
+	for _, r := range refs {
+		k := nameKey(r.CollectionID, r.Host)
+		if r.Host != "" && !seenNames[k] {
+			seenNames[k] = true
+			typed = append(typed, model.Event{ID: r.ID, CaseID: caseID, CollectionID: r.CollectionID, Host: r.Host})
+		}
 	}
 	var out []model.Correlation
 	out = append(out, BuildProcessChains(caseID, typed)...)

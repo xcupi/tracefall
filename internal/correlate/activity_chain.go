@@ -16,92 +16,74 @@ import (
 // that it starts linking unrelated sessions.
 const activityLookWindow = 2 * time.Hour
 
-// BuildActivityChains stitches together the attack-pattern narrative --
-// logon -> Office document execution -> PowerShell -> payload -> persistence
-// -> outbound network connection -- wherever the evidence in the case
-// actually supports each step. A chain is only emitted for the steps that
-// are evidenced; Tracefall never fabricates a missing link (e.g. Phase 1
-// has no browser/download artifact parser, so chains never claim one).
+// BuildActivityChains requires recorded parent/process identity for the
+// Office-to-interpreter pivot. Session and network context require identity;
+// full-path persistence references are explicitly labelled configuration
+// associations, never attributed to the target PID as its writer.
 func BuildActivityChains(caseID string, events []model.Event) []model.Correlation {
-	creates := byType(events, model.EventProcessCreate)
-	logons := byType(events, model.EventLogonSuccess)
-	registryRuns := byType(events, model.EventRegistryRunKey)
-	scheduledTasks := byType(events, model.EventScheduledTaskCreate)
-	// Phase 4: registry persistence beyond Run/RunOnce keys and service
-	// installation are both valid final steps of this narrative, exactly
-	// like a Run key or scheduled task -- see findPersistence.
-	registryPersistence := byType(events, model.EventRegistryPersistence)
-	serviceInstalls := byType(events, model.EventServiceInstall)
-	netConns := byType(events, model.EventNetworkConnection)
-
-	// Index every candidate stream by (host, process) -- or by host alone
-	// for logons, whose match is conditionally on user -- so each pivot
-	// below does an O(1) lookup into an already-narrow slice instead of
-	// scanning every event of that type in the whole case. See
-	// correlate.go's indexEvents doc for why this can't change results.
-	logonsByHost := indexEvents(logons, func(e model.Event) string { return e.Host })
-	createsByHostProc := indexEvents(creates, func(e model.Event) string { return chainKey(e.Host, e.ProcessName) })
-	createsByHostParent := indexEvents(creates, func(e model.Event) string { return chainKey(e.Host, e.ParentProcessName) })
-	registryRunsByHostProc := indexEvents(registryRuns, func(e model.Event) string { return chainKey(e.Host, e.ProcessName) })
-	scheduledTasksByHostProc := indexEvents(scheduledTasks, func(e model.Event) string { return chainKey(e.Host, e.ProcessName) })
-	registryPersistenceByHostProc := indexEvents(registryPersistence, func(e model.Event) string { return chainKey(e.Host, e.ProcessName) })
-	serviceInstallsByHostProc := indexEvents(serviceInstalls, func(e model.Event) string { return chainKey(e.Host, e.ProcessName) })
-	netConnsByHostProc := indexEvents(netConns, func(e model.Event) string { return chainKey(e.Host, e.ProcessName) })
-
+	events = chainHostKeys(events)
+	creates := sortedChainEvents(byType(events, model.EventProcessCreate))
+	parents := lineageParents(caseID, creates)
+	children := map[string][]model.Event{}
+	for _, child := range creates {
+		if p, ok := parents[child.ID]; ok {
+			children[p.ID] = append(children[p.ID], child)
+		}
+	}
+	networks := byType(events, model.EventNetworkConnection)
 	var out []model.Correlation
 	for _, ps := range creates {
-		// Phase 4: the pivot step isn't PowerShell-only -- Office spawning
-		// cmd.exe/wscript.exe/cscript.exe/mshta.exe is the same narrative
-		// pattern (see detect's officeSpawnsScriptInterpreter), so any
-		// recognized scripting/LOLBin host is accepted here too.
 		if !procclass.IsOffice(ps.ParentProcessName) || !(procclass.IsPowerShell(ps.ProcessName) || procclass.IsScriptHost(ps.ProcessName)) {
 			continue
 		}
-		chain := []model.Event{}
-
-		// Step 1: prior successful logon by the same user on the same host.
-		if logon, ok := latestBefore(logonsByHost[ps.Host], ps.Host, ps.User, ps.Timestamp, activityLookWindow); ok {
-			chain = append(chain, logon)
-		}
-
-		// Step 2: the Office process-create event itself (the parent).
-		if officeEv, ok := findProcessCreate(createsByHostProc[chainKey(ps.Host, ps.ParentProcessName)], ps.Host, ps.ParentProcessName, ps.Timestamp, activityLookWindow); ok {
-			chain = append(chain, officeEv)
-		}
-
-		// Step 3: the PowerShell process-create event (the pivot itself).
-		chain = append(chain, ps)
-
-		// Step 4: a payload process spawned by this PowerShell instance.
-		payload, hasPayload := findChild(createsByHostParent[chainKey(ps.Host, ps.ProcessName)], ps)
-		if hasPayload {
-			chain = append(chain, payload)
-		}
-
-		// Step 5: persistence referencing either the payload or PowerShell.
-		persistTarget := ps.ProcessName
-		if hasPayload {
-			persistTarget = payload.ProcessName
-		}
-		pk := chainKey(ps.Host, persistTarget)
-		if p, ok := findPersistence(ps.Host, persistTarget, ps.Timestamp, activityLookWindow,
-			registryRunsByHostProc[pk], scheduledTasksByHostProc[pk], registryPersistenceByHostProc[pk], serviceInstallsByHostProc[pk]); ok {
-			chain = append(chain, p)
-		}
-
-		// Step 6: outbound network connection from the payload (or PowerShell).
-		if n, ok := findNetwork(netConnsByHostProc[pk], ps.Host, persistTarget, ps.Timestamp, activityLookWindow); ok {
-			chain = append(chain, n)
-		}
-
-		if len(chain) < 3 {
-			// Just the Office->PowerShell pivot with no corroborating
-			// steps isn't a "chain" -- the office-spawns-powershell
-			// detection rule already covers that case on its own.
+		office, ok := parents[ps.ID]
+		if !ok {
 			continue
 		}
-
-		out = append(out, buildChainCorrelation(caseID, chain))
+		chain := []model.Event{office, ps}
+		target := ps
+		if cs := children[ps.ID]; len(cs) == 1 {
+			target = cs[0]
+			chain = append(chain, target)
+		}
+		// A recorded session is useful context; a nearby same-user logon is not
+		// evidence that this process belonged to that session.
+		var logons []model.Event
+		for _, l := range byType(events, model.EventLogonSuccess) {
+			if sameEvidenceScope(office, l) && processTime(l) && l.Timestamp.Before(office.Timestamp) && office.Timestamp.Sub(l.Timestamp) <= activityLookWindow && l.User != "" && l.User == office.User && l.Extra["logon_id"] != "" && l.Extra["logon_id"] == office.Extra["logon_id"] {
+				logons = append(logons, l)
+			}
+		}
+		if len(logons) == 1 {
+			chain = append(chain, logons[0])
+		}
+		contextual := false
+		if config, ok := configurationFor(target, events); ok {
+			chain = append(chain, config)
+			contextual = true
+		}
+		if n, ok := networkFor(target, networks, creates); ok {
+			tied := false
+			for _, e := range chain {
+				if e.Timestamp.Equal(n.Timestamp) {
+					tied = true
+				}
+			}
+			if !tied {
+				chain = append(chain, n)
+			}
+		}
+		if len(chain) < 3 {
+			continue
+		}
+		chain = sortedChainEvents(chain)
+		c := buildChainCorrelation(caseID, chain)
+		c.Description = "Recorded parent/process identity and strictly ordered timestamps link these observations within one host acquisition. This is not proof of intent or causation. Unrecorded exits leave process lifetime and unobserved PID reuse uncertain."
+		if contextual {
+			c.Title = "Contextual " + c.Title
+			c.Description += " A persistence configuration references the same full executable path; it does not establish that the target process wrote the configuration or that the configured mechanism executed. A configuration PID identifies its writer, not the configured target."
+		}
+		out = append(out, c)
 	}
 	return out
 }
@@ -189,105 +171,4 @@ func orDash(s string) string {
 		return "unknown"
 	}
 	return s
-}
-
-// latestBefore returns the most recent event in events for (host, user)
-// with Timestamp <= at and within window of it.
-func latestBefore(events []model.Event, host, user string, at time.Time, window time.Duration) (model.Event, bool) {
-	var best model.Event
-	found := false
-	for _, e := range events {
-		if e.Host != host || (user != "" && e.User != user) {
-			continue
-		}
-		if e.Timestamp.After(at) || at.Sub(e.Timestamp) > window {
-			continue
-		}
-		if !found || e.Timestamp.After(best.Timestamp) {
-			best, found = e, true
-		}
-	}
-	return best, found
-}
-
-// findProcessCreate finds the process-create event for (host, processName)
-// nearest before at, within window.
-func findProcessCreate(events []model.Event, host, processName string, at time.Time, window time.Duration) (model.Event, bool) {
-	var best model.Event
-	found := false
-	for _, e := range events {
-		if e.Host != host || e.ProcessName != processName {
-			continue
-		}
-		if e.Timestamp.After(at) || at.Sub(e.Timestamp) > window {
-			continue
-		}
-		if !found || e.Timestamp.After(best.Timestamp) {
-			best, found = e, true
-		}
-	}
-	return best, found
-}
-
-// findChild finds a process-create event whose ParentProcessName matches
-// parent's ProcessName, on the same host, at or after parent's timestamp.
-func findChild(events []model.Event, parent model.Event) (model.Event, bool) {
-	var best model.Event
-	found := false
-	for _, e := range events {
-		if e.Host != parent.Host || e.ParentProcessName != parent.ProcessName {
-			continue
-		}
-		if e.Timestamp.Before(parent.Timestamp) {
-			continue
-		}
-		if !found || e.Timestamp.Before(best.Timestamp) {
-			best, found = e, true
-		}
-	}
-	return best, found
-}
-
-// findPersistence finds a persistence event (registry Run key, scheduled
-// task, other registry persistence location, or service installation) on
-// host whose target executable matches processName, at or after at and
-// within window.
-func findPersistence(host, processName string, at time.Time, window time.Duration, sources ...[]model.Event) (model.Event, bool) {
-	var all []model.Event
-	for _, s := range sources {
-		all = append(all, s...)
-	}
-	var best model.Event
-	found := false
-	for _, e := range all {
-		if e.Host != host || e.ProcessName != processName {
-			continue
-		}
-		if e.Timestamp.Before(at) || e.Timestamp.Sub(at) > window {
-			continue
-		}
-		if !found || e.Timestamp.Before(best.Timestamp) {
-			best, found = e, true
-		}
-	}
-	return best, found
-}
-
-// findNetwork finds a network-connection event on host from processName,
-// at or after at and within window.
-func findNetwork(events []model.Event, host, processName string, at time.Time, window time.Duration) (model.Event, bool) {
-	var best model.Event
-	found := false
-	for _, e := range events {
-		if e.Host != host || e.ProcessName != processName {
-			continue
-		}
-		if e.Timestamp.Before(at) || e.Timestamp.Sub(at) > window {
-			continue
-		}
-		if !found || e.Timestamp.Before(best.Timestamp) {
-			best, found = e, true
-		}
-	}
-	return best, found
 }

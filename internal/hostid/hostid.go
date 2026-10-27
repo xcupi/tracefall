@@ -106,20 +106,25 @@ type claim struct {
 
 // Registry is the address-to-machine table.
 type Registry struct {
-	hosts map[string]*Identity
-	byIP  map[string][]claim
+	hosts     map[string]*Identity
+	byIP      map[string][]claim
+	aliases   map[string]string
+	ambiguous map[string]bool
 }
 
 func key(name string) string {
-	n := strings.ToLower(strings.TrimSpace(name))
-	if i := strings.IndexByte(n, '.'); i > 0 {
-		n = n[:i] // a fully qualified name and its short name are one machine
-	}
-	return n
+	return strings.ToLower(strings.TrimSpace(name))
 }
 
 func (r *Registry) get(name string, collected bool) *Identity {
 	k := key(name)
+	if r.ambiguous[k] {
+		return nil
+	}
+	if a := r.aliases[k]; a != "" {
+		k = a
+		name = a
+	}
 	if k == "" {
 		return nil
 	}
@@ -135,6 +140,9 @@ func (r *Registry) get(name string, collected bool) *Identity {
 }
 
 func (r *Registry) learn(h *Identity, ip string, b Basis, evID string) {
+	if h == nil {
+		return
+	}
 	addr, err := netip.ParseAddr(strings.TrimSpace(ip))
 	if err != nil || addr.IsUnspecified() || addr.IsLoopback() || addr.IsMulticast() || addr.IsLinkLocalUnicast() {
 		return
@@ -162,12 +170,109 @@ func (r *Registry) learn(h *Identity, ip string, b Basis, evID string) {
 
 // Build reads the facts out of events. Events may be in any order.
 func Build(events []model.Event) *Registry {
-	r := &Registry{hosts: map[string]*Identity{}, byIP: map[string][]claim{}}
-	// Machine-owned facts first, so that weaker facts can attach to them.
+	order := make([]int, len(events))
+	for i := range order {
+		order[i] = i
+	}
+	sort.Slice(order, func(i, j int) bool { return events[order[i]].ID < events[order[j]].ID })
+	r := &Registry{hosts: map[string]*Identity{}, byIP: map[string][]claim{}, aliases: map[string]string{}, ambiguous: map[string]bool{}}
+	// Inventory before learning: a later FQDN collision must revoke a short
+	// alias independently of input order. IP addresses never establish aliases.
+	names := map[string]bool{}
+	domains := map[string]map[string]bool{}
+	collections := map[string]map[string]bool{}
 	for _, e := range events {
+		for _, n := range []string{e.Host, e.Extra["workstation_name"], e.NetworkDest} {
+			if n == e.NetworkDest && e.EventType != model.EventDNSQuery {
+				continue
+			}
+			k := key(n)
+			if k != "" && k != "-" && isDNSName(k) {
+				names[k] = true
+			}
+		}
+		h := key(e.Host)
+		if d := key(e.Extra["domain"]); h != "" && d != "" {
+			if domains[h] == nil {
+				domains[h] = map[string]bool{}
+			}
+			domains[h][d] = true
+		}
+		if e.CollectionID != "" && h != "" {
+			s := e.CaseID + "\x00" + e.CollectionID
+			if collections[s] == nil {
+				collections[s] = map[string]bool{}
+			}
+			collections[s][h] = true
+		}
+	}
+	for h, ds := range domains {
+		if len(ds) > 1 {
+			r.ambiguous[h] = true
+		}
+	}
+	for n := range names {
+		if strings.Contains(n, ".") {
+			continue
+		}
+		var matches []string
+		for f := range names {
+			if strings.HasPrefix(f, n+".") {
+				matches = append(matches, f)
+			}
+		}
+		if len(matches) > 1 {
+			r.ambiguous[n] = true
+			continue
+		}
+		if len(matches) != 1 {
+			continue
+		}
+		f := matches[0]
+		compatible := len(domains[n]) == 1 && domains[n][strings.TrimPrefix(f, n+".")]
+		if len(domains[n]) > 0 && !compatible {
+			r.ambiguous[n] = true
+			continue
+		}
+		for _, ns := range collections {
+			if ns[n] && ns[f] {
+				var all []string
+				for v := range ns {
+					all = append(all, v)
+				}
+				if _, ok := Resolve(all); ok {
+					compatible = true
+				}
+			}
+		}
+		if compatible {
+			r.aliases[n] = f
+		}
+	}
+	conflicts := metadataConflicts(events, func(e model.Event) string {
+		k := key(e.Host)
+		if a := r.aliases[k]; a != "" {
+			return a
+		}
+		return k
+	})
+	for h := range conflicts {
+		r.ambiguous[h] = true
+	}
+	for short, full := range r.aliases {
+		if r.ambiguous[full] {
+			r.ambiguous[short] = true
+		}
+	}
+	// Machine-owned facts first, so that weaker facts can attach to them.
+	for _, index := range order {
+		e := events[index]
 		switch {
 		case e.EventType == model.EventRegistryKeyLastWrite && e.Extra["registry_value_name"] == "ComputerName" && e.Host != "":
 			h := r.get(e.Host, true)
+			if h == nil {
+				continue
+			}
 			h.cite(e.ID)
 			if d := e.Extra["domain"]; d != "" {
 				h.Domain = d
@@ -188,11 +293,15 @@ func Build(events []model.Event) *Registry {
 			}
 		case e.EventType == model.EventRegistryKeyLastWrite && e.Extra["os_product_name"] != "" && e.Host != "":
 			h := r.get(e.Host, true)
+			if h == nil {
+				continue
+			}
 			h.OS, h.OSBuild = e.Extra["os_product_name"], e.Extra["os_current_build"]
 			h.cite(e.ID)
 		}
 	}
-	for _, e := range events {
+	for _, index := range order {
+		e := events[index]
 		switch e.EventType {
 		case model.EventNetworkConnection:
 			// A socket's local address in a memory image is the machine's own.
@@ -214,7 +323,7 @@ func Build(events []model.Event) *Registry {
 				}
 				// A name only becomes a machine here if the case already knows
 				// that machine; DNS alone does not create one.
-				if h := r.hosts[key(e.NetworkDest)]; h != nil {
+				if h := r.ByName(e.NetworkDest); h != nil {
 					r.learn(h, a, BasisDNS, e.ID)
 				}
 			}
@@ -259,8 +368,22 @@ func (r *Registry) ByIP(ip string) Resolution {
 	return Resolution{Identity: top[0].id, Basis: top[0].basis}
 }
 
+// AmbiguousName distinguishes an unsupported name from one contradicted by
+// recorded names or metadata. Consumers must not fall back to raw attribution
+// when ByName returned nil for this reason.
+func (r *Registry) AmbiguousName(name string) bool { return r.ambiguous[key(name)] }
+
 // ByName finds a machine by name, fully qualified or not.
-func (r *Registry) ByName(name string) *Identity { return r.hosts[key(name)] }
+func (r *Registry) ByName(name string) *Identity {
+	k := key(name)
+	if r.ambiguous[k] {
+		return nil
+	}
+	if a := r.aliases[k]; a != "" {
+		k = a
+	}
+	return r.hosts[k]
+}
 
 // Hosts lists every machine, collected ones first, then by name.
 func (r *Registry) Hosts() []*Identity {

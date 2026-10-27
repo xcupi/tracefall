@@ -84,7 +84,7 @@ func TestBuildActivityChains_FullNarrative(t *testing.T) {
 		{ID: "persist", Host: "H1", User: "jdoe", EventType: model.EventRegistryRunKey, ProcessName: "update.exe", Timestamp: mustTime("2026-01-15T09:16:02Z")},
 		{ID: "net", Host: "H1", User: "jdoe", EventType: model.EventNetworkConnection, ProcessName: "update.exe", NetworkDest: "203.0.113.77", Timestamp: mustTime("2026-01-15T09:18:05Z")},
 	}
-	chains := BuildActivityChains("case-1", events)
+	chains := BuildActivityChains("case-1", identifiedChainFixture(events))
 	if len(chains) != 1 {
 		t.Fatalf("got %d activity chains, want 1", len(chains))
 	}
@@ -108,7 +108,7 @@ func TestBuildActivityChains_PartialEvidenceOnlyIncludesWhatExists(t *testing.T)
 		{ID: "office", Host: "H1", EventType: model.EventProcessCreate, ProcessName: "winword.exe", ParentProcessName: "explorer.exe", Timestamp: mustTime("2026-01-15T09:14:22Z")},
 		{ID: "ps", Host: "H1", EventType: model.EventProcessCreate, ProcessName: "powershell.exe", ParentProcessName: "winword.exe", Timestamp: mustTime("2026-01-15T09:14:47Z")},
 	}
-	chains := BuildActivityChains("case-1", events)
+	chains := BuildActivityChains("case-1", identifiedChainFixture(events))
 	if len(chains) != 0 {
 		t.Fatalf("got %d chains for a 2-step-only pivot, want 0 (no fabricated steps, no trivial chain)", len(chains))
 	}
@@ -127,7 +127,7 @@ func TestBuildActivityChains_ScriptHostPivotBeyondPowerShell(t *testing.T) {
 		{ID: "cmd", Host: "H1", User: "jdoe", EventType: model.EventProcessCreate, ProcessName: "cmd.exe", ParentProcessName: "winword.exe", Timestamp: mustTime("2026-01-15T09:14:47Z")},
 		{ID: "payload", Host: "H1", User: "jdoe", EventType: model.EventProcessCreate, ProcessName: "update.exe", ParentProcessName: "cmd.exe", Timestamp: mustTime("2026-01-15T09:15:10Z")},
 	}
-	chains := BuildActivityChains("case-1", events)
+	chains := BuildActivityChains("case-1", identifiedChainFixture(events))
 	if len(chains) != 1 {
 		t.Fatalf("got %d activity chains, want 1 (cmd.exe pivot must be recognized like powershell.exe)", len(chains))
 	}
@@ -141,7 +141,7 @@ func TestBuildActivityChains_ServiceInstallAsPersistenceStep(t *testing.T) {
 		{ID: "payload", Host: "H1", User: "jdoe", EventType: model.EventProcessCreate, ProcessName: "update.exe", ParentProcessName: "powershell.exe", Timestamp: mustTime("2026-01-15T09:15:10Z")},
 		{ID: "svcinstall", Host: "H1", User: "jdoe", EventType: model.EventServiceInstall, ProcessName: "update.exe", Timestamp: mustTime("2026-01-15T09:16:02Z")},
 	}
-	chains := BuildActivityChains("case-1", events)
+	chains := BuildActivityChains("case-1", identifiedChainFixture(events))
 	if len(chains) != 1 {
 		t.Fatalf("got %d activity chains, want 1", len(chains))
 	}
@@ -212,7 +212,7 @@ func TestBuildServiceChains(t *testing.T) {
 		{ID: "start", Host: "H1", EventType: model.EventProcessCreate, ProcessName: "weirdsvc.exe", Timestamp: base.Add(5 * time.Second)},
 		{ID: "net", Host: "H1", EventType: model.EventNetworkConnection, ProcessName: "weirdsvc.exe", NetworkDest: "203.0.113.99", Timestamp: base.Add(10 * time.Second)},
 	}
-	chains := BuildServiceChains("case-1", events)
+	chains := BuildServiceChains("case-1", identifiedChainFixture(events))
 	if len(chains) != 1 {
 		t.Fatalf("got %d service chains, want 1", len(chains))
 	}
@@ -284,4 +284,31 @@ func refsOf(events []model.Event) []model.EventRef {
 		out[i] = model.RefOf(e)
 	}
 	return out
+}
+
+// These positive narratives require recorded identity, not a name/time guess.
+func identifiedChainFixture(events []model.Event) []model.Event {
+	pids := map[string]int64{}
+	for _, e := range events {
+		if e.EventType == model.EventProcessCreate {
+			pids[e.ProcessName] = int64(len(pids) + 100)
+		}
+	}
+	for i := range events {
+		e := &events[i]
+		e.CaseID = "case-1"
+		e.CollectionID = "collection-1"
+		e.ProcessPath = `C:\Tools\` + e.ProcessName
+		if e.Extra == nil {
+			e.Extra = map[string]string{}
+		}
+		e.Extra["logon_id"] = "0x10"
+		if e.EventType == model.EventProcessCreate || e.EventType == model.EventNetworkConnection {
+			e.PID = pids[e.ProcessName]
+		}
+		if e.EventType == model.EventProcessCreate {
+			e.PPID = pids[e.ParentProcessName]
+		}
+	}
+	return events
 }

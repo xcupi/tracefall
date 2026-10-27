@@ -1,8 +1,6 @@
 package investigate
 
 import (
-	"strings"
-
 	"tracefall/internal/hostid"
 	"tracefall/internal/model"
 )
@@ -29,29 +27,27 @@ type identity struct {
 }
 
 func newIdentities(members map[string]member) identities {
-	hostsOf := map[string][]string{}
-	for _, m := range members {
-		if m.host != "" && m.coll != "" {
-			hostsOf[m.coll] = append(hostsOf[m.coll], m.host)
+	// One name projection per acquisition/spelling, not a full Event per
+	// investigation member. Identity needs names, not case-sized event copies.
+	var projections []model.Event
+	representative := map[string]string{}
+	nameKey := func(coll, host string) string { return coll + "\x00" + host }
+	for id, m := range members {
+		k := nameKey(m.coll, m.host)
+		if _, ok := representative[k]; !ok {
+			representative[k] = id
+			projections = append(projections, model.Event{ID: id, Host: m.host, CollectionID: m.coll})
 		}
 	}
-	resolved := map[string]string{}
-	for coll, hosts := range hostsOf {
-		if h, ok := hostid.Resolve(hosts); ok {
-			resolved[coll] = strings.ToLower(strings.TrimSpace(h))
-		}
-	}
+	names := hostid.AcquisitionNames(projections)
 	idn := identities{byID: make(map[string]identity, len(members))}
 	for id, m := range members {
-		switch h := strings.ToLower(strings.TrimSpace(m.host)); {
+		switch h := names[representative[nameKey(m.coll, m.host)]]; {
 		case h == "" && m.coll != "":
 			idn.byID[id] = identity{key: "unknown\x00" + m.coll}
 		case h == "":
 			idn.byID[id] = identity{key: "unknown-event\x00" + id}
 		default:
-			if r, ok := resolved[m.coll]; ok {
-				h = r
-			}
 			idn.byID[id] = identity{key: "host\x00" + h, known: true}
 		}
 	}

@@ -1,7 +1,7 @@
 package correlate
 
 import (
-	"time"
+	"strings"
 
 	"tracefall/internal/model"
 )
@@ -12,60 +12,42 @@ import (
 // activityLookWindow's identical rationale in activity_chain.go.
 const serviceChainWindow = activityLookWindow
 
-// BuildServiceChains links a service installation (Phase 4's
-// EventServiceInstall, from System Event ID 7045) to the service's
-// process actually starting -- a process-create for the same executable
-// on the same host shortly after installation -- and onward to any
-// network connection that process made. A chain is only emitted for the
-// steps the evidence actually supports; a service install with no
-// corresponding process-create (e.g. a service that was installed but
-// never started) is left to the service-persistence finding alone
-// (internal/detect's servicePersistence rule), not fabricated into a
-// longer chain.
+// BuildServiceChains retains a labelled contextual association between a
+// service configuration and one subsequent creation of the same full-path
+// executable in the same acquisition. Configuration is not proof of a service
+// launch. Network observations additionally require recorded process identity.
 func BuildServiceChains(caseID string, events []model.Event) []model.Correlation {
-	installs := byType(events, model.EventServiceInstall)
-	creates := byType(events, model.EventProcessCreate)
-	netConns := byType(events, model.EventNetworkConnection)
-
-	// See activity_chain.go's identical indexing for why.
-	createsByHostProc := indexEvents(creates, func(e model.Event) string { return chainKey(e.Host, e.ProcessName) })
-	netConnsByHostProc := indexEvents(netConns, func(e model.Event) string { return chainKey(e.Host, e.ProcessName) })
-
+	events = chainHostKeys(events)
+	creates := sortedChainEvents(byType(events, model.EventProcessCreate))
 	var out []model.Correlation
-	for _, install := range installs {
-		target := install.ProcessName
-		if target == "" {
+	for _, install := range sortedChainEvents(byType(events, model.EventServiceInstall)) {
+		var candidates []model.Event
+		for _, proc := range creates {
+			if install.ProcessName != "" && proc.ProcessName == install.ProcessName && sameExecutablePath(install.ProcessPath, proc.ProcessPath) && install.CaseID == caseID && sameEvidenceScope(install, proc) && processTime(install) && processTime(proc) && proc.Timestamp.After(install.Timestamp) && proc.Timestamp.Sub(install.Timestamp) <= serviceChainWindow {
+				candidates = append(candidates, proc)
+			}
+		}
+		if len(candidates) != 1 {
 			continue
 		}
-		proc, ok := findProcessAfter(createsByHostProc[chainKey(install.Host, target)], install.Host, target, install.Timestamp, serviceChainWindow)
-		if !ok {
-			continue
-		}
+		proc := candidates[0]
 		chain := []model.Event{install, proc}
-		if n, ok := findNetwork(netConnsByHostProc[chainKey(proc.Host, proc.ProcessName)], proc.Host, proc.ProcessName, proc.Timestamp, serviceChainWindow); ok {
+		if n, ok := networkFor(proc, byType(events, model.EventNetworkConnection), creates); ok {
 			chain = append(chain, n)
 		}
-		out = append(out, buildTypedChainCorrelation(caseID, model.CorrelationServiceChain, "Service chain", chain))
+		c := buildTypedChainCorrelation(caseID, model.CorrelationServiceChain, "Contextual service chain", chain)
+		c.Description = "Service configuration and a subsequent process creation reference the same full executable path. This contextual association does not establish that the service launched that process. Network attribution, when present, uses recorded process identity compatible with observed starts and exits; unrecorded exits and unobserved PID reuse remain uncertain."
+		out = append(out, c)
 	}
 	return out
 }
 
-// findProcessAfter finds the process-create event for (host, processName)
-// nearest at-or-after at, within window -- the service actually starting
-// following its installation.
-func findProcessAfter(events []model.Event, host, processName string, at time.Time, window time.Duration) (model.Event, bool) {
-	var best model.Event
-	found := false
-	for _, e := range events {
-		if e.Host != host || e.ProcessName != processName {
-			continue
-		}
-		if e.Timestamp.Before(at) || e.Timestamp.Sub(at) > window {
-			continue
-		}
-		if !found || e.Timestamp.Before(best.Timestamp) {
-			best, found = e, true
-		}
+// Configuration paths containing arguments are intentionally not guessed into
+// executable identities. Keep the raw configuration; abstain when uncertain.
+func sameExecutablePath(a, b string) bool {
+	clean := func(s string) string {
+		return strings.ToLower(strings.ReplaceAll(strings.Trim(strings.TrimSpace(s), "\""), "\\", "/"))
 	}
-	return best, found
+	a, b = clean(a), clean(b)
+	return a != "" && (strings.HasPrefix(a, "/") || (len(a) > 2 && a[1:3] == ":/")) && a == b
 }

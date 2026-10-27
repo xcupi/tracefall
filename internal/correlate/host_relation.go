@@ -41,6 +41,7 @@ type relation struct {
 // as sound as its weakest identification.
 func BuildHostRelations(caseID string, events []model.Event, reg *hostid.Registry) []model.Correlation {
 	rels := map[relationKey]*relation{}
+	names := hostid.AcquisitionNames(events)
 	add := func(k relationKey, e model.Event, basis hostid.Basis) {
 		r := rels[k]
 		if r == nil {
@@ -64,13 +65,20 @@ func BuildHostRelations(caseID string, events []model.Event, reg *hostid.Registr
 			if !ok {
 				continue
 			}
+			target := names[e.ID]
+			if target == "" || reg.AmbiguousName(target) {
+				continue
+			}
+			if h := reg.ByName(target); h != nil {
+				target = h.Name
+			}
 			src := reg.ByIP(e.NetworkSource)
-			if src.Identity == nil || strings.EqualFold(src.Identity.Name, e.Host) {
+			if src.Identity == nil || strings.EqualFold(src.Identity.Name, target) {
 				continue
 			}
 			// A name the client reported in this very logon is the only thing
 			// tying the address to the machine; it is a claim, not a finding.
-			add(relationKey{src.Identity.Name, e.Host, kind}, e, src.Basis)
+			add(relationKey{src.Identity.Name, target, kind}, e, src.Basis)
 		case e.EventType == model.EventNetworkConnection && e.ArtifactType == model.ArtifactNetworkCapture &&
 			e.Extra["session"] != "true" && e.Extra["application"] != "":
 			src, dst := reg.ByIP(e.NetworkSource), reg.ByIP(e.NetworkDest)

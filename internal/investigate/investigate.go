@@ -29,6 +29,7 @@ package investigate
 
 import (
 	"sort"
+	"strings"
 
 	"tracefall/internal/attck"
 	"tracefall/internal/model"
@@ -64,6 +65,13 @@ func isChainCorrelation(t string) bool {
 	return t == model.CorrelationActivityChain || t == model.CorrelationCredentialChain || t == model.CorrelationServiceChain
 }
 
+// Contextual chains retain configuration leads, not independent corroboration.
+// Their explicit title marker is produced by the correlation builders and
+// preserved in stored analysis; historical chains need re-analysis.
+func contextualChain(c model.Correlation) bool {
+	return isChainCorrelation(c.Type) && strings.HasPrefix(c.Title, "Contextual ")
+}
+
 func buildInvestigation(caseID string, g group, acc *groupAcc, findingsByID map[string]model.Finding, correlationsByID map[string]model.Correlation) model.Investigation {
 	// Map iteration order is random: the ids are walked in sorted order, and
 	// every sort breaks ties by id, so the same case always reads the same.
@@ -87,7 +95,7 @@ func buildInvestigation(caseID string, g group, acc *groupAcc, findingsByID map[
 	for _, id := range sortedKeys(g.correlationIDs) {
 		if c, ok := correlationsByID[id]; ok {
 			groupCorrelations = append(groupCorrelations, c)
-			if isChainCorrelation(c.Type) && (chainCorr == nil || len(c.EventIDs) > len(chainCorr.EventIDs)) {
+			if isChainCorrelation(c.Type) && !contextualChain(c) && (chainCorr == nil || len(c.EventIDs) > len(chainCorr.EventIDs)) {
 				cCopy := c
 				chainCorr = &cCopy
 			}
@@ -122,7 +130,12 @@ func buildInvestigation(caseID string, g group, acc *groupAcc, findingsByID map[
 	distinctCollections := sortedUniqueStrings(setKeys(acc.colls))
 	distinctArtifacts := sortedUniqueStrings(setKeys(acc.artifacts))
 	hasChain := chainCorr != nil
-	hasAnyCorr := len(groupCorrelations) > 0
+	hasAnyCorr := false
+	for _, c := range groupCorrelations {
+		if !contextualChain(c) {
+			hasAnyCorr = true
+		}
+	}
 	score, scoreRationale := computeScore(scoreInput{
 		highestSeverity:  highestSeverity(groupFindings),
 		facets:           facets,
@@ -152,6 +165,13 @@ func buildInvestigation(caseID string, g group, acc *groupAcc, findingsByID map[
 
 	// -------- narrative --------
 	summary := buildNarrative(acc.seq)
+	limitations := map[string]bool{}
+	for _, c := range groupCorrelations {
+		if contextualChain(c) && !limitations[c.Description] && len(limitations) < 2 {
+			limitations[c.Description] = true
+			summary += " Contextual correlation limitation: " + c.Description
+		}
+	}
 	start, end := acc.bounds()
 
 	findingIDs := make([]string, 0, len(groupFindings))
