@@ -197,9 +197,18 @@ func taskActionEvidence(e model.Event) (string, string, []string) {
 	}
 	labels := interpreterInvocationIndicators(e)
 	writable := taskWritableTarget(first)
-	for i, t := range tokens {
-		if (strings.EqualFold(t, "-file") || strings.EqualFold(t, "-f")) && i+1 < len(tokens) && procclass.IsPowerShell(e.ProcessName) {
-			writable = writable || taskWritableTarget(strings.Trim(tokens[i+1], `"'`))
+	if procclass.IsPowerShell(e.ProcessName) {
+		for i, t := range tokens[1:] {
+			option := strings.ToLower(strings.Trim(t, `"'`))
+			if option == "-c" || option == "-command" || option == "-e" || option == "-ec" || option == "-enc" || option == "-encodedcommand" {
+				break // Subsequent -File text belongs to code/data, not launch options.
+			}
+			if option == "-file" || option == "-f" {
+				if i+2 < len(tokens) {
+					writable = writable || taskWritableTarget(strings.Trim(tokens[i+2], `"'`))
+				}
+				break // The rest are script arguments, not another executable target.
+			}
 		}
 	}
 	// ProgramData alone is routine application storage. Temp/AppData executable

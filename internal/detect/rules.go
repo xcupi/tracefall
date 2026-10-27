@@ -243,7 +243,7 @@ func (r suspiciousProcessChain) Evaluate(events []model.Event) []model.Finding {
 		}
 		// Self-nesting is common shell plumbing, including copied interpreters.
 		// It establishes neither payload staging nor an authorization verdict.
-		self := e.ParentProcessName == e.ProcessName
+		self := e.ParentProcessName == e.ProcessName || (procclass.IsPowerShell(e.ParentProcessName) && procclass.IsPowerShell(e.ProcessName))
 		strong := self && strongNestedInvocation(e)
 		if self && !strong {
 			continue
