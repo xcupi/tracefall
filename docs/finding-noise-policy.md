@@ -37,10 +37,16 @@ the normalized command action, requiring agreement with its process identity:
 | Encoded + hidden; dynamic expression + download/decode | high / medium |
 | Remote script/loader action | high / medium |
 
-Remote target selection is restricted to direct script/loader invocations
-(mshta, wscript, cscript, rundll32, regsvr32), not arbitrary URLs in data
-arguments. A PowerShell `-File` target is read only from launch options; text
-after `-Command`, encoded content, or the first `-File` is not another target.
+Remote target selection reads only executable-specific loader positions:
+WSH's first script after supported switches (UNC paths, not HTTP URLs), mshta's
+first HTA target, rundll32's first DLL/entry-point token, and regsvr32's DLL or
+`/i:` target **only with scrobj.dll**. URLs/UNC paths in subsequent script/data
+arguments do not select a lead. Unknown switches stop target selection rather
+than licensing a search through arbitrary arguments. The same selected target
+supplies writable-path evidence: a stock-directory WSH wrapper around a Temp or
+AppData script is medium/low, not automatically high. PowerShell `-File` and
+implicit `.ps1` targets share the host-option scan; command text and arguments
+after the first script target are not additional executable targets.
 Missing, COM-only or otherwise unsupported normalized actions are retained as
 evidence without a finding, not certified safe. XML action parsing is unchanged.
 
@@ -54,10 +60,20 @@ recorded executable invocation. PowerShell script-block events carry their own
 artifact context. Options are matched as launch tokens, before command/script
 arguments; `-encoding` is not `-enc`. Supported encoded forms are `-e`, `-ec`,
 `-enc`, and `-EncodedCommand`. Hidden window forms include `-w hidden`, `-w 1`,
-and `-WindowStyle hidden`.
+and `-WindowStyle hidden`. Recognized host value options (input/output format,
+configuration, encoded arguments, Windows PowerShell console/version, and pwsh
+working directory/settings/pipe options) consume one value; documented explicit
+aliases are enumerated, not guessed by arbitrary prefix matching. Missing
+values or unknown switches do not license scanning arbitrary words as code.
+An encoded command consumes one opaque payload token, then host-option scanning
+continues: hidden + encoded priority does not depend on flag order. Payload
+validity, decoding and successful native execution are not established.
 
 The selector blanks quoted literal data and line/block comments before matching
-invocation constructs. It does not interpret the script. A search for the words
+invocation constructs. Outside quotes, a backtick escapes the next character;
+escaped hashes/quotes are not comment/string openers and escaped semicolons are
+not statement boundaries. Real comments remain masked. It does not interpret
+the script. A search for the words
 IEX, DownloadString or encoded options is not itself execution of those forms.
 Base64 conversion, WebClient construction and web API requests alone are not
 selected. A DownloadString/DownloadFile method invocation remains a lead; a web
@@ -71,6 +87,16 @@ Repeated tokens do not count as independent corroboration. Encoded payloads are
 **not decoded or executed** and are never assumed benign. A record does not
 prove a command completed, downloaded code ran, or activity was authorized.
 Command-derived descriptions use `cmdsem.Redact` before truncation.
+
+### Native syntax references
+
+- [Windows PowerShell host options](https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_powershell_exe?view=powershell-5.1)
+- [pwsh host options and File/Command boundaries](https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_pwsh?view=powershell-7.5)
+- [PowerShell 7.5 host parser](https://github.com/PowerShell/PowerShell/blob/v7.5.0/src/Microsoft.PowerShell.ConsoleHost/host/msh/CommandLineParameterParser.cs): encoded-command parsing consumes its value without ending the host-option loop, unlike command text.
+- [WSH script and data positions](https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/wscript), [regsvr32 DLL and install argument](https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/regsvr32), [rundll32 DLL target](https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/rundll32).
+
+These are syntax references, not proof that any recorded command executed.
+No PowerShell/WSH/loader invocation is run by the tests.
 
 ## Contracts and historical decisions
 

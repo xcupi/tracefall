@@ -30,12 +30,18 @@ var decodeInvocation = regexp.MustCompile(`(?i)::\s*frombase64string\s*\(`)
 // claim that a recorded expression completed. It never executes/decodes code.
 // Other rules deliberately retain their existing gates in indicatorsIn.
 func powerShellRuleIndicators(cmd string, script bool) []string {
+	labels, _ := powerShellInvocationEvidence(cmd, script)
+	return labels
+}
+
+func powerShellInvocationEvidence(cmd string, script bool) ([]string, string) {
 	var labels []string
+	target := ""
 	body := cmd
 	if !script {
 		loc := psExecutable.FindStringIndex(cmd)
 		if loc == nil {
-			return nil
+			return nil, ""
 		}
 		rest := cmd[loc[1]:]
 		body = ""
@@ -47,6 +53,15 @@ func powerShellRuleIndicators(cmd string, script bool) []string {
 			if i+1 < len(tokens) {
 				n := tokens[i+1]
 				value = strings.ToLower(strings.Trim(rest[n[0]:n[1]], `"'`))
+			}
+			// Recognized host value options consume exactly one token. Do not
+			// guess unknown abbreviations or consume a following switch as a value.
+			if powerShellHostValueOption(token, cmd) {
+				if value == "" || strings.HasPrefix(value, "-") {
+					break
+				}
+				i++
+				continue
 			}
 			switch token {
 			case "-nop", "-noprofile":
@@ -62,9 +77,17 @@ func powerShellRuleIndicators(cmd string, script bool) []string {
 				}
 				i++
 			case "-e", "-ec", "-enc", "-encodedcommand":
+				if value == "" || strings.HasPrefix(value, "-") {
+					i = len(tokens)
+					break
+				}
 				labels = append(labels, psEncoded)
-				i = len(tokens)
+				i++ // One opaque payload; subsequent tokens remain host options.
 			case "-f", "-file":
+				if value != "" && !strings.HasPrefix(value, "-") {
+					n := tokens[i+1]
+					target = strings.Trim(rest[n[0]:n[1]], `"'`)
+				}
 				i = len(tokens) // Remaining tokens belong to the script.
 			case "-c", "-command":
 				body = strings.TrimSpace(rest[at[1]:])
@@ -72,11 +95,17 @@ func powerShellRuleIndicators(cmd string, script bool) []string {
 					body = body[1 : len(body)-1]
 				}
 				i = len(tokens)
+			case "-nologo", "-nol", "-noexit", "-noe", "-noninteractive", "-noni", "-sta", "-mta", "-interactive", "-i", "-login", "-l", "-noprofileloadtime", "-sshservermode", "-sshs":
+				// Supported valueless host switches.
 			default:
 				if !strings.HasPrefix(token, "-") {
-					body = rest[at[0]:]
-					i = len(tokens)
+					if strings.HasSuffix(token, ".ps1") {
+						target = strings.Trim(rest[at[0]:at[1]], `"'`)
+					} else {
+						body = rest[at[0]:]
+					}
 				}
+				i = len(tokens) // Unknown options are not permission to scan their data.
 			}
 		}
 	}
@@ -93,7 +122,26 @@ func powerShellRuleIndicators(cmd string, script bool) []string {
 	if dynamic && decodeInvocation.MatchString(code) {
 		labels = append(labels, psDecode)
 	}
-	return labels
+	return labels, target
+}
+
+// Explicit host options from about_PowerShell_exe/about_Pwsh; this is not
+// generic prefix matching (which could turn a script argument into host data).
+func powerShellHostValueOption(option, cmd string) bool {
+	exe := strings.Trim(strings.TrimSpace(psExecutable.FindString(cmd)), `"'`)
+	if i := strings.LastIndexAny(exe, `\\/`); i >= 0 {
+		exe = exe[i+1:]
+	}
+	pwsh := strings.EqualFold(strings.TrimSuffix(strings.ToLower(exe), ".exe"), "pwsh")
+	switch option {
+	case "-inputformat", "-inp", "-if", "-outputformat", "-o", "-of", "-configurationname", "-config", "-encodedarguments", "-ea":
+		return true
+	case "-psconsolefile", "-version":
+		return !pwsh
+	case "-workingdirectory", "-wd", "-wo", "-configurationfile", "-custompipename", "-settingsfile", "-settings":
+		return pwsh
+	}
+	return false
 }
 
 // Blank quoted data and comments before looking for invocation constructs.
@@ -135,6 +183,17 @@ func withoutPowerShellLiterals(s string) string {
 				} else {
 					quote = 0
 				}
+			}
+			continue
+		}
+		// Outside literals a backtick escapes exactly the next character too.
+		// Mask both so an escaped #/quote/semicolon is neither a comment,
+		// string opener nor an executable statement boundary.
+		if ch == '`' {
+			b[i] = ' '
+			if i+1 < len(b) {
+				b[i+1] = ' '
+				i++
 			}
 			continue
 		}
@@ -196,36 +255,20 @@ func taskActionEvidence(e model.Event) (string, string, []string) {
 		return "", "", nil
 	}
 	labels := interpreterInvocationIndicators(e)
-	writable := taskWritableTarget(first)
+	target := taskLoaderTarget(e.ProcessName, tokens[1:])
 	if procclass.IsPowerShell(e.ProcessName) {
-		for i, t := range tokens[1:] {
-			option := strings.ToLower(strings.Trim(t, `"'`))
-			if option == "-c" || option == "-command" || option == "-e" || option == "-ec" || option == "-enc" || option == "-encodedcommand" {
-				break // Subsequent -File text belongs to code/data, not launch options.
-			}
-			if option == "-file" || option == "-f" {
-				if i+2 < len(tokens) {
-					writable = writable || taskWritableTarget(strings.Trim(tokens[i+2], `"'`))
-				}
-				break // The rest are script arguments, not another executable target.
-			}
-		}
+		_, target = powerShellInvocationEvidence(e.CommandLine, false)
 	}
+	writable := taskWritableTarget(first) || taskWritableTarget(target)
 	// ProgramData alone is routine application storage. Temp/AppData executable
 	// targets remain low-confidence review leads, not high-severity verdicts.
 	if writable {
 		labels = append(labels, "user-writable action target")
 	}
-	remote := false
-	switch e.ProcessName {
-	case "mshta.exe", "wscript.exe", "cscript.exe", "rundll32.exe", "regsvr32.exe":
-		for _, t := range tokens[1:] {
-			t = strings.ToLower(strings.Trim(t, `"'`))
-			t = strings.TrimPrefix(t, "/i:")
-			if strings.HasPrefix(t, "http://") || strings.HasPrefix(t, "https://") || strings.HasPrefix(t, `\\`) {
-				remote = true
-			}
-		}
+	loaderTarget := taskLoaderTarget(e.ProcessName, tokens[1:])
+	remote := strings.HasPrefix(strings.ToLower(loaderTarget), `\\`)
+	if e.ProcessName == "mshta.exe" || e.ProcessName == "regsvr32.exe" {
+		remote = remote || strings.HasPrefix(strings.ToLower(loaderTarget), "http://") || strings.HasPrefix(strings.ToLower(loaderTarget), "https://")
 	}
 	if remote {
 		labels = append(labels, "remote script/loader action")
@@ -249,6 +292,60 @@ func taskActionEvidence(e model.Event) (string, string, []string) {
 		severity, confidence = psSeverity, psConfidence
 	}
 	return severity, confidence, labels
+}
+
+// Select only executable-specific loader positions, never subsequent data.
+// URL loading is supported here only for mshta and scrobj /i, not WSH/DLL paths.
+func taskLoaderTarget(proc string, args []string) string {
+	clean := func(s string) string { return strings.Trim(s, `"'`) }
+	switch proc {
+	case "mshta.exe", "rundll32.exe":
+		if len(args) > 0 {
+			return strings.SplitN(clean(args[0]), ",", 2)[0]
+		}
+	case "wscript.exe", "cscript.exe":
+		for _, arg := range args {
+			t := clean(arg)
+			if !strings.HasPrefix(t, "/") {
+				return t
+			}
+			s := strings.ToLower(strings.TrimLeft(t, "/"))
+			switch s {
+			case "b", "d", "i", "logo", "nologo", "x":
+				continue
+			}
+			if strings.HasPrefix(s, "e:") || strings.HasPrefix(s, "job:") || strings.HasPrefix(s, "t:") {
+				continue
+			}
+			return ""
+		}
+	case "regsvr32.exe":
+		var install, dll string
+		for _, arg := range args {
+			t := clean(arg)
+			s := strings.ToLower(t)
+			if s == "/s" || s == "/u" || s == "/n" {
+				continue
+			}
+			if strings.HasPrefix(s, "/i:") {
+				install = t[3:]
+				continue
+			}
+			if strings.HasPrefix(s, "/") || dll != "" {
+				return ""
+			}
+			dll = t
+		}
+		base := strings.ToLower(dll)
+		if i := strings.LastIndexAny(base, `\\/`); i >= 0 {
+			base = base[i+1:]
+		}
+		if base == "scrobj.dll" && install != "" {
+			return install
+		}
+		return dll
+	}
+	return ""
 }
 
 func taskWritableTarget(path string) bool {

