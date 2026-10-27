@@ -3,9 +3,11 @@ package correlate
 import (
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"tracefall/internal/authseq"
+	"tracefall/internal/hostid"
 	"tracefall/internal/model"
 )
 
@@ -24,6 +26,8 @@ const (
 // credential attempts produce qualified hypotheses, never causal execution or
 // credential-abuse claims from account/process names and time alone.
 func BuildCredentialChains(caseID string, events []model.Event) []model.Correlation {
+	// Resolve explicit targets while the recorded host spellings are available.
+	explicit := buildCredentialAbuseChains(caseID, events)
 	// Use the case-wide comparison decision, without changing recorded facts or
 	// requiring equal collections for repeated acquisitions of a known host.
 	// Unresolved identities cannot support a host-bound authentication claim.
@@ -37,7 +41,7 @@ func BuildCredentialChains(caseID string, events []model.Event) []model.Correlat
 	var out []model.Correlation
 	out = append(out, buildBruteForceChains(caseID, events)...)
 	out = append(out, buildSequenceBruteForceChains(caseID, events)...)
-	out = append(out, buildCredentialAbuseChains(caseID, events)...)
+	out = append(out, explicit...)
 	return out
 }
 
@@ -53,6 +57,21 @@ func buildBruteForceChains(caseID string, events []model.Event) []model.Correlat
 }
 
 func buildCredentialAbuseChains(caseID string, events []model.Event) []model.Correlation {
+	// Both host and target labels must use the same case-wide acquisition
+	// decision. Inventory only recorded hosts: a target reference is not alias
+	// proof. Keep Extra untouched, including the literal target-server value.
+	names := hostid.AcquisitionNames(events)
+	labelKey := func(caseID, host string) string { return caseID + "\x00" + strings.ToLower(strings.TrimSpace(host)) }
+	labels := map[string]string{}
+	var identified []model.Event
+	for _, e := range events {
+		labels[labelKey(e.CaseID, e.Host)] = names[e.ID]
+		e.Host = names[e.ID]
+		if e.Host != "" {
+			identified = append(identified, e)
+		}
+	}
+	events = identified
 	// Name/time alone is useful triage, not an execution or abuse finding.
 	// 4648's subject session belongs to the caller, NOT to the target account.
 	domain := func(e model.Event) string {
@@ -83,7 +102,7 @@ func buildCredentialAbuseChains(caseID string, events []model.Event) []model.Cor
 		if target == "" || !usable(cred) || (cred.CaseID != "" && cred.CaseID != caseID) {
 			continue
 		}
-		if server := cred.Extra["target_server_name"]; server != "" && server != "-" && server != "localhost" && server != cred.Host {
+		if server := cred.Extra["target_server_name"]; server != "" && server != "-" && server != "localhost" && labels[labelKey(cred.CaseID, server)] != cred.Host {
 			continue
 		}
 		var proc model.Event
