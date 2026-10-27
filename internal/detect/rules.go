@@ -120,7 +120,7 @@ func (r powershellEncodedCommand) Evaluate(events []model.Event) []model.Finding
 		if !procclass.IsPowerShell(e.ProcessName) {
 			continue
 		}
-		indicators := indicatorsIn(e.CommandLine)
+		indicators := powerShellRuleIndicators(e.CommandLine, e.EventType == model.EventPowerShellScript)
 		if len(indicators) == 0 {
 			continue
 		}
@@ -128,26 +128,22 @@ func (r powershellEncodedCommand) Evaluate(events []model.Event) []model.Finding
 	}
 
 	for _, e := range byType(events, model.EventPowerShellScript) {
-		indicators := indicatorsIn(e.CommandLine)
+		indicators := powerShellRuleIndicators(e.CommandLine, e.EventType == model.EventPowerShellScript)
 		if len(indicators) == 0 {
 			continue
 		}
 		findings = append(findings, r.finding(e, e.CommandLine, indicators))
 	}
 
-	return findings
+	return orderInvocationFindings(findings)
 }
 
 func (r powershellEncodedCommand) finding(e model.Event, cmd string, indicators []string) model.Finding {
 	title := "PowerShell execution with suspicious command indicators"
 	desc := fmt.Sprintf(
-		"PowerShell activity on host %s (user %s) at %s matched %d suspicious indicator(s): %s. Command/script: %s",
-		e.Host, orDash(e.User), fmtTime(e.Timestamp), len(indicators), strings.Join(indicators, ", "), truncate(cmd, 300))
-	severity := model.SeverityMedium
-	confidence := model.ConfidenceMedium
-	if len(indicators) >= 2 {
-		severity = model.SeverityHigh
-	}
+		"PowerShell activity on host %s (user %s) at %s matched %d invocation indicator(s): %s. The record does not establish successful execution, malicious intent or authorization. Command/script: %s",
+		e.Host, orDash(e.User), fmtTime(e.Timestamp), len(indicators), strings.Join(indicators, ", "), truncate(cmdsem.Redact(cmd), 300))
+	severity, confidence := powerShellEvidenceLevel(indicators)
 	return newFinding(e.CaseID, r.ID(), title, severity, confidence, desc,
 		[]string{"T1059.001", "T1027"}, []model.Event{e})
 }
@@ -204,40 +200,25 @@ func (r newScheduledTask) Inputs() model.EventFilter {
 func (r newScheduledTask) Evaluate(events []model.Event) []model.Finding {
 	var findings []model.Finding
 	for _, e := range byType(events, model.EventScheduledTaskCreate) {
-		lolbin := procclass.IsScriptHost(e.ProcessName) || procclass.IsPowerShell(e.ProcessName)
-		suspiciousPath := procclass.HasSuspiciousPath(e.ProcessPath) || procclass.HasSuspiciousPath(e.CommandLine)
-		hostile := hasHostileInvocation(e.CommandLine)
-		severity, confidence := model.SeverityLow, model.ConfidenceLow
-		switch {
-		case suspiciousPath || hostile:
-			severity, confidence = model.SeverityHigh, model.ConfidenceMedium
-		case lolbin:
-			// An interpreter or rundll32 alone describes most stock Windows
-			// tasks too; without an encoded, hidden or remote invocation it is
-			// a lead to read, not a high-severity one.
-			severity, confidence = model.SeverityMedium, model.ConfidenceLow
+		severity, confidence, indicators := taskActionEvidence(e)
+		if len(indicators) == 0 {
+			continue // Configuration remains on the timeline, not one finding per task.
 		}
-		title := fmt.Sprintf("Scheduled Task persistence: %s", orDash(e.Extra["task_name"]))
+		title := fmt.Sprintf("Scheduled Task action review: %s", orDash(e.Extra["task_name"]))
 		when := "registration date is not recorded in the task file"
 		if !e.Timestamp.IsZero() {
-			when = "registered at " + fmtTime(e.Timestamp)
+			when = "author-recorded registration date " + fmtTime(e.Timestamp)
 		} else if local := e.Extra["timestamp_local"]; local != "" {
 			when = "registration date " + local + " (local time, zone not recorded)"
 		}
 		desc := fmt.Sprintf(
-			"Scheduled Task %q (author/principal %s; %s) on host %s, action: %q. A single scheduled task "+
-				"is a weak indicator on its own -- reported as an observed persistence mechanism.",
-			orDash(e.Extra["task_name"]), orDash(e.User), when, orDash(e.Host), truncate(cmdsem.Redact(e.CommandLine), 200))
-		if lolbin {
-			desc += fmt.Sprintf(" The task action invokes %s, a common execution/persistence living-off-the-land binary.", e.ProcessName)
-		}
-		if suspiciousPath {
-			desc += " The task action references a user-writable/non-standard directory."
-		}
+			"Scheduled Task configuration %q (author/principal %s; %s) on host %s, action: %q. Action indicators: %s. "+
+				"The configuration does not establish creation by an actor, execution, successful persistence or malicious intent. Any task-file date is author-recorded, not independently verified.",
+			orDash(e.Extra["task_name"]), orDash(e.User), when, orDash(e.Host), truncate(cmdsem.Redact(e.CommandLine), 200), strings.Join(indicators, ", "))
 		findings = append(findings, newFinding(e.CaseID, r.ID(), title, severity, confidence, desc,
 			[]string{"T1053.005"}, []model.Event{e}))
 	}
-	return findings
+	return orderInvocationFindings(findings)
 }
 
 // ---------- Rule 5: Suspicious process execution chain ----------
@@ -260,20 +241,29 @@ func (r suspiciousProcessChain) Evaluate(events []model.Event) []model.Finding {
 		if !parentIsInterpreter {
 			continue
 		}
-		childSuspicious := procclass.HasSuspiciousPath(e.ProcessPath) || procclass.IsScriptHost(e.ProcessName)
+		// Self-nesting is common shell plumbing, including copied interpreters.
+		// It establishes neither payload staging nor an authorization verdict.
+		self := e.ParentProcessName == e.ProcessName
+		strong := self && strongNestedInvocation(e)
+		if self && !strong {
+			continue
+		}
+		childSuspicious := strong || procclass.HasSuspiciousPath(e.ProcessPath) || procclass.IsScriptHost(e.ProcessName)
 		if !childSuspicious {
 			continue
 		}
 		title := fmt.Sprintf("Suspicious execution chain: %s -> %s", e.ParentProcessName, e.ProcessName)
 		desc := fmt.Sprintf(
-			"%s spawned %s (PID %d, path %q) at %s on host %s. A scripting interpreter launching a process "+
-				"from a non-standard location or invoking another living-off-the-land binary is consistent "+
-				"with payload staging/execution.",
+			"%s is recorded as the parent of %s (PID %d, path %q) at %s on host %s. This is a process-ancestry review lead; "+
+				"the relationship does not establish successful payload execution, malicious intent or authorization.",
 			e.ParentProcessName, e.ProcessName, e.PID, orDash(e.ProcessPath), fmtTime(e.Timestamp), e.Host)
+		if strong {
+			desc += " Self-nesting was selected only because the child command also has encoded/hidden or dynamic/download/decode invocation evidence."
+		}
 		findings = append(findings, newFinding(e.CaseID, r.ID(), title, model.SeverityHigh, model.ConfidenceMedium,
 			desc, []string{"T1059", "T1059.001"}, []model.Event{e}))
 	}
-	return findings
+	return orderInvocationFindings(findings)
 }
 
 // ---------- Rule 6: Multiple failed logons followed by successful logon ----------
@@ -993,20 +983,6 @@ func isDefaultWinlogonValue(registryPath, data string) bool {
 		return v == "userinit.exe" || v == `c:\windows\system32\userinit.exe` || v == `%systemroot%\system32\userinit.exe`
 	case "vmapplet":
 		return v == "systempropertiesperformance.exe /pagefile"
-	}
-	return false
-}
-
-// hasHostileInvocation reports command-line forms that hide or fetch code:
-// an encoded command, a hidden window, no-profile PowerShell, a remote
-// URL, or in-memory download-and-run. None of them is stock task usage.
-func hasHostileInvocation(cmd string) bool {
-	// A trailing space lets an option that ends the line match like the rest.
-	l := strings.ToLower(cmd) + " "
-	for _, m := range []string{" -enc", " -ec ", " -e ", "-encodedcommand", " -nop", "-noprofile", " -w hidden", " -w 1 ", "-windowstyle hidden", " -ep bypass", " -exec bypass", "executionpolicy bypass", "http://", "https://", "downloadstring", "frombase64string", " iex", "invoke-expression"} {
-		if strings.Contains(l, m) {
-			return true
-		}
 	}
 	return false
 }
