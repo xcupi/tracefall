@@ -106,10 +106,28 @@ func RunFrom(caseID string, src model.EventSource) ([]model.Correlation, error) 
 			typed = append(typed, model.Event{ID: r.ID, CaseID: caseID, CollectionID: r.CollectionID, Host: r.Host})
 		}
 	}
+	// Reference-only consumers must use the same case-wide identity decision
+	// as typed chains, not reintroduce a contradicted raw host attribution.
+	names := hostid.AcquisitionNames(typed)
+	byName := map[string]string{}
+	for _, e := range typed {
+		byName[nameKey(e.CollectionID, e.Host)] = names[e.ID]
+	}
+	validatedRefs := make([]model.EventRef, 0, len(refs))
+	for _, r := range refs {
+		if r.Host != "" {
+			h := byName[nameKey(r.CollectionID, r.Host)]
+			if h == "" {
+				continue
+			}
+			r.Host = h
+		}
+		validatedRefs = append(validatedRefs, r)
+	}
 	var out []model.Correlation
 	out = append(out, BuildProcessChains(caseID, typed)...)
-	out = append(out, BuildEntityCorrelations(caseID, refs)...)
-	out = append(out, BuildTemporalClusters(caseID, refs)...)
+	out = append(out, BuildEntityCorrelations(caseID, validatedRefs)...)
+	out = append(out, BuildTemporalClusters(caseID, validatedRefs)...)
 	out = append(out, BuildActivityChains(caseID, typed)...)
 	out = append(out, BuildCredentialChains(caseID, typed)...)
 	out = append(out, BuildServiceChains(caseID, typed)...)

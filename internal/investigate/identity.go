@@ -26,9 +26,9 @@ type identity struct {
 	known bool
 }
 
-func newIdentities(members map[string]member) identities {
-	// One name projection per acquisition/spelling, not a full Event per
-	// investigation member. Identity needs names, not case-sized event copies.
+func newIdentities(members map[string]member, inventory ...[]model.Event) identities {
+	// Resolve member comparison keys against the case-wide compact inventory,
+	// including metadata from records that no finding or correlation references.
 	var projections []model.Event
 	representative := map[string]string{}
 	nameKey := func(coll, host string) string { return coll + "\x00" + host }
@@ -36,8 +36,11 @@ func newIdentities(members map[string]member) identities {
 		k := nameKey(m.coll, m.host)
 		if _, ok := representative[k]; !ok {
 			representative[k] = id
-			projections = append(projections, model.Event{ID: id, Host: m.host, CollectionID: m.coll})
+			projections = append(projections, model.Event{ID: id, CaseID: m.caseID, Host: m.host, CollectionID: m.coll})
 		}
+	}
+	if len(inventory) > 0 {
+		projections = append(projections, inventory[0]...)
 	}
 	names := hostid.AcquisitionNames(projections)
 	idn := identities{byID: make(map[string]identity, len(members))}

@@ -118,9 +118,7 @@ func key(name string) string {
 
 func (r *Registry) get(name string, collected bool) *Identity {
 	k := key(name)
-	if r.ambiguous[k] {
-		return nil
-	}
+	// Contradicted owners still block competing address attribution.
 	if a := r.aliases[k]; a != "" {
 		k = a
 		name = a
@@ -362,7 +360,7 @@ func (r *Registry) ByIP(ip string) Resolution {
 			top = append(top, c)
 		}
 	}
-	if len(top) > 1 {
+	if len(top) > 1 || r.AmbiguousName(top[0].id.Name) {
 		return Resolution{Ambiguous: true}
 	}
 	return Resolution{Identity: top[0].id, Basis: top[0].basis}

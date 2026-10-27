@@ -24,6 +24,7 @@ func processTime(e model.Event) bool {
 // identity permits at most an explicitly hypothetical name relationship, never
 // attribution to a particular PID. Contradictory identity is not a fallback.
 func BuildProcessChains(caseID string, events []model.Event) []model.Correlation {
+	events = chainHostKeys(events)
 	creates := byType(events, model.EventProcessCreate)
 	sort.Slice(creates, func(i, j int) bool {
 		if !creates[i].Timestamp.Equal(creates[j].Timestamp) {

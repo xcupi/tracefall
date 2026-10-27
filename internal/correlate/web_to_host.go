@@ -118,6 +118,17 @@ func objectOf(e model.Event) (delivered, bool) {
 // The capture shows the object arrived at the client; it does not show that
 // the client saved or ran it. Those are what the host events can add.
 func BuildWebToHost(caseID string, capture, host []model.Event, reg *hostid.Registry, skews []clockskew.Estimate) []model.Correlation {
+	// Resolve comparisons and clock lookup through the same validated registry;
+	// keep original host spellings and timestamps in the evidence/narrative.
+	hostKey := func(name string) string {
+		if reg.AmbiguousName(name) {
+			return ""
+		}
+		if h := reg.ByName(name); h != nil {
+			return strings.ToLower(h.Name)
+		}
+		return strings.ToLower(name)
+	}
 	var objects []delivered
 	for _, e := range capture {
 		if o, ok := objectOf(e); ok {
@@ -140,7 +151,11 @@ func BuildWebToHost(caseID string, capture, host []model.Event, reg *hostid.Regi
 	}
 	skewOf := map[string]clockskew.Estimate{}
 	for _, s := range skews {
-		skewOf[s.Subject] = s
+		if strings.HasPrefix(s.Subject, "host:") {
+			if name := hostKey(strings.TrimPrefix(s.Subject, "host:")); name != "" {
+				skewOf["host:"+name] = s
+			}
+		}
 	}
 
 	var out []model.Correlation
@@ -160,11 +175,11 @@ func BuildWebToHost(caseID string, capture, host []model.Event, reg *hostid.Regi
 			if seen[h.ID] {
 				continue
 			}
-			if clientHost != "" && h.Host != "" && !strings.EqualFold(h.Host, clientHost) {
+			if (h.Host != "" && hostKey(h.Host) == "") || (clientHost != "" && h.Host != "" && hostKey(h.Host) != hostKey(clientHost)) {
 				continue // the object went to a different machine
 			}
 			ts := h.Timestamp
-			if s, ok := skewOf["host:"+strings.ToLower(h.Host)]; ok && s.Steady() {
+			if s, ok := skewOf["host:"+hostKey(h.Host)]; ok && s.Steady() {
 				// Express the host's time on the capture's scale. The offset
 				// is an interval; use its edge that is kinder to the match
 				// and let the slack absorb the rest.
@@ -214,7 +229,7 @@ func BuildWebToHost(caseID string, capture, host []model.Event, reg *hostid.Regi
 		}
 		clockNote := "No clock offset was established for the host, so its times are read as they are."
 		for _, h := range hostList {
-			if s, ok := skewOf["host:"+strings.ToLower(h)]; ok && s.Steady() {
+			if s, ok := skewOf["host:"+hostKey(h)]; ok && s.Steady() {
 				clockNote = fmt.Sprintf("The host's clock was estimated %s from the capture's and its times were read on the capture's scale.", clockskew.Format(s.Offset()))
 				break
 			}

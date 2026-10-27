@@ -29,20 +29,21 @@ var narrativeTypes = map[string]bool{
 	model.EventPrivilegedLogon:     true,
 }
 
-// NeedsExtra reports whether an event of this type needs its Extra map to
-// be narrated. Every other type is read without it.
-func NeedsExtra(eventType string) bool { return narrativeTypes[eventType] }
+// NeedsExtra includes identity metadata as well as narrative fields. The
+// metadata may accompany any event type, including unreferenced observations;
+// it is decoded one event at a time, then retained only as compact projections.
+func NeedsExtra(eventType string) bool { return true }
 
 // member is one event of a group, kept for ordering, bounds and the narrative.
 type member struct {
 	ts                               time.Time
-	id, host, typ                    string
+	id, host, typ, caseID            string
 	user, coll, sourceFile, artifact string
 	ev                               *model.Event // set for narrative types only
 }
 
 func newMember(e model.Event) member {
-	m := member{ts: e.Timestamp, id: e.ID, host: e.Host, typ: e.EventType,
+	m := member{ts: e.Timestamp, id: e.ID, host: e.Host, typ: e.EventType, caseID: e.CaseID,
 		user: e.User, coll: e.CollectionID, sourceFile: e.SourceFileID, artifact: e.ArtifactType}
 	if narrativeTypes[e.EventType] {
 		ev := e
@@ -179,7 +180,16 @@ func RunStreamed(caseID string, each EachEvent, findings []model.Finding, correl
 		}
 	}
 	members := make(map[string]member, len(referenced))
+	// Keep one compact projection per distinct identity observation, not full
+	// unreferenced events or a per-event case inventory.
+	inventory := map[[7]string]model.Event{}
 	err := each(func(e model.Event) error {
+		if e.Host != "" {
+			k := [7]string{e.CaseID, e.CollectionID, e.Host, e.Extra["domain"], e.Extra["host_role"], e.Extra["os_product_name"], e.Extra["os_current_build"]}
+			if _, ok := inventory[k]; !ok {
+				inventory[k] = model.Event{ID: model.StableID("identity", k[:]...), CaseID: e.CaseID, CollectionID: e.CollectionID, Host: e.Host, Extra: map[string]string{"domain": k[3], "host_role": k[4], "os_product_name": k[5], "os_current_build": k[6]}}
+			}
+		}
 		if referenced[e.ID] {
 			members[e.ID] = newMember(e)
 		}
@@ -189,7 +199,11 @@ func RunStreamed(caseID string, each EachEvent, findings []model.Finding, correl
 		return nil, err
 	}
 
-	groups := buildGroups(findings, correlations, newIdentities(members))
+	projections := make([]model.Event, 0, len(inventory))
+	for _, e := range inventory {
+		projections = append(projections, e)
+	}
+	groups := buildGroups(findings, correlations, newIdentities(members, projections))
 	accs := make([]*groupAcc, len(groups))
 	for gi, g := range groups {
 		accs[gi] = newGroupAcc()

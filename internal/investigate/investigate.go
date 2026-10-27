@@ -28,10 +28,12 @@
 package investigate
 
 import (
+	"fmt"
 	"sort"
 	"strings"
 
 	"tracefall/internal/attck"
+	"tracefall/internal/cmdsem"
 	"tracefall/internal/model"
 )
 
@@ -126,9 +128,34 @@ func buildInvestigation(caseID string, g group, acc *groupAcc, findingsByID map[
 	primaryHost := acc.primaryHost()
 	title := buildTitle(category, chainTitle, acc.processNames, primaryHost)
 
+	// Context-only members remain visible evidence, but do not supply scoring
+	// diversity or a causal/ordered narrative. A separately supported member
+	// remains genuine corroboration even when also in a contextual chain.
+	supported := map[string]bool{}
+	for _, f := range groupFindings {
+		for _, id := range f.SupportingEvents {
+			supported[id] = true
+		}
+	}
+	for _, c := range groupCorrelations {
+		if !contextualChain(c) {
+			for _, id := range c.EventIDs {
+				supported[id] = true
+			}
+		}
+	}
+	scoring := newGroupAcc()
+	for _, m := range acc.members {
+		if supported[m.id] {
+			scoring.add(m)
+		}
+	}
+	scoring.finish()
+
 	// -------- score --------
 	distinctCollections := sortedUniqueStrings(setKeys(acc.colls))
-	distinctArtifacts := sortedUniqueStrings(setKeys(acc.artifacts))
+	distinctArtifacts := sortedUniqueStrings(setKeys(scoring.artifacts))
+	scoringCollections := sortedUniqueStrings(setKeys(scoring.colls))
 	hasChain := chainCorr != nil
 	hasAnyCorr := false
 	for _, c := range groupCorrelations {
@@ -143,7 +170,7 @@ func buildInvestigation(caseID string, g group, acc *groupAcc, findingsByID map[
 		hasAnyCorr:       hasAnyCorr,
 		distinctTactics:  len(tactics),
 		distinctArtifact: len(distinctArtifacts),
-		distinctCollect:  len(distinctCollections),
+		distinctCollect:  len(scoringCollections),
 	})
 	severity := severityForScore(score)
 
@@ -160,11 +187,24 @@ func buildInvestigation(caseID string, g group, acc *groupAcc, findingsByID map[
 		hasChainCorr:          hasChain,
 		hasAnyCorr:            hasAnyCorr,
 		distinctArtifact:      len(distinctArtifacts),
-		distinctCollect:       len(distinctCollections),
+		distinctCollect:       len(scoringCollections),
 	})
 
 	// -------- narrative --------
-	summary := buildNarrative(acc.seq)
+	summary := buildNarrative(scoring.seq)
+	for _, m := range acc.members {
+		if supported[m.id] {
+			continue
+		}
+		path := ""
+		if m.ev != nil {
+			path = m.ev.ProcessPath
+			if path == "" {
+				path = m.ev.FilePath
+			}
+		}
+		summary += fmt.Sprintf(" Contextual observation: %s record on %s (event %s), path %q; this record alone does not establish execution or ordering relative to the supported activity.", m.typ, m.host, m.id, cmdsem.Redact(path))
+	}
 	limitations := map[string]bool{}
 	for _, c := range groupCorrelations {
 		if contextualChain(c) && !limitations[c.Description] && len(limitations) < 2 {
