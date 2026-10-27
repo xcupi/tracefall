@@ -1,12 +1,17 @@
 package api
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
+	"log"
 	"os"
 	"path"
 	"path/filepath"
 	"strings"
 
+	"tracefall/internal/fsvol"
+	"tracefall/internal/image"
 	"tracefall/internal/model"
 	"tracefall/internal/regf"
 )
@@ -26,9 +31,29 @@ import (
 //     directory of the same volume. Nothing else is copied.
 //   - It is hashed like any extracted file, labeled companion-of its hive in the
 //     catalog, and stays "unsupported": it yields no events.
-//   - Size is bounded by maxCompanionLogBytes. A log that is too large or cannot
-//     be copied is not extracted, the hive is still parsed, and the hive's
+//   - Size is bounded by maxCompanionLogBytes per log and by
+//     maxCompanionTotalBytes per import. A log that is too large or cannot be
+//     copied is not extracted, the hive is still parsed, and the hive's
 //     coverage says which log was not extracted and why.
+//   - Anything persisted or rendered about a failure is a fixed, path-free class
+//     (permission, io, corrupt, oversize). The raw error, which can name the
+//     server's absolute evidence path, goes to the server log only.
+
+// maxCompanionTotalBytes bounds all companion logs copied for one import.
+var maxCompanionTotalBytes int64 = 1 << 30
+
+// companionFailureClass reduces an extraction error to a fixed class that is
+// safe to store and print: it names no path and no OS message.
+func companionFailureClass(err error) string {
+	switch {
+	case errors.Is(err, fs.ErrPermission):
+		return "permission"
+	case errors.Is(err, fsvol.ErrCorrupt), errors.Is(err, image.ErrCorrupt):
+		return "corrupt"
+	default:
+		return "io"
+	}
+}
 
 var companionSuffixes = []string{".LOG1", ".LOG2", ".LOG"}
 
@@ -97,21 +122,38 @@ func (x *diskExtractor) extractCompanions(hive model.SourceFile) {
 func (x *diskExtractor) extractCompanion(hive model.SourceFile, c companionLog) model.HiveCompanion {
 	out := model.HiveCompanion{Path: c.path, SizeBytes: c.size}
 	dest := filepath.Join(x.svc.files.EvidenceDir(x.caseID, x.collectionID), filepath.FromSlash(c.path))
-	// A copy left by an earlier run must not outlive a decision not to extract.
-	drop := func() { _ = os.Remove(dest) }
-	if c.size > maxCompanionLogBytes {
-		drop()
+	// A log that is not extracted now must not keep what an earlier extraction
+	// left: not the copy on disk and not its recorded hash.
+	notExtracted := func() {
+		_ = os.Remove(dest)
+		if row, ok := x.companionRow(c.path); ok {
+			_ = x.svc.store.SetSourceFileSHA256(row.ID, "")
+		}
+	}
+	switch {
+	case c.size > maxCompanionLogBytes:
+		notExtracted()
 		out.Status = model.CompanionOversize
 		out.Detail = fmt.Sprintf("%d bytes is above the %d byte limit for a transaction log, so it was not extracted and could not be replayed", c.size, maxCompanionLogBytes)
+		return out
+	case x.companionBytes+c.size > maxCompanionTotalBytes:
+		notExtracted()
+		out.Status = model.CompanionOversize
+		out.Detail = fmt.Sprintf("extracting it would pass the %d byte per-import limit for all transaction logs (%d bytes already extracted), so it was not extracted and could not be replayed", maxCompanionTotalBytes, x.companionBytes)
 		return out
 	}
 	sum, err := x.writeFile(c.path, c.loc)
 	if err != nil {
-		drop()
+		notExtracted()
 		out.Status = model.CompanionFailed
-		out.Detail = fmt.Sprintf("it could not be extracted from the image (%v)", err)
+		class := companionFailureClass(err)
+		// The raw error can carry the server's absolute evidence path; it stays
+		// in the server log and out of everything stored or shown.
+		log.Printf("registry companion %s of %s not extracted (%s): %v", c.path, hive.Path, class, err)
+		out.Detail = fmt.Sprintf("it could not be extracted (%s)", class)
 		return out
 	}
+	x.companionBytes += c.size
 	out.Status, out.SHA256 = model.CompanionExtracted, sum
 	if row, ok := x.companionRow(c.path); ok {
 		// The hash is Tracefall's own, like any extracted file's. The label is
@@ -125,10 +167,17 @@ func (x *diskExtractor) extractCompanion(hive model.SourceFile, c companionLog) 
 }
 
 // mergeHiveReplay adds the extraction side to the hive's replay status once the
-// hive has been parsed: the logs that were beside it, and, when logs existed
-// but were not extracted, a visible statement that the result lacks them. events
-// are the hive's parsed events; those already marked as coming from a hive that
-// was not cleanly written get the same statement.
+// hive has been parsed: the logs that were beside it, and what the extraction
+// could not do. events are the hive's parsed events.
+//
+// Two kinds of statement are made, and only one of them marks the result
+// incomplete:
+//   - a caveat, for a hive that was not cleanly written: its logs matter, so a
+//     log that was not extracted, or that may be missing from a truncated index,
+//     means the replay may be incomplete. It goes to Reason, to the coverage
+//     Notes (which make the coverage Incomplete) and to the hive's events.
+//   - information, for a cleanly written hive: its logs were not consulted, so
+//     nothing is missing from the result. It goes to Reason only.
 func (x *diskExtractor) mergeHiveReplay(sf *model.SourceFile, events []model.Event) {
 	if sf.ArtifactType != model.ArtifactRegistryHive || sf.ParseCoverage == nil || sf.ParseCoverage.HiveReplay == nil {
 		return
@@ -137,27 +186,37 @@ func (x *diskExtractor) mergeHiveReplay(sf *model.SourceFile, events []model.Eve
 	comps := x.companions[sf.Path]
 	hr.Companions = append([]model.HiveCompanion(nil), comps...)
 
-	var missed []string
+	dirty := hr.State != string(regf.RecoveryClean)
+	var statements []string
 	for _, c := range comps {
 		if c.Status != model.CompanionExtracted {
-			missed = append(missed, fmt.Sprintf("%s was not extracted: %s", path.Base(c.Path), c.Detail))
+			statements = append(statements, fmt.Sprintf("%s was not extracted (%s): %s", path.Base(c.Path), c.Status, c.Detail))
 		}
 	}
-	dirty := hr.State != string(regf.RecoveryClean)
+	noLogs := len(comps) == 0 && hr.State == string(regf.RecoveryNoLogs)
 	switch {
-	case len(comps) == 0 && hr.State == string(regf.RecoveryNoLogs):
+	case noLogs && !x.logsTruncated:
 		hr.Reason += "; the disk image holds no .LOG1, .LOG2 or .LOG file in this hive's directory, so there was nothing to extract"
-		if x.logsTruncated {
-			hr.Reason += " (the index of log files in the image reached its limit, so a log may have gone unseen)"
-		}
-	case len(missed) > 0 && dirty:
-		text := strings.Join(missed, "; ")
-		hr.Reason = joinReason(hr.Reason, text)
-		sf.ParseCoverage.Notes = append(sf.ParseCoverage.Notes, truncateNote(text))
-		for i := range events {
-			if events[i].Extra != nil && events[i].Extra["hive_state"] != "" {
-				events[i].Extra["hive_recovery"] = truncateNote(events[i].Extra["hive_recovery"] + "; " + text)
-			}
+	case noLogs:
+		statements = append(statements, fmt.Sprintf("none found in the (truncated) index of log files in the image, which reached its limit of %d entries; a log of this hive may exist that was never seen, so replay may be incomplete", x.companionIndexLimit))
+	case x.logsTruncated && dirty:
+		statements = append(statements, fmt.Sprintf("the index of log files in the image is truncated (limit %d entries), so a log of this hive may have gone unseen and replay may be incomplete", x.companionIndexLimit))
+	case x.logsTruncated:
+		statements = append(statements, fmt.Sprintf("the index of log files in the image is truncated (limit %d entries); this hive was cleanly written, so a log that went unseen would not have been used", x.companionIndexLimit))
+	}
+	if len(statements) == 0 {
+		return
+	}
+	text := strings.Join(statements, "; ")
+	if !dirty {
+		hr.Reason = joinReason(hr.Reason, "the hive was cleanly written, so its transaction logs were not consulted; "+text)
+		return
+	}
+	hr.Reason = joinReason(hr.Reason, text)
+	sf.ParseCoverage.Notes = append(sf.ParseCoverage.Notes, truncateNote(text))
+	for i := range events {
+		if events[i].Extra != nil && events[i].Extra["hive_state"] != "" {
+			events[i].Extra["hive_recovery"] = truncateNote(events[i].Extra["hive_recovery"] + "; " + text)
 		}
 	}
 }

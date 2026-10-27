@@ -69,6 +69,22 @@ type CoverageEvent struct {
 	Mapped   int    `json:"mapped"`
 }
 
+// Measured reports whether the coverage records something a parser read. Nil is
+// not recorded; coverage that only carries the CompanionOf label is not a
+// measurement either, and must never be read as "records_read=0".
+func (c *ParseCoverage) Measured() bool {
+	if c == nil {
+		return false
+	}
+	if c.CompanionOf == "" {
+		return true
+	}
+	// A companion row is labeled with CompanionOf and nothing else was read.
+	return c.EmittedEvents != nil || len(c.Notes) > 0 || c.RecordsRead != 0 || c.Mapped != 0 || c.Unmapped != 0 ||
+		c.Undated != 0 || c.RecordsFailed != 0 || c.ChunksRead != 0 || c.ChunksFailed != 0 || c.LimitReached ||
+		len(c.ByEvent) > 0 || c.UnlistedRecords != 0 || c.HiveReplay != nil
+}
+
 func (c *ParseCoverage) Incomplete() bool {
 	return c != nil && (len(c.Notes) > 0 || c.Unmapped > 0 || c.Undated > 0 || c.RecordsFailed > 0 || c.ChunksFailed > 0 || c.LimitReached || c.UnlistedRecords > 0)
 }

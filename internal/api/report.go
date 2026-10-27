@@ -609,10 +609,13 @@ func reportCoverage(files []model.SourceFile) report.Coverage {
 		failed = failed[:maxFailedListed]
 	}
 	out.Failed = failed
+	companions := 0
+	var notExtracted []string
 	for _, sf := range files {
 		if c := sf.ParseCoverage; c != nil {
-			if c.CompanionOf != "" {
-				out.ParserDiagnostics = append(out.ParserDiagnostics, report.KV{Key: sf.Path, Value: "transaction log, companion of " + c.CompanionOf + "; not parsed as evidence of its own"})
+			if c.CompanionOf != "" && sf.ArtifactType == model.ArtifactRegistryTransactionLog && !c.Measured() {
+				// Summarised in one line below, outside the capped list.
+				companions++
 				continue
 			}
 			if hr := c.HiveReplay; hr != nil && hr.State == string(regf.RecoveryClean) && !c.Incomplete() && c.RecordsRead == 0 && len(hr.Companions) == 0 {
@@ -630,13 +633,22 @@ func reportCoverage(files []model.SourceFile) report.Coverage {
 			}
 			if hr := c.HiveReplay; hr != nil {
 				summary += "; hive transaction logs: " + hr.State
+				if hr.State == string(regf.RecoveryClean) && hr.Reason != "" {
+					summary += " (" + hr.Reason + ")"
+				}
 				for _, comp := range hr.Companions {
 					summary += fmt.Sprintf("; companion %s %s (%d bytes", comp.Path, comp.Status, comp.SizeBytes)
 					if comp.SHA256 != "" {
 						summary += ", sha256 " + comp.SHA256
 					}
 					summary += ")"
+					if comp.Status != model.CompanionExtracted {
+						notExtracted = append(notExtracted, fmt.Sprintf("%s (%s)", comp.Path, comp.Status))
+					}
 				}
+			} else if sf.ArtifactType == model.ArtifactRegistryHive {
+				// Imported before the replay status was recorded: unknown, not clean.
+				summary += "; hive transaction logs: not recorded"
 			}
 			out.ParserDiagnostics = append(out.ParserDiagnostics, report.KV{Key: sf.Path, Value: summary})
 		}
@@ -645,6 +657,24 @@ func reportCoverage(files []model.SourceFile) report.Coverage {
 	if len(out.ParserDiagnostics) > maxFailedListed {
 		out.DiagnosticsOmitted = len(out.ParserDiagnostics) - maxFailedListed
 		out.ParserDiagnostics = out.ParserDiagnostics[:maxFailedListed]
+	}
+	if companions > 0 || len(notExtracted) > 0 {
+		// One line for all companions, after the cap: they are not evidence of
+		// their own and must not crowd out a real diagnostic.
+		line := fmt.Sprintf("%d registry transaction logs were extracted with their hives and are not parsed as evidence of their own", companions)
+		if len(notExtracted) > 0 {
+			sort.Strings(notExtracted)
+			const listed = 10
+			shown := notExtracted
+			if len(shown) > listed {
+				shown = shown[:listed]
+			}
+			line += fmt.Sprintf("; %d not extracted: %s", len(notExtracted), strings.Join(shown, ", "))
+			if len(notExtracted) > listed {
+				line += fmt.Sprintf(", and %d more (see each hive's row and source details)", len(notExtracted)-listed)
+			}
+		}
+		out.ParserDiagnostics = append(out.ParserDiagnostics, report.KV{Key: "Registry transaction-log companions", Value: line})
 	}
 	return out
 }

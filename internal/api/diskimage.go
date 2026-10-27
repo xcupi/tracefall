@@ -440,6 +440,7 @@ func (s *Service) catalogDiskImage(caseID string, collection model.Collection, s
 	// companion of the hive beside it once every volume has been walked.
 	hiveByLower := map[string]string{}
 	var logRows []int
+	logLike := 0 // files named like a transaction log, as the extractor's index counts them
 	for _, ov := range vols {
 		prefix := volumePrefix(ov.part.Index)
 		vr := diskVolumeReport{
@@ -499,6 +500,9 @@ func (s *Service) catalogDiskImage(caseID string, collection model.Collection, s
 				hiveByLower[strings.ToLower(full)] = full
 			} else if !supportedFile && companionLogName(f.Name) {
 				logRows = append(logRows, len(sourceFiles))
+				if e.Stream == "" {
+					logLike++
+				}
 			}
 			sourceFiles = append(sourceFiles, sf)
 			vr.Cataloged++
@@ -515,6 +519,9 @@ func (s *Service) catalogDiskImage(caseID string, collection model.Collection, s
 		rep.Volumes = append(rep.Volumes, vr)
 	}
 
+	if logLike > maxCompanionIndex {
+		rep.Notes = append(rep.Notes, fmt.Sprintf("the image holds %d files named like registry transaction logs, more than the %d the log index can hold: past that limit a log may go unseen, so a hive's replay may be incomplete (each hive's replay status says so)", logLike, maxCompanionIndex))
+	}
 	for _, i := range logRows {
 		if hive, ok := companionHiveOf(sourceFiles[i].Path, hiveByLower); ok {
 			sourceFiles[i].ParseCoverage = &model.ParseCoverage{CompanionOf: hive}
@@ -582,6 +589,12 @@ type diskExtractor struct {
 	// volume, so a log of another hive, directory or volume is never reached.
 	logs          map[string][]companionLog
 	logsTruncated bool
+	// logCount is how many entries logs holds; companionIndexLimit is the cap
+	// that applied (maxCompanionIndex when the index was built).
+	logCount            int
+	companionIndexLimit int
+	// companionBytes is what the companions extracted so far add up to.
+	companionBytes int64
 	// companions is what became of each extracted hive's logs, by hive path.
 	companions map[string][]model.HiveCompanion
 	rows       map[string]model.SourceFile
@@ -594,10 +607,11 @@ type companionLog struct {
 	size int64
 }
 
-// maxCompanionIndex bounds the index of log-like names. A volume can hold
-// hundreds of thousands of *.log files; past this the index stops growing and
-// a hive whose logs may be missing from it says so.
-const maxCompanionIndex = 200_000
+// maxCompanionIndex bounds the index of log-like names (a variable so a test can
+// lower it). A volume can hold hundreds of thousands of *.log files; past this
+// the index stops growing and every hive's replay status says its logs may be
+// missing from it, as does the discovery report.
+var maxCompanionIndex = 200_000
 
 func (s *Service) newDiskExtractor(caseID, collectionID string) (*diskExtractor, error) {
 	segs, err := s.diskImageSegmentPaths(caseID, collectionID)
@@ -609,7 +623,7 @@ func (s *Service) newDiskExtractor(caseID, collectionID string) (*diskExtractor,
 		return nil, err
 	}
 	x := &diskExtractor{svc: s, caseID: caseID, collectionID: collectionID, img: img, byPath: map[string]diskLocator{},
-		logs: map[string][]companionLog{}, companions: map[string][]model.HiveCompanion{}}
+		logs: map[string][]companionLog{}, companions: map[string][]model.HiveCompanion{}, companionIndexLimit: maxCompanionIndex}
 	registry := ingest.Registry()
 	for _, ov := range vols {
 		prefix := volumePrefix(ov.part.Index)
@@ -625,9 +639,10 @@ func (s *Service) newDiskExtractor(caseID, collectionID string) (*diskExtractor,
 					x.byPath[key] = diskLocator{vol: ov.vol, record: f.Record, stream: e.Stream}
 				}
 			} else if e.Stream == "" && companionLogName(f.Name) {
-				if len(x.logs) >= maxCompanionIndex {
+				if x.logCount >= x.companionIndexLimit {
 					x.logsTruncated = true
 				} else {
+					x.logCount++
 					lk := strings.ToLower(key)
 					x.logs[lk] = append(x.logs[lk], companionLog{path: key, loc: diskLocator{vol: ov.vol, record: f.Record}, size: e.Size})
 				}

@@ -331,7 +331,7 @@ func buildReview(in ReviewInput, names Names) (*ReviewPrepared, error) {
 			acquisitionIDs[s.CollectionID] = true
 		}
 		sourceIDs[s.ID] = true
-		if s.ParseCoverage == nil {
+		if !s.ParseCoverage.Measured() {
 			cv.ParseCoverageNotRecorded++
 		}
 	}
@@ -431,7 +431,7 @@ func buildReview(in ReviewInput, names Names) (*ReviewPrepared, error) {
 			status = "not_recorded"
 		}
 		fmt.Fprintf(&b, "%s | source=%s acquisition=%s status=%s | ", a, knownAlias(sources, s.ID), knownAlias(acqs, s.CollectionID), status)
-		if c := s.ParseCoverage; c != nil {
+		if c := s.ParseCoverage; c.Measured() {
 			fmt.Fprintf(&b, "parse_coverage=recorded records_read=%d mapped=%d unmapped=%d undated=%d records_failed=%d chunks_failed=%d limit_reached=%t notes_present=%t\n", c.RecordsRead, c.Mapped, c.Unmapped, c.Undated, c.RecordsFailed, c.ChunksFailed, c.LimitReached, len(c.Notes) > 0)
 		} else {
 			b.WriteString("parse_coverage=not_recorded\n")

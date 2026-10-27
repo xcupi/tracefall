@@ -175,8 +175,13 @@ with it:
   the same function, so they read the same replayed state as the parser.
 - **How they are recorded.** Each log is hashed (SHA-256 of the logical stream) and
   the hash is stored on its catalog row. At discovery the row is labeled
-  `companion_of` = the hive's catalog path (in the row's parse coverage, shown in
-  source details and provenance; no schema change). The row keeps import status
+  `companion_of` = the hive's catalog path (in the row's parse coverage JSON and as
+  `companion_of` on the triaged source file in the API; no schema change). The web
+  UI shows it only through the triage note on the row ("Companion of ..."); there is
+  no separate source-details panel for it. **The label is not a measurement:** the
+  coverage object carries nothing else, `ParseCoverage.Measured()` is false for it,
+  and the case review packet and review snapshot count the row as parse coverage
+  "not recorded" instead of `records_read=0`. The row keeps import status
   `unsupported`, event count 0 and no events: **a companion is not independent
   evidence.** It is counted in `coverage.companions` and in the catalog's
   unsupported total (no parser reads it alone) but it is not reported as an
@@ -185,18 +190,37 @@ with it:
   `state` (`clean`, `replayed`, `replayed_partial`, `not_recoverable`,
   `no_logs`), `reason`, `logs_applied`, and `companions` (path, size, SHA-256,
   `extracted` / `oversize` / `failed`). A dirty hive with no log in its
-  directory is `no_logs` with the reason that the image holds none; a hive
+  directory is `no_logs` with the reason that the image holds none (or, when the
+  log index was truncated, that none was found in the truncated index); a hive
   without logs in its directory is never "clean by assumption". Events of a hive
   that was not cleanly written keep carrying `hive_state` / `hive_recovery`; events
   of a clean hive stay unannotated, as before.
 - **Limits.** Each log is capped at `regf.MaxLogFileBytes` (256 MiB, what the
-  replay reader itself accepts); at most one log per suffix per hive. A log over
-  the cap, or one that cannot be copied, is **not extracted** (any copy from an
-  earlier run is removed), the hive is still parsed, and for a hive that is not
-  clean the status, the coverage notes (so the hive is "incomplete") and the
-  events' `hive_recovery` name the log and why. The index of log-like file names
-  in an image stops at 200,000 entries; a `no_logs` reason then says a log may
-  have gone unseen.
+  replay reader itself accepts), and all logs of one import together at 1 GiB
+  (`maxCompanionTotalBytes`; the log that would pass it is `oversize` with a
+  per-import-limit detail); at most one log per suffix per hive. A log over a cap,
+  or one that cannot be copied, is **not extracted** (any copy from an earlier run
+  is removed and its recorded hash is cleared), the hive is still parsed, and for a
+  hive that is not clean the status, the coverage notes (so the hive is
+  "incomplete") and the events' `hive_recovery` name the log and why. For a hive
+  that *is* clean the same fact is an informational sentence in `hive_replay.reason`
+  only ("cleanly written, so its logs were not consulted; X was not extracted"):
+  the result lacks nothing, so the coverage is not marked incomplete.
+- **Error text.** Every stored or rendered failure (companion `detail`, `reason`,
+  coverage notes, event `hive_recovery`, report diagnostics) uses a fixed class:
+  `permission`, `io`, `corrupt` or `oversize`. The raw OS error can contain the
+  server's absolute evidence path; it is written to the server log only.
+- **Log index cap.** The index of log-like file names in an image stops at 200,000
+  entries (`maxCompanionIndex`). When it does: the discovery report notes it; every
+  hive's `reason` says the index is truncated; a hive that is not clean also gets a
+  coverage note that replay may be incomplete (a log may have gone unseen even when
+  another one of its logs was indexed); a `no_logs` hive says "none found in the
+  (truncated) index" rather than that the image holds none; a clean hive gets the
+  information in `reason` only.
+- **Report.** Companions are summarised in one report diagnostics line (count, and
+  the logs that were not extracted) outside the capped per-source list, so they
+  cannot crowd out a real diagnostic. A hive whose coverage predates the replay
+  status renders "hive transaction logs: not recorded".
 - **Re-import.** Extraction overwrites the same paths with the same bytes; no
   file or row is added, and no event identity changes (the dedup hash is
   untouched). A hive imported *before* this change was parsed without its logs; its

@@ -299,7 +299,7 @@ func (s *Store) reviewSnapshot(ctx context.Context, caseID, runID string) (out R
 			default:
 				out.Coverage.SourcesNotImported++
 			}
-			if sf.ParseCoverage == nil {
+			if !sf.ParseCoverage.Measured() {
 				out.Coverage.ParseCoverageNotRecorded++
 			} else if c := sf.ParseCoverage; c.RecordsFailed > 0 || c.ChunksFailed > 0 || c.Unmapped > 0 || c.LimitReached {
 				out.SourceParseGaps++
