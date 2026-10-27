@@ -285,13 +285,13 @@ func TestChainShuffleAndFilteredSourceParity(t *testing.T) {
 }
 func TestConfigurationAndNetworkRetainOnlySupportedContext(t *testing.T) {
 	for name, mutate := range map[string]func(*model.Event){
-		"wrong-host":       func(e *model.Event) { e.Host = "host02" },
-		"wrong-collection": func(e *model.Event) { e.CollectionID = "other" },
-		"wrong-case":       func(e *model.Event) { e.CaseID = "other" },
-		"missing-time":     func(e *model.Event) { e.Timestamp = time.Time{} },
-		"same-time":        func(e *model.Event) { e.Timestamp = activityFixture()[2].Timestamp },
-		"distant":          func(e *model.Event) { e.Timestamp = e.Timestamp.Add(3 * time.Hour) },
-		"different-path":   func(e *model.Event) { e.ProcessPath = `C:\Other\worker.exe` },
+		"wrong-host":         func(e *model.Event) { e.Host = "host02" },
+		"unknown-collection": func(e *model.Event) { e.CollectionID = "" },
+		"wrong-case":         func(e *model.Event) { e.CaseID = "other" },
+		"missing-time":       func(e *model.Event) { e.Timestamp = time.Time{} },
+		"same-time":          func(e *model.Event) { e.Timestamp = activityFixture()[2].Timestamp },
+		"distant":            func(e *model.Event) { e.Timestamp = e.Timestamp.Add(3 * time.Hour) },
+		"different-path":     func(e *model.Event) { e.ProcessPath = `C:\Other\worker.exe` },
 	} {
 		t.Run(name, func(t *testing.T) {
 			events := activityFixture()

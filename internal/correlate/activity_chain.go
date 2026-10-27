@@ -57,11 +57,9 @@ func BuildActivityChains(caseID string, events []model.Event) []model.Correlatio
 		if len(logons) == 1 {
 			chain = append(chain, logons[0])
 		}
-		contextual := false
-		if config, ok := configurationFor(target, events); ok {
-			chain = append(chain, config)
-			contextual = true
-		}
+		configs := configurationFor(target, events)
+		contextual := len(configs) > 0
+		chain = append(chain, configs...)
 		if n, ok := networkFor(target, networks, creates); ok {
 			tied := false
 			for _, e := range chain {
@@ -78,10 +76,10 @@ func BuildActivityChains(caseID string, events []model.Event) []model.Correlatio
 		}
 		chain = sortedChainEvents(chain)
 		c := buildChainCorrelation(caseID, chain)
-		c.Description = "Recorded parent/process identity and strictly ordered timestamps link these observations within one host acquisition. This is not proof of intent or causation. Unrecorded exits leave process lifetime and unobserved PID reuse uncertain."
+		c.Description = "Recorded parent/process identity and strictly ordered timestamps link process, session and network observations within one host acquisition. This is not proof of intent or causation. Unrecorded exits leave process lifetime and unobserved PID reuse uncertain."
 		if contextual {
 			c.Title = "Contextual " + c.Title
-			c.Description += " A persistence configuration references the same full executable path; it does not establish that the target process wrote the configuration or that the configured mechanism executed. A configuration PID identifies its writer, not the configured target."
+			c.Description += " Persistence configuration references the same full executable path on the same established machine, possibly in a different acquisition; it does not establish that the target process wrote the configuration or that the configured mechanism executed. A configuration PID identifies its writer, not the configured target. Configuration timestamps are recorded artifact times; a task author-recorded registration date is not proven creation time."
 		}
 		out = append(out, c)
 	}

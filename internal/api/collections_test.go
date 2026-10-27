@@ -2,6 +2,7 @@ package api
 
 import (
 	"net/http"
+	"strings"
 	"testing"
 
 	"tracefall/internal/model"
@@ -49,8 +50,8 @@ func buildExecutionCollectionZip(t *testing.T) []byte {
 // buildPersistenceCollectionZip is "Collection #2": a follow-up KAPE
 // triage that collected the registry hive and scheduled task XML --
 // artifact types that weren't part of collection #1 at all -- showing
-// the payload from collection #1 (by name; the collections share no
-// events) established persistence.
+// configuration references the full payload path from collection #1. These
+// records do not prove who wrote them or that either mechanism executed.
 func buildPersistenceCollectionZip(t *testing.T) []byte {
 	t.Helper()
 	recmdCSV := "HivePath,KeyPath,ValueName,ValueData,LastWriteTimestamp\n" +
@@ -92,11 +93,9 @@ func buildPersistenceCollectionZip(t *testing.T) []byte {
 // payload beaconing out -- but no persistence artifact of any kind.
 // Collection #2 (a RECmd export plus a Task Scheduler XML, artifact
 // types collection #1 never had) has only the registry Run key and
-// scheduled task the same payload later established. Neither collection
-// alone contains enough evidence for the execution-persistence-temporal
-// rule or the full activity chain to fire; only once both are in the
-// case do those relationships become visible -- proving correlation
-// truly operates over the complete case, not per-collection.
+// scheduled task referencing the same executable path. The execution lineage
+// stays acquisition-scoped; independently established machine identity permits
+// full-path configuration context across acquisitions, not execution proof.
 func TestMultiCollection_EndToEnd(t *testing.T) {
 	mux := newTestRouter(t)
 	c := createTestCase(t, mux, "Cross-collection case")
@@ -199,6 +198,17 @@ func TestMultiCollection_EndToEnd(t *testing.T) {
 		}
 		if len(chainCollections) == 2 {
 			chainSpansCollections = true
+			configs := 0
+			for _, id := range corr.EventIDs {
+				for _, e := range timeline {
+					if e.ID == id && (e.EventType == model.EventRegistryRunKey || e.EventType == model.EventScheduledTaskCreate) {
+						configs++
+					}
+				}
+			}
+			if configs != 2 || !strings.HasPrefix(corr.Title, "Contextual ") || !strings.Contains(corr.Description, "does not establish") {
+				t.Errorf("expected both configuration references with contextual caveats: %+v", corr)
+			}
 		}
 	}
 	if !chainSpansCollections {

@@ -100,7 +100,10 @@ func networkFor(proc model.Event, networks, creates []model.Event) (model.Event,
 	return model.Event{}, false
 }
 
-func configurationFor(proc model.Event, events []model.Event) (model.Event, bool) {
+// configurationFor retains independent configuration references, not process
+// candidates. Established machine keys permit context across acquisitions;
+// process, session and network attribution still require sameEvidenceScope.
+func configurationFor(proc model.Event, events []model.Event) []model.Event {
 	var candidates []model.Event
 	for _, e := range events {
 		switch e.EventType {
@@ -108,7 +111,7 @@ func configurationFor(proc model.Event, events []model.Event) (model.Event, bool
 		default:
 			continue
 		}
-		if !sameEvidenceScope(proc, e) || !processTime(e) || !e.Timestamp.After(proc.Timestamp) || e.Timestamp.Sub(proc.Timestamp) > activityLookWindow || e.ProcessName != proc.ProcessName {
+		if proc.CaseID == "" || proc.CaseID != e.CaseID || proc.CollectionID == "" || e.CollectionID == "" || proc.Host == "" || proc.Host != e.Host || !processTime(proc) || !processTime(e) || !e.Timestamp.After(proc.Timestamp) || e.Timestamp.Sub(proc.Timestamp) > activityLookWindow || e.ProcessName != proc.ProcessName {
 			continue
 		}
 		target := e.Extra["value_data"]
@@ -122,10 +125,7 @@ func configurationFor(proc model.Event, events []model.Event) (model.Event, bool
 			candidates = append(candidates, e)
 		}
 	}
-	if len(candidates) == 1 {
-		return candidates[0], true
-	}
-	return model.Event{}, false
+	return sortedChainEvents(candidates)
 }
 
 func chainHostKeys(events []model.Event) []model.Event {
