@@ -81,7 +81,9 @@ func TestRegistryMetadataConflictsAndShuffle(t *testing.T) {
 func TestAcquisitionNamesUnknownAndCollision(t *testing.T) {
 	e := []model.Event{{ID: "a", Host: "host01", CollectionID: "one"}, {ID: "b", Host: "host01.corp.example", CollectionID: "one"}, {ID: "c", CollectionID: "one"}, {ID: "d", Host: "host01", CollectionID: "two"}}
 	got := AcquisitionNames(e)
-	if got["a"] != "host01.corp.example" || got["c"] != "" || got["d"] != "host01" {
+	// Co-occurrence proves the alias; a later acquisition of the same short
+	// name must keep that comparison key, without inheriting an unknown host.
+	if got["a"] != "host01.corp.example" || got["c"] != "" || got["d"] != "host01.corp.example" {
 		t.Fatalf("scope or alias: %+v", got)
 	}
 	e = append(e, model.Event{ID: "other", Host: "host01.other.example", CollectionID: "three"})

@@ -6,8 +6,9 @@ import (
 )
 
 // AcquisitionNames supplies transient comparison keys, never changes evidence.
-// Alias proof is restricted to one nonempty acquisition. Unknown names are not
-// inherited, and a short name with conflicting FQDNs in the case is unresolved.
+// Alias proof requires co-occurrence in one nonempty acquisition. Once proven,
+// the same case-wide identity uses one key across reacquisitions. Unknown names
+// are not inherited, and conflicting FQDNs or recorded metadata remain blockers.
 func AcquisitionNames(events []model.Event) map[string]string {
 	groups := map[string][]string{}
 	labels := map[string]map[string]bool{}
@@ -50,6 +51,25 @@ func AcquisitionNames(events []model.Event) map[string]string {
 			}
 		}
 	}
+	// Only an acquisition that actually contains both spellings proves an
+	// alias. A unique case-wide FQDN alone must not invent that relationship.
+	aliases := map[string]string{}
+	for scope, names := range groups {
+		full := canonical[scope]
+		if !isDNSName(full) || !strings.Contains(full, ".") {
+			continue
+		}
+		caseID := strings.SplitN(scope, "\x00", 2)[0]
+		short := strings.SplitN(full, ".", 2)[0]
+		if len(labels[caseID+"\x00"+short]) != 1 {
+			continue
+		}
+		for _, n := range names {
+			if n == short {
+				aliases[caseID+"\x00"+short] = full
+			}
+		}
+	}
 	out := map[string]string{}
 	for _, e := range events {
 		h := key(e.Host)
@@ -77,6 +97,9 @@ func AcquisitionNames(events []model.Event) map[string]string {
 			if c := canonical[e.CaseID+"\x00"+e.CollectionID]; c != "" {
 				h = c
 			}
+		}
+		if c := aliases[e.CaseID+"\x00"+h]; c != "" {
+			h = c
 		}
 		out[e.ID] = h
 	}
