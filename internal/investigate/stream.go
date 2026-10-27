@@ -4,6 +4,7 @@ import (
 	"sort"
 	"time"
 
+	"tracefall/internal/hostid"
 	"tracefall/internal/model"
 )
 
@@ -182,14 +183,9 @@ func RunStreamed(caseID string, each EachEvent, findings []model.Finding, correl
 	members := make(map[string]member, len(referenced))
 	// Keep one compact projection per distinct identity observation, not full
 	// unreferenced events or a per-event case inventory.
-	inventory := map[[7]string]model.Event{}
+	inventory := hostid.Inventory{}
 	err := each(func(e model.Event) error {
-		if e.Host != "" {
-			k := [7]string{e.CaseID, e.CollectionID, e.Host, e.Extra["domain"], e.Extra["host_role"], e.Extra["os_product_name"], e.Extra["os_current_build"]}
-			if _, ok := inventory[k]; !ok {
-				inventory[k] = model.Event{ID: model.StableID("identity", k[:]...), CaseID: e.CaseID, CollectionID: e.CollectionID, Host: e.Host, Extra: map[string]string{"domain": k[3], "host_role": k[4], "os_product_name": k[5], "os_current_build": k[6]}}
-			}
-		}
+		inventory.Add(e)
 		if referenced[e.ID] {
 			members[e.ID] = newMember(e)
 		}
@@ -199,10 +195,7 @@ func RunStreamed(caseID string, each EachEvent, findings []model.Finding, correl
 		return nil, err
 	}
 
-	projections := make([]model.Event, 0, len(inventory))
-	for _, e := range inventory {
-		projections = append(projections, e)
-	}
+	projections := inventory.Events()
 	groups := buildGroups(findings, correlations, newIdentities(members, projections))
 	accs := make([]*groupAcc, len(groups))
 	for gi, g := range groups {

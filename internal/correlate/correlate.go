@@ -79,6 +79,10 @@ var typedInputTypes = []string{
 	sqlClientDiagnostic,
 }
 
+// NeedsExtra requests identity metadata even for non-typed observations.
+// Extra is decoded one event at a time and retained only as compact tuples.
+func NeedsExtra(eventType string) bool { return true }
+
 // RunFrom builds every correlation from src. The typed builders get only the
 // events they read; the two that look at every event (temporal bursts and
 // entity footprints) get a reference per event instead of the full event.
@@ -91,21 +95,15 @@ func RunFrom(caseID string, src model.EventSource) ([]model.Correlation, error) 
 	if err != nil {
 		return nil, fmt.Errorf("loading event references: %w", err)
 	}
-	// Supply host-only projections for the untyped records too: a filtered
-	// load must not hide an incompatible host spelling from identity checks.
-	// These are projections of real referenced events, not new observations.
-	seenNames := map[string]bool{}
+	// Identity metadata may occur on any normalized event type. Stream it
+	// into the same distinct-tuple inventory used by investigations, without
+	// retaining whole untyped observations or erasing their contradictions.
+	inventory := hostid.Inventory{}
+	if err := src.Each(NeedsExtra, func(e model.Event) error { inventory.Add(e); return nil }); err != nil {
+		return nil, fmt.Errorf("loading correlation identity inventory: %w", err)
+	}
+	typed = append(typed, inventory.Events()...)
 	nameKey := func(coll, host string) string { return coll + "\x00" + host }
-	for _, e := range typed {
-		seenNames[nameKey(e.CollectionID, e.Host)] = true
-	}
-	for _, r := range refs {
-		k := nameKey(r.CollectionID, r.Host)
-		if r.Host != "" && !seenNames[k] {
-			seenNames[k] = true
-			typed = append(typed, model.Event{ID: r.ID, CaseID: caseID, CollectionID: r.CollectionID, Host: r.Host})
-		}
-	}
 	// Reference-only consumers must use the same case-wide identity decision
 	// as typed chains, not reintroduce a contradicted raw host attribution.
 	names := hostid.AcquisitionNames(typed)

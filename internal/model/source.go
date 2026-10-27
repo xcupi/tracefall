@@ -101,6 +101,9 @@ type EventSource interface {
 	Load(f EventFilter) ([]Event, error)
 	// Refs returns a reference to every event, ordered by timestamp, then ID.
 	Refs() ([]EventRef, error)
+	// Each streams every event, decoding Extra only where requested. Consumers
+	// must project what they retain rather than collecting all full events.
+	Each(needExtra func(string) bool, fn func(Event) error) error
 }
 
 // SliceSource serves an in-memory event slice through the EventSource
@@ -130,6 +133,18 @@ func (s SliceSource) Load(f EventFilter) ([]Event, error) {
 		out = append(out, e)
 	}
 	return out, nil
+}
+
+func (s SliceSource) Each(needExtra func(string) bool, fn func(Event) error) error {
+	for _, e := range s {
+		if needExtra != nil && !needExtra(e.EventType) {
+			e.Extra = nil
+		}
+		if err := fn(e); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s SliceSource) Refs() ([]EventRef, error) {

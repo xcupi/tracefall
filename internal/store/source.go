@@ -21,6 +21,11 @@ func (s *Store) EventSourceFor(caseID string) model.EventSource {
 	return caseEvents{s: s, caseID: caseID}
 }
 
+// Each uses the existing paged reader; no case-wide full-event load.
+func (c caseEvents) Each(needExtra func(string) bool, fn func(model.Event) error) error {
+	return c.s.ForEachEventLazy(c.caseID, needExtra, fn)
+}
+
 // Load selects by event type or artifact type through the case's indexes. An
 // empty filter (neither All nor any name) selects nothing.
 func (c caseEvents) Load(f model.EventFilter) ([]model.Event, error) {

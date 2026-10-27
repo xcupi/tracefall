@@ -228,7 +228,7 @@ func Build(events []model.Event) *Registry {
 		}
 		f := matches[0]
 		compatible := len(domains[n]) == 1 && domains[n][strings.TrimPrefix(f, n+".")]
-		if len(domains[n]) > 0 && !compatible {
+		if !aliasDomainCompatible(n, f, domains[n]) {
 			r.ambiguous[n] = true
 			continue
 		}
@@ -321,7 +321,13 @@ func Build(events []model.Event) *Registry {
 				}
 				// A name only becomes a machine here if the case already knows
 				// that machine; DNS alone does not create one.
-				if h := r.ByName(e.NetworkDest); h != nil {
+				k := key(e.NetworkDest)
+				if alias := r.aliases[k]; alias != "" {
+					k = alias
+				}
+				// Keep known but unresolved owners as ranked blockers too.
+				// Looking directly in hosts never invents a DNS-only machine.
+				if h := r.hosts[k]; h != nil {
 					r.learn(h, a, BasisDNS, e.ID)
 				}
 			}

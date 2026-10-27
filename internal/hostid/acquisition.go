@@ -39,7 +39,15 @@ func AcquisitionNames(events []model.Event) map[string]string {
 	canonical := map[string]string{}
 	for scope, names := range groups {
 		if h, ok := Resolve(names); ok {
-			canonical[scope] = key(h)
+			valid := true
+			for _, n := range names {
+				if n != key(h) && !aliasDomainCompatible(n, key(h), domains[strings.SplitN(scope, "\x00", 2)[0]+"\x00"+n]) {
+					valid = false
+				}
+			}
+			if valid {
+				canonical[scope] = key(h)
+			}
 		}
 	}
 	out := map[string]string{}
@@ -50,6 +58,18 @@ func AcquisitionNames(events []model.Event) map[string]string {
 			continue
 		}
 		if len(domains[e.CaseID+"\x00"+h]) > 1 || (!strings.Contains(h, ".") && len(labels[e.CaseID+"\x00"+h]) > 1) {
+			out[e.ID] = ""
+			continue
+		}
+		if !strings.Contains(h, ".") {
+			for full := range labels[e.CaseID+"\x00"+h] {
+				if !aliasDomainCompatible(h, full, domains[e.CaseID+"\x00"+h]) {
+					h = ""
+					break
+				}
+			}
+		}
+		if h == "" {
 			out[e.ID] = ""
 			continue
 		}
@@ -72,6 +92,13 @@ func AcquisitionNames(events []model.Event) map[string]string {
 		}
 	}
 	return out
+}
+
+// aliasDomainCompatible applies the same recorded-domain contradiction rule
+// to both registry aliases and acquisition comparison keys. Missing domain
+// does not prove an alias; other acquisition evidence must still establish it.
+func aliasDomainCompatible(short, full string, domains map[string]bool) bool {
+	return len(domains) == 0 || (len(domains) == 1 && domains[strings.TrimPrefix(full, short+".")])
 }
 
 // Conflicting recorded machine metadata cannot be repaired by alias preference
