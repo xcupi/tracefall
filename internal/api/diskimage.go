@@ -23,6 +23,7 @@ import (
 	"tracefall/internal/ntfsvol"
 	"tracefall/internal/parsers"
 	"tracefall/internal/partition"
+	"tracefall/internal/regf"
 	"tracefall/internal/report"
 )
 
@@ -59,6 +60,11 @@ import (
 var ErrInvalidDiskImage = errors.New("the disk image is invalid or cannot be read")
 
 const usnStream = "$J"
+
+// maxCompanionLogBytes bounds one transaction log copied out of an image. It is
+// the ceiling the replay reader itself applies, so a log refused here is one the
+// reader would have refused; a variable so a test can lower it.
+var maxCompanionLogBytes int64 = regf.MaxLogFileBytes
 
 type diskPartitionReport struct {
 	Index       int    `json:"index"`
@@ -430,6 +436,10 @@ func (s *Service) catalogDiskImage(caseID string, collection model.Collection, s
 	now := time.Now().UTC()
 	sourceFiles := make([]model.SourceFile, 0, 64)
 	var supported, unsupported int
+	// hiveByLower and logRows let the catalog label a transaction log as the
+	// companion of the hive beside it once every volume has been walked.
+	hiveByLower := map[string]string{}
+	var logRows []int
 	for _, ov := range vols {
 		prefix := volumePrefix(ov.part.Index)
 		vr := diskVolumeReport{
@@ -485,6 +495,11 @@ func (s *Service) catalogDiskImage(caseID string, collection model.Collection, s
 				sf.ImportStatus = model.SourceFileUnsupported
 				unsupported++
 			}
+			if supportedFile && artifactType == model.ArtifactRegistryHive {
+				hiveByLower[strings.ToLower(full)] = full
+			} else if !supportedFile && companionLogName(f.Name) {
+				logRows = append(logRows, len(sourceFiles))
+			}
 			sourceFiles = append(sourceFiles, sf)
 			vr.Cataloged++
 			return nil
@@ -498,6 +513,12 @@ func (s *Service) catalogDiskImage(caseID string, collection model.Collection, s
 			rep.Notes = append(rep.Notes, fmt.Sprintf("partition %d: %d MFT record(s) are damaged and could not be read; files described only by them are missing", ov.part.Index, stats.CorruptCount))
 		}
 		rep.Volumes = append(rep.Volumes, vr)
+	}
+
+	for _, i := range logRows {
+		if hive, ok := companionHiveOf(sourceFiles[i].Path, hiveByLower); ok {
+			sourceFiles[i].ParseCoverage = &model.ParseCoverage{CompanionOf: hive}
+		}
 	}
 
 	if len(sourceFiles) == 0 {
@@ -555,7 +576,28 @@ type diskExtractor struct {
 	collectionID string
 	img          image.Image
 	byPath       map[string]diskLocator
+	// logs indexes every file named like a registry transaction log
+	// (*.LOG1, *.LOG2, *.LOG), by lower-cased cataloged path. It is consulted
+	// only for the exact name HIVE + suffix in the hive's own directory and
+	// volume, so a log of another hive, directory or volume is never reached.
+	logs          map[string][]companionLog
+	logsTruncated bool
+	// companions is what became of each extracted hive's logs, by hive path.
+	companions map[string][]model.HiveCompanion
+	rows       map[string]model.SourceFile
 }
+
+// companionLog is one candidate transaction log found while indexing the image.
+type companionLog struct {
+	path string // cataloged path, volN/...
+	loc  diskLocator
+	size int64
+}
+
+// maxCompanionIndex bounds the index of log-like names. A volume can hold
+// hundreds of thousands of *.log files; past this the index stops growing and
+// a hive whose logs may be missing from it says so.
+const maxCompanionIndex = 200_000
 
 func (s *Service) newDiskExtractor(caseID, collectionID string) (*diskExtractor, error) {
 	segs, err := s.diskImageSegmentPaths(caseID, collectionID)
@@ -566,16 +608,28 @@ func (s *Service) newDiskExtractor(caseID, collectionID string) (*diskExtractor,
 	if err != nil {
 		return nil, err
 	}
-	x := &diskExtractor{svc: s, caseID: caseID, collectionID: collectionID, img: img, byPath: map[string]diskLocator{}}
+	x := &diskExtractor{svc: s, caseID: caseID, collectionID: collectionID, img: img, byPath: map[string]diskLocator{},
+		logs: map[string][]companionLog{}, companions: map[string][]model.HiveCompanion{}}
 	registry := ingest.Registry()
 	for _, ov := range vols {
 		prefix := volumePrefix(ov.part.Index)
 		ov := ov
 		if _, err := ov.vol.Walk(func(f fsvol.File) error {
-			if e, ok := classifyDiskFile(ov.vol, f, registry); ok && e.Supported {
-				key := prefix + "/" + e.Rel
+			e, ok := classifyDiskFile(ov.vol, f, registry)
+			if !ok {
+				return nil
+			}
+			key := prefix + "/" + e.Rel
+			if e.Supported {
 				if _, dup := x.byPath[key]; !dup {
 					x.byPath[key] = diskLocator{vol: ov.vol, record: f.Record, stream: e.Stream}
+				}
+			} else if e.Stream == "" && companionLogName(f.Name) {
+				if len(x.logs) >= maxCompanionIndex {
+					x.logsTruncated = true
+				} else {
+					lk := strings.ToLower(key)
+					x.logs[lk] = append(x.logs[lk], companionLog{path: key, loc: diskLocator{vol: ov.vol, record: f.Record}, size: e.Size})
 				}
 			}
 			return nil
@@ -595,30 +649,48 @@ func (x *diskExtractor) Close() error {
 }
 
 // extract writes one cataloged file's bytes under the collection's
-// evidence directory and records Tracefall's own SHA-256 of them.
+// evidence directory and records Tracefall's own SHA-256 of them. When the
+// file is a registry hive, the transaction logs beside it are extracted too
+// (extractCompanions), so every reader of the extracted hive replays them.
 func (x *diskExtractor) extract(sf model.SourceFile) error {
 	loc, ok := x.byPath[sf.Path]
 	if !ok {
 		return fmt.Errorf("%w: %q is no longer found in the disk image", ntfsvol.ErrNotFound, sf.Path)
 	}
-	dr, err := loc.vol.OpenStream(loc.record, loc.stream)
+	sum, err := x.writeFile(sf.Path, loc)
 	if err != nil {
 		return err
 	}
+	if err := x.svc.store.SetSourceFileSHA256(sf.ID, sum); err != nil {
+		return fmt.Errorf("recording extracted file hash: %w", err)
+	}
+	if sf.ArtifactType == model.ArtifactRegistryHive {
+		x.extractCompanions(sf)
+	}
+	return nil
+}
+
+// writeFile copies one file's logical stream to its place under the
+// collection's evidence directory and returns the SHA-256 of what it wrote.
+func (x *diskExtractor) writeFile(relPath string, loc diskLocator) (string, error) {
+	dr, err := loc.vol.OpenStream(loc.record, loc.stream)
+	if err != nil {
+		return "", err
+	}
 	root, err := filepath.Abs(x.svc.files.EvidenceDir(x.caseID, x.collectionID))
 	if err != nil {
-		return fmt.Errorf("resolving evidence directory: %w", err)
+		return "", fmt.Errorf("resolving evidence directory: %w", err)
 	}
-	dest := filepath.Join(root, filepath.FromSlash(sf.Path))
+	dest := filepath.Join(root, filepath.FromSlash(relPath))
 	if rel, relErr := filepath.Rel(root, dest); relErr != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return fmt.Errorf("%w: entry path %q would resolve outside the extraction directory", ntfsvol.ErrCorrupt, sf.Path)
+		return "", fmt.Errorf("%w: entry path %q would resolve outside the extraction directory", ntfsvol.ErrCorrupt, relPath)
 	}
 	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
-		return fmt.Errorf("creating destination directory: %w", err)
+		return "", fmt.Errorf("creating destination directory: %w", err)
 	}
 	out, err := os.OpenFile(dest, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
 	if err != nil {
-		return fmt.Errorf("creating extracted file: %w", err)
+		return "", fmt.Errorf("creating extracted file: %w", err)
 	}
 	defer out.Close()
 
@@ -651,14 +723,14 @@ func (x *diskExtractor) extract(sf model.SourceFile) error {
 			}
 			got, rerr := dr.ReadAt(buf[:n], off)
 			if int64(got) < n && rerr != nil && !errors.Is(rerr, io.EOF) {
-				return rerr
+				return "", rerr
 			}
 			if int64(got) == 0 {
-				return fmt.Errorf("%w: short read at offset %d of %q", ntfsvol.ErrCorrupt, off, sf.Path)
+				return "", fmt.Errorf("%w: short read at offset %d of %q", ntfsvol.ErrCorrupt, off, relPath)
 			}
 			h.Write(buf[:got])
 			if _, werr := out.WriteAt(buf[:got], off); werr != nil {
-				return werr
+				return "", werr
 			}
 			off += int64(got)
 		}
@@ -668,12 +740,9 @@ func (x *diskExtractor) extract(sf model.SourceFile) error {
 		hashZeros(dr.Size() - pos)
 	}
 	if err := out.Truncate(dr.Size()); err != nil {
-		return err
+		return "", err
 	}
-	if err := x.svc.store.SetSourceFileSHA256(sf.ID, hex.EncodeToString(h.Sum(nil))); err != nil {
-		return fmt.Errorf("recording extracted file hash: %w", err)
-	}
-	return nil
+	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 // extractDiskImageEntry is the one-file convenience used where a single

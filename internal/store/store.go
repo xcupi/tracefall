@@ -447,11 +447,22 @@ func (s *Store) SaveSourceFiles(files []model.SourceFile) error {
 }
 
 func insertSourceFile(db execer, f model.SourceFile) error {
-	_, err := db.Exec(`INSERT INTO source_files (id, case_id, collection_id, original_filename, path, artifact_type, parser, supported, size_bytes, sha256, embedded_hash, import_status, event_count, discovered_at, imported_at, deleted_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+	// A cataloged file normally has no parse coverage yet. The exception is a
+	// registry transaction log, which is labeled as the companion of its hive
+	// when it is cataloged.
+	coverage := ""
+	if f.ParseCoverage != nil {
+		b, err := json.Marshal(f.ParseCoverage)
+		if err != nil {
+			return err
+		}
+		coverage = string(b)
+	}
+	_, err := db.Exec(`INSERT INTO source_files (id, case_id, collection_id, original_filename, path, artifact_type, parser, supported, size_bytes, sha256, embedded_hash, import_status, event_count, discovered_at, imported_at, deleted_at, parse_coverage_json)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		f.ID, f.CaseID, f.CollectionID, f.OriginalFilename, f.Path, f.ArtifactType, f.Parser,
 		boolToInt(f.Supported), f.SizeBytes, f.SHA256, f.EmbeddedHash, f.ImportStatus, f.EventCount, fmtTime(f.DiscoveredAt),
-		fmtOptionalTime(f.ImportedAt), fmtOptionalTime(f.DeletedAt))
+		fmtOptionalTime(f.ImportedAt), fmtOptionalTime(f.DeletedAt), coverage)
 	return err
 }
 
@@ -598,6 +609,19 @@ func (s *Store) GetSourceFiles(ids []string) ([]model.SourceFile, error) {
 // once a selected file is actually extracted and imported.
 func (s *Store) SetSourceFileSHA256(id, sha256 string) error {
 	_, err := s.db.Exec(`UPDATE source_files SET sha256 = ? WHERE id = ?`, sha256, id)
+	return err
+}
+
+// SetSourceFileCompanion labels an unsupported source file as the transaction
+// log of a hive (parse coverage carrying only CompanionOf). It never touches an
+// imported, failed or duplicate row, and changes nothing else about the file.
+func (s *Store) SetSourceFileCompanion(id, hivePath string) error {
+	b, err := json.Marshal(model.ParseCoverage{CompanionOf: hivePath})
+	if err != nil {
+		return err
+	}
+	_, err = s.db.Exec(`UPDATE source_files SET parse_coverage_json = ? WHERE id = ? AND import_status = ?`,
+		string(b), id, model.SourceFileUnsupported)
 	return err
 }
 

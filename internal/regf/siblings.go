@@ -7,6 +7,20 @@ import (
 	"strings"
 )
 
+// MaxLogFileBytes is the largest transaction log OpenWithLogs will read. A
+// caller that copies logs out of a container uses the same ceiling, so a log it
+// refuses to extract is one the reader would have refused anyway.
+const MaxLogFileBytes = maxLogFileBytes
+
+// IsCompanionLogName reports whether candidate is a transaction log of the hive
+// called hiveName: the hive's name plus .LOG1, .LOG2 or .LOG, in any case. It is
+// the one naming rule shared by SiblingLogs and by the extraction of a disk
+// image, so what is extracted is exactly what a reader would look for.
+func IsCompanionLogName(hiveName, candidate string) bool {
+	h, c := strings.ToLower(hiveName), strings.ToLower(candidate)
+	return h != "" && (c == h+".log1" || c == h+".log2" || c == h+".log")
+}
+
 // SiblingLogs returns the transaction logs that sit beside a hive file:
 // HIVE.LOG1, HIVE.LOG2 and the older HIVE.LOG. Names are matched without regard
 // to case, because collections keep the case the original file system gave them
@@ -21,14 +35,12 @@ func SiblingLogs(hivePath string) []string {
 	if err != nil {
 		return nil
 	}
-	lower := strings.ToLower(base)
 	var out []string
 	for _, e := range entries {
 		if !e.Type().IsRegular() {
 			continue
 		}
-		n := strings.ToLower(e.Name())
-		if n == lower+".log1" || n == lower+".log2" || n == lower+".log" {
+		if IsCompanionLogName(base, e.Name()) {
 			out = append(out, filepath.Join(dir, e.Name()))
 		}
 	}

@@ -134,8 +134,8 @@ Value data is decoded for REG_SZ, REG_EXPAND_SZ, REG_MULTI_SZ,
 REG_DWORD (both endiannesses), REG_QWORD, and REG_BINARY; anything else
 is preserved as bounded binary.
 
-The hive is opened **read-only**. Nothing writes to it, no transaction
-log (`.LOG1`/`.LOG2`) is replayed or created, and the host operating
+The hive is opened **read-only**. Nothing writes to it, no file is created or
+changed when a transaction log (`.LOG1`/`.LOG2`) is replayed in memory, and the host operating
 system's registry API is never involved — the file is parsed as bytes,
 so this works identically on Linux.
 
@@ -260,8 +260,10 @@ cells below the root are skipped and counted, not silently ignored.
 - Deleted/unallocated registry cells are **not** recovered. Reading
   unallocated space means trusting offsets in freed structures, which
   conflicts with the safety posture above. This is a deliberate omission.
-- Transaction logs (`.LOG1`/`.LOG2`) are not replayed, so a hive copied
-  from a running system may be slightly stale relative to the live
-  registry. Replaying them would mean writing a reconstructed hive.
+- Transaction logs (`.LOG1`/`.LOG2`) are replayed in memory when they sit beside
+  the hive (see `docs/evidence-triage.md`); a disk image's extraction now copies
+  them with the hive (`docs/disk-images.md`). A hive with no log beside it, or
+  from an AD1 where the logs were not selected, may be older than the live
+  registry; its replay state says `no_logs`.
 - `SAM`/`SECURITY` hives are discovered and traversable, but no
   credential-material extraction is performed.

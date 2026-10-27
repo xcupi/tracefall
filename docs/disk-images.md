@@ -148,3 +148,74 @@ fsck.exfat), which rejects a damaged image. Files are read back and compared
 with the source; fragmented files are checked to be read through their chain.
 The fixture writer is test code, and the checker validates its output; no real
 FAT or exFAT image from the validation set has been read yet.
+
+## Registry transaction logs extracted with their hive
+
+A hive collected from a running system is usually missing its newest changes;
+they are in `HIVE.LOG1`, `HIVE.LOG2` (or the older `HIVE.LOG`) beside it.
+Replay (see `docs/evidence-triage.md`, "Registry hives copied while Windows was
+running") only works when those files sit next to the extracted hive. From a disk
+image, extraction used to copy only files a parser claims, so the logs stayed in
+the image and the hive was read without them, silently.
+
+Now, when a registry hive is extracted from a disk image, its logs are extracted
+with it:
+
+- **Which files.** The file name is the hive's name plus `.LOG1`, `.LOG2` or
+  `.LOG`, in any case (the same rule `regf.SiblingLogs` uses, shared as
+  `regf.IsCompanionLogName`); a regular, in-use file; **same directory of the same
+  volume** as the hive. Nothing else is copied: not another hive's log, not the
+  parent directory's (a `RegBack\SOFTWARE` does not take `config\SOFTWARE.LOG1`),
+  not a same-named log on another partition, not a log whose hive is not in the
+  catalog (such a file stays an ordinary unsupported entry).
+- **Where.** Under the same evidence layout (`volN/<path>`), beside the hive, so
+  `OpenReplayed` finds them. This covers every hive the registry parser claims
+  (SYSTEM, SOFTWARE, SAM, SECURITY, DEFAULT, NTUSER.DAT, UsrClass.dat, Amcache.hve
+  by content). The boot-key and time-zone helpers extract the SYSTEM hive through
+  the same function, so they read the same replayed state as the parser.
+- **How they are recorded.** Each log is hashed (SHA-256 of the logical stream) and
+  the hash is stored on its catalog row. At discovery the row is labeled
+  `companion_of` = the hive's catalog path (in the row's parse coverage, shown in
+  source details and provenance; no schema change). The row keeps import status
+  `unsupported`, event count 0 and no events: **a companion is not independent
+  evidence.** It is counted in `coverage.companions` and in the catalog's
+  unsupported total (no parser reads it alone) but it is not reported as an
+  unextracted gap, and the triage view says what it is used for.
+- **Status per hive.** The hive's parse coverage carries `hive_replay`:
+  `state` (`clean`, `replayed`, `replayed_partial`, `not_recoverable`,
+  `no_logs`), `reason`, `logs_applied`, and `companions` (path, size, SHA-256,
+  `extracted` / `oversize` / `failed`). A dirty hive with no log in its
+  directory is `no_logs` with the reason that the image holds none; a hive
+  without logs in its directory is never "clean by assumption". Events of a hive
+  that was not cleanly written keep carrying `hive_state` / `hive_recovery`; events
+  of a clean hive stay unannotated, as before.
+- **Limits.** Each log is capped at `regf.MaxLogFileBytes` (256 MiB, what the
+  replay reader itself accepts); at most one log per suffix per hive. A log over
+  the cap, or one that cannot be copied, is **not extracted** (any copy from an
+  earlier run is removed), the hive is still parsed, and for a hive that is not
+  clean the status, the coverage notes (so the hive is "incomplete") and the
+  events' `hive_recovery` name the log and why. The index of log-like file names
+  in an image stops at 200,000 entries; a `no_logs` reason then says a log may
+  have gone unseen.
+- **Re-import.** Extraction overwrites the same paths with the same bytes; no
+  file or row is added, and no event identity changes (the dedup hash is
+  untouched). A hive imported *before* this change was parsed without its logs; its
+  stored events do not change. Use a fresh case to re-import it.
+
+### Boundaries
+
+- Only **disk images** (raw, E01, VHD, VHDX, VMDK) are covered. Folder, ZIP and
+  KAPE-style directory ingests extract the whole tree, so a log is beside its hive
+  already and `SiblingLogs` finds it. **AD1 containers are not covered:** they
+  extract only the selected entries (`ad1Extractor.extract`), so a hive imported
+  from an AD1 is still read without logs that were not selected. This is a known
+  gap, not a decision.
+- Logs are found in the image only by name beside the hive; a log renamed or moved
+  elsewhere is not found. Deleted (not in-use) logs are not recovered.
+- Replay rules are unchanged (Windows 8.1+ format, gap refused, first failing
+  entry ends the chain). A log of the older format is extracted and hashed, and
+  the state says it was not replayed.
+- Verified with synthetic hives and logs on an NTFS volume written by independent
+  tools (fixture `testdata/images/companions.dd.gz`). Replay of a real
+  live-collected hive with its real logs through this path has **not** been
+  verified.

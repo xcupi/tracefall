@@ -16,6 +16,7 @@ import (
 	"tracefall/internal/cmdsem"
 	"tracefall/internal/detect"
 	"tracefall/internal/model"
+	"tracefall/internal/regf"
 	"tracefall/internal/report"
 	"tracefall/internal/version"
 )
@@ -610,6 +611,13 @@ func reportCoverage(files []model.SourceFile) report.Coverage {
 	out.Failed = failed
 	for _, sf := range files {
 		if c := sf.ParseCoverage; c != nil {
+			if c.CompanionOf != "" {
+				out.ParserDiagnostics = append(out.ParserDiagnostics, report.KV{Key: sf.Path, Value: "transaction log, companion of " + c.CompanionOf + "; not parsed as evidence of its own"})
+				continue
+			}
+			if hr := c.HiveReplay; hr != nil && hr.State == string(regf.RecoveryClean) && !c.Incomplete() && c.RecordsRead == 0 && len(hr.Companions) == 0 {
+				continue // a cleanly written hive with no logs: nothing to say beyond the events
+			}
 			summary := fmt.Sprintf("read=%d mapped=%d unmapped=%d undated=%d records_failed=%d chunks_failed=%d capped=%t", c.RecordsRead, c.Mapped, c.Unmapped, c.Undated, c.RecordsFailed, c.ChunksFailed, c.LimitReached)
 			if len(c.Notes) > 0 {
 				summary += "; " + strings.Join(c.Notes, "; ")
@@ -619,6 +627,16 @@ func reportCoverage(files []model.SourceFile) report.Coverage {
 			}
 			if c.UnlistedRecords > 0 {
 				summary += fmt.Sprintf("; %d records beyond the per-ID census limit", c.UnlistedRecords)
+			}
+			if hr := c.HiveReplay; hr != nil {
+				summary += "; hive transaction logs: " + hr.State
+				for _, comp := range hr.Companions {
+					summary += fmt.Sprintf("; companion %s %s (%d bytes", comp.Path, comp.Status, comp.SizeBytes)
+					if comp.SHA256 != "" {
+						summary += ", sha256 " + comp.SHA256
+					}
+					summary += ")"
+				}
 			}
 			out.ParserDiagnostics = append(out.ParserDiagnostics, report.KV{Key: sf.Path, Value: summary})
 		}

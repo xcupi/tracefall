@@ -63,12 +63,30 @@ type TriagedSourceFile struct {
 	// Recommended marks high-value evidence that can actually be
 	// imported -- what "Select recommended" acts on.
 	Recommended bool `json:"recommended"`
+	// CompanionOf names the hive a registry transaction log was extracted
+	// with. Such a file is read only together with that hive: it is not an
+	// independent source, produces no events and is not an unparsed gap.
+	CompanionOf string `json:"companion_of,omitempty"`
 }
 
 // triage classifies one source file.
 func triage(sf model.SourceFile) TriagedSourceFile {
 	cap := capabilities.Classify(sf.Path, sf.ArtifactType)
+	if sf.ParseCoverage != nil && sf.ParseCoverage.CompanionOf != "" && sf.ArtifactType == model.ArtifactRegistryTransactionLog {
+		// Extracted with its hive and replayed over it in memory: present and
+		// used, not a file Tracefall failed to read.
+		cap.Reason = ""
+		cap.Note = "Companion of " + sf.ParseCoverage.CompanionOf + ". It is extracted with that hive and, when the hive was not cleanly " +
+			"written, replayed over it in memory. It is not an independent source: it produces no events of its own, " +
+			"and the hive's own coverage says whether it was applied."
+		cap.Recognized = true
+	}
+	companionOf := ""
+	if sf.ParseCoverage != nil {
+		companionOf = sf.ParseCoverage.CompanionOf
+	}
 	return TriagedSourceFile{
+		CompanionOf:       companionOf,
 		SourceFile:        sf,
 		TypeLabel:         cap.Label,
 		Family:            string(cap.Family),
@@ -133,6 +151,10 @@ type Coverage struct {
 	NotImported int `json:"not_imported"`
 	ParseFailed int `json:"parse_failed"`
 	Recommended int `json:"recommended"`
+	// Companions counts registry transaction logs extracted with their hive. They
+	// are still part of Discovered and Unsupported (no parser reads them on their
+	// own); this says how many of those are not gaps.
+	Companions int `json:"companions,omitempty"`
 	// ByType breaks the catalog down by artifact class, most valuable
 	// first, so the highest-priority evidence is what an investigator
 	// reads first.
@@ -151,6 +173,9 @@ func computeCoverage(files []TriagedSourceFile) Coverage {
 			cov.Supported++
 		} else {
 			cov.Unsupported++
+		}
+		if f.CompanionOf != "" {
+			cov.Companions++
 		}
 		switch f.ImportStatus {
 		case model.SourceFileImported:

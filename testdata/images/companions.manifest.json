@@ -1,0 +1,25 @@
+{
+ "files": {
+  "vol1/Users/alice/AppData/Local/Microsoft/Windows/UsrClass.dat": "5f1d9c56ddb164c3c836f84e45f3f3b337c8e9d045429566452365285cd7232e",
+  "vol1/Users/alice/AppData/Local/Microsoft/Windows/UsrClass.dat.LOG1": "a41bb33d0bc84877b9e17a8b30772254ffe350391c19dd9bb61f82ea67732a4b",
+  "vol1/Users/alice/NTUSER.DAT": "1a2ce3c8e6e9cf8756979d3474b57ac395b816f49865a499c18d493f548b720a",
+  "vol1/Users/alice/NTUSER.DAT.LOG1": "4dfc224327104c440150956c668e24df62b29fffa5cdf8542fea7990cf6b934e",
+  "vol1/Users/bob/NTUSER.DAT": "6123fb1bcd7478566863c8db9f153e80b1411535c48284d3437242f49a97f7d2",
+  "vol1/Users/carol/NTUSER.DAT.LOG1": "4dfc224327104c440150956c668e24df62b29fffa5cdf8542fea7990cf6b934e",
+  "vol1/Windows/AppCompat/Programs/Amcache.hve": "3b4779709c14597ffa7a262aacc063fa8e4bb70b6ccc6f82c2ede3b79db25ddc",
+  "vol1/Windows/AppCompat/Programs/Amcache.hve.LOG1": "135db3de8541b0e74def10cc99aed8104fd7918ce7a7ef1a4d6e1b4df11e31cf",
+  "vol1/Windows/System32/config/DEFAULT": "6ea15549cce4e139d7b09ab63813dd4cbbed1c78932798f9235c10be8162b60a",
+  "vol1/Windows/System32/config/DEFAULT.LOG1": "4f16878fe171590a3ef41992a0da05773f341da075236517f79e5578aee5bf2a",
+  "vol1/Windows/System32/config/RegBack/SOFTWARE": "9443ced93ea5c463a3a3b6cad8952b4df98dd83d33f1e5e17d900ea5b74205db",
+  "vol1/Windows/System32/config/SAM": "02472e4498c5dd72c345981216bc3d88c55db038fd25c124057b2785716d2d67",
+  "vol1/Windows/System32/config/SECURITY": "b20185fc8d5d0f033c24c8114099144ec1680db728baad288a6e983898bdda22",
+  "vol1/Windows/System32/config/SECURITY.LOG1": "f2b1bfb360c1d778573bcea5c5a781cb60ef32401a0995ce7480e2dacebfdfcc",
+  "vol1/Windows/System32/config/SOFTWARE": "29ce5a35e45353807df95079b171150d14c614766207d2b18c3632d50e6a9b8e",
+  "vol1/Windows/System32/config/SOFTWARE.log1": "70d17379942bf4c38cb58289d1596a7b777ef99a72c322e9775c67623749b8e3",
+  "vol1/Windows/System32/config/SYSTEM": "27a84b82cce0176d1b43c48e592f8f1f16f32a42870c05ece780ea4c2072d619",
+  "vol1/Windows/System32/config/SYSTEM.LOG1": "2fe41f374cf9aa567b80c03bc424ac94822c28c0eb852aea0114f77d3bd57144",
+  "vol1/Windows/System32/config/SYSTEM.LOG2": "d99cf60a6fbb094a2164f7ea2355c8ad51464729fdf4dd18b9ed939cec1bc9d2",
+  "vol2/Users/zed/NTUSER.DAT": "c876cf5f07b2f28a908025c9619e6b6ab69e9f92ad9c9b11ea4466ec37d4781e",
+  "vol2/Windows/System32/config/SAM.LOG1": "9b7b2c394dfecc907787cc64c0994d75a7f233c4255e59b4ddbd09448a204651"
+ }
+}

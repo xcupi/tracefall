@@ -1502,6 +1502,11 @@ func (s *Service) importEvidence(caseID, collectionID string, sourceFileIDs []st
 			continue
 		}
 		sf.ParseCoverage = parsed.Coverage
+		if diskExtractor != nil {
+			// What the extraction found beside a registry hive, next to the
+			// parser's own account of replaying it.
+			diskExtractor.mergeHiveReplay(&sf, parsed.Events)
+		}
 		pending = append(pending, pendingImport{sourceFile: sf, events: parsed.Events, raw: parsed.Raw})
 		prog.fileParsed(len(parsed.Events), false)
 	}

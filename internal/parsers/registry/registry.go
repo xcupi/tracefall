@@ -263,7 +263,17 @@ func (p Parser) ParseWithContext(absPath string, ctx parsers.ParseContext) (pars
 // of a hive that was not cleanly written. A clean hive gets nothing: this is
 // provenance for the exceptions, not noise on every record.
 func annotateRecovery(out *parsers.ParseResult, rec regf.Recovery) {
-	if rec.State == regf.RecoveryClean || rec.State == "" {
+	if rec.State == "" {
+		return
+	}
+	// The status itself is recorded for every state, clean included, so that a
+	// missing entry never has to be read as "clean". It sits in the coverage but
+	// is not a caveat: Incomplete() looks at notes and counters, not at this.
+	if out.Coverage == nil {
+		out.Coverage = &model.ParseCoverage{}
+	}
+	out.Coverage.HiveReplay = &model.HiveReplay{State: string(rec.State), Reason: rec.Reason, LogsApplied: append([]string(nil), rec.LogsApplied...)}
+	if rec.State == regf.RecoveryClean {
 		return
 	}
 	summary := rec.Reason
