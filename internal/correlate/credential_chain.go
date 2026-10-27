@@ -24,6 +24,16 @@ const (
 // credential attempts produce qualified hypotheses, never causal execution or
 // credential-abuse claims from account/process names and time alone.
 func BuildCredentialChains(caseID string, events []model.Event) []model.Correlation {
+	// Use the case-wide comparison decision, without changing recorded facts or
+	// requiring equal collections for repeated acquisitions of a known host.
+	// Unresolved identities cannot support a host-bound authentication claim.
+	var identified []model.Event
+	for _, e := range chainHostKeys(events) {
+		if e.Host != "" {
+			identified = append(identified, e)
+		}
+	}
+	events = identified
 	var out []model.Correlation
 	out = append(out, buildBruteForceChains(caseID, events)...)
 	out = append(out, buildSequenceBruteForceChains(caseID, events)...)

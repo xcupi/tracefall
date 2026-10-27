@@ -52,6 +52,23 @@ projections from all event references. Projections carry no invented timestamp
 or event type, cannot become chain steps, and are deduplicated by name/scope
 rather than expanding every untyped event to a full retained event.
 
+## Credential and SQL-to-Windows chains
+
+Credential builders use the same case-wide validated comparison keys, including
+unreferenced names and machine metadata from filtered sources. Unknown or
+contradictory identity cannot support a host-bound authentication chain.
+Repeated acquisitions of the same established host remain eligible: collection
+equality is not imposed on failure/success sequences. Recorded source-address,
+account-domain and subject-session contradictions still reject a sequence;
+missing context remains uncertainty, not proof of a match.
+
+SQL connection and OS-request/process builders also validate identity before
+narrowing their input set. Same-machine short/FQDN co-observation can establish
+an alias; a diagnostic server label alone cannot establish one. All existing
+same-collection, exact connection-ID, independent diagnostic, bounded process
+lifetime, SQL syntax/outcome and parent-identity requirements remain intact.
+These changes do not add SQL readers or extract new fields.
+
 ## Existing cases and boundaries
 
 No parser, persisted event, dedup hash, schema or original evidence is changed.

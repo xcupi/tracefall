@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"tracefall/internal/hostid"
 	"tracefall/internal/model"
 )
 
@@ -42,6 +43,14 @@ func sqlAlive(p model.Event, at time.Time) bool {
 }
 
 func buildSQLWindows(caseID string, events []model.Event) []model.Correlation {
+	// Resolve before narrowing inputs: unreferenced names and machine metadata
+	// are identity blockers too. A diagnostic's server label can only refer to
+	// an independently observed host in this case/acquisition; it is not itself
+	// alias proof. Keep comparison keys separate from immutable recorded fields.
+	names := hostid.AcquisitionNames(events)
+	recordedKey := func(caseID, collection, host string) string {
+		return caseID + "\x00" + collection + "\x00" + strings.ToLower(strings.TrimSpace(host))
+	}
 	// Collapse repeated delivery of the same immutable event. Conflicting
 	// versions of an ID make the evidence set unsuitable for deterministic joins.
 	unique := map[string]model.Event{}
@@ -54,8 +63,19 @@ func buildSQLWindows(caseID string, events []model.Event) []model.Correlation {
 		}
 		unique[e.ID] = e
 	}
+	known := map[string]string{}
+	for _, e := range unique {
+		known[recordedKey(e.CaseID, e.CollectionID, e.Host)] = names[e.ID]
+	}
+	serverKeys := map[string]string{}
+	for _, e := range unique {
+		if e.EventType == sqlClientDiagnostic {
+			serverKeys[e.ID] = known[recordedKey(e.CaseID, e.CollectionID, e.Extra["sql_server_host"])]
+		}
+	}
 	events = make([]model.Event, 0, len(unique))
 	for _, e := range unique {
+		e.Host = names[e.ID]
 		events = append(events, e)
 	}
 	sort.Slice(events, func(i, j int) bool { return events[i].ID < events[j].ID })
@@ -74,7 +94,7 @@ func buildSQLWindows(caseID string, events []model.Event) []model.Correlation {
 			continue
 		}
 		for _, d := range events {
-			if d.EventType != sqlClientDiagnostic || d.ArtifactType != "windows_sql_client_diagnostic" || !sqlEvidence(caseID, d) || d.CollectionID != s.CollectionID || d.Extra["sql_server_host"] != s.Host || d.Extra["sql_instance"] != s.Extra["sql_instance"] || d.SourceFileID == s.SourceFileID || !strings.EqualFold(s.Extra["sql_client_connection_id"], d.Extra["sql_client_connection_id"]) || !sqlGUID(d.Extra["process_guid"]) || d.PID <= 0 {
+			if d.EventType != sqlClientDiagnostic || d.ArtifactType != "windows_sql_client_diagnostic" || !sqlEvidence(caseID, d) || d.CollectionID != s.CollectionID || serverKeys[d.ID] != s.Host || d.Extra["sql_instance"] != s.Extra["sql_instance"] || d.SourceFileID == s.SourceFileID || !strings.EqualFold(s.Extra["sql_client_connection_id"], d.Extra["sql_client_connection_id"]) || !sqlGUID(d.Extra["process_guid"]) || d.PID <= 0 {
 				continue
 			}
 			for _, p := range events {
