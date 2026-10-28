@@ -5739,6 +5739,7 @@ function wireExternalCitations(root, caseId) {
             if (!data) throw Error("Coverage record is unavailable.");
             body.innerHTML = `<p class="small">${id === "selection" ? "Recorded selection coverage for the latest bounded request." : "Current source provenance and parse coverage; it may have changed since the review."} Not raw-image coverage. Not recorded is not complete.</p><pre class="small" style="white-space:pre-wrap;overflow-wrap:anywhere"></pre>`;
             body.querySelector("pre").textContent=JSON.stringify(data,null,2);
+            if (id === "selection") body.querySelector("pre").insertAdjacentHTML("beforebegin",renderReviewPrivacyOmissions(data));
           }
         } catch(e) { body.textContent="Source unavailable: "+(e.message || String(e)); }
       } else {
@@ -5828,7 +5829,7 @@ function mountBatchReview(card, caseId, provider) {
       <p class="small">Whole catalog: ${n(c.sources_imported)} imported, ${n(c.sources_failed)} failed, ${n(c.sources_unsupported)} unsupported, ${n(c.sources_not_imported)} not imported. Parse gaps ${n(p.snapshot?.source_parse_gaps)}; parse coverage not recorded ${n(c.parse_coverage_not_recorded)}; undated ${n(c.undated_total)}. These totals remain applicable when sampled source details are omitted.</p>
       <p class="small">Findings included ${n(p.findings_included)} / omitted ${n(p.findings_omitted)}; correlations included ${n(p.correlations_included)} / omitted ${n(p.correlations_omitted)}.</p>
       <p class="small">Distinct stored VT included ${p.vt_recorded === true ? n(p.vt_included) : "not recorded"} / omitted ${p.vt_recorded === true ? n(p.vt_omitted) : "not recorded"} across this plan. Not primary or successful event coverage.</p>${renderStoredVTCoverage({...c,vt_recorded:c.vt_recorded === true && p.vt_recorded === true,vt_included:p.vt_included,vt_omitted:p.vt_omitted})}
-      <p class="small">Synthesis ${n(p.synthesis_state||"not prepared")} · omitted sentences ${n(p.synthesis_omitted_sentences)} · unsynthesized successful batches ${n(p.unsynthesized_batches)}. Reservation: ${p.budget?.synthesis ? "one request + 160000 input bytes" : "disabled"}; output/time remaining and a newly prepared privacy namespace can still prevent synthesis. Omitted, failed or budget-exhausted work is not whole-case completion.</p>`;
+      <p class="small">Privacy omission counts are recorded separately in each packet's coverage, including synthesis; repeated context is not distinct evidence. Actual privacy omissions make input incomplete, not a provider failure.</p><p class="small">Synthesis ${n(p.synthesis_state||"not prepared")} · omitted sentences ${n(p.synthesis_omitted_sentences)} · unsynthesized successful batches ${n(p.unsynthesized_batches)}. Reservation: ${p.budget?.synthesis ? "one request + 160000 input bytes" : "disabled"}; output/time remaining and a newly prepared privacy namespace can still prevent synthesis. Omitted, failed or budget-exhausted work is not whole-case completion.</p>`;
     sync(); schedule();
   };
   const operation = async fn => {if(busy)return;busy=true;sync();message("Working locally or awaiting explicit operation…");try{await fn();if(live())message("Operation completed; inspect recorded state below.");}catch(e){if(live()){invalidate();message(e.message||String(e),true);}}finally{busy=false;if(live())sync();}};
@@ -5878,7 +5879,7 @@ function mountBatchReview(card, caseId, provider) {
         node.querySelector(".batch-coverage pre").textContent=JSON.stringify(packet.coverage ?? "not recorded",null,2);
         let vtCoverage=node.querySelector(".batch-vt-coverage");
         if(!vtCoverage){vtCoverage=document.createElement("div");vtCoverage.className="batch-vt-coverage";node.querySelector(".batch-coverage pre").before(vtCoverage);}
-        vtCoverage.innerHTML=renderStoredVTCoverage(packet.coverage);
+        vtCoverage.innerHTML=renderReviewPrivacyOmissions(packet.coverage)+renderStoredVTCoverage(packet.coverage);
         node.querySelector(".batch-originals").innerHTML=`<p>Original same-case references: ${packet.kind==="event" ? "event membership is primary" : "events are supporting context, not additional primary event coverage"}.</p>`+
           ["event","finding","correlation"].map(kind=>(packet[kind+"_ids"]||[]).map(ref=>externalCitation(kind,ref)).join(" ")).join(" ");
         wireExternalCitations(node.querySelector(".batch-originals"),caseId);
@@ -5890,6 +5891,7 @@ function mountBatchReview(card, caseId, provider) {
             const d=document.createElement("dialog");d.className="external-source-dialog";d.setAttribute("aria-label","Batch packet coverage");
             d.innerHTML='<h2>This packet’s frozen coverage</h2><p class="batch-coverage-id"></p><pre></pre><button type="button" class="secondary">Close</button>';
             d.querySelector(".batch-coverage-id").textContent=`Run ${id}; packet ${packet.seq}; namespace ${packet.namespace}. Not raw-image coverage; do not sum repeated context.`;
+            d.querySelector("pre").insertAdjacentHTML("beforebegin",renderReviewPrivacyOmissions(packet.coverage));
             d.querySelector("pre").textContent=JSON.stringify(packet.coverage,null,2);d.querySelector("button").onclick=()=>d.close();d.addEventListener("close",()=>{d.remove();if(b.isConnected)b.focus({preventScroll:true});},{once:true});document.body.appendChild(d);d.showModal();
           };
         });
@@ -5951,10 +5953,18 @@ function renderReviewClaimGroups(sentences, citation = externalCitation) {
   }).join("") + `</div>`;
 }
 
+// Optional prose metrics remain unknown on historical rows; never coerce null
+// or absent values to a measured zero. Only fixed reasons and counts are shown.
+function renderReviewPrivacyOmissions(c) {
+  const n = key => Number.isSafeInteger(c?.[key]) && c[key] >= 0 ? String(c[key]) : "not recorded";
+  const incomplete = (Number.isSafeInteger(c?.command_lines_omitted) && c.command_lines_omitted > 0) || (Number.isSafeInteger(c?.prose_values_omitted) && c.prose_values_omitted > 0);
+  return `<p class="small review-privacy-omissions">Command lines omitted by privacy guards: ${n("command_lines_omitted")}. Prose values omitted by privacy guards: ${n("prose_values_omitted")}. ${incomplete ? "<strong>Incomplete input:</strong> privacy-omitted context; not a provider failure. " : ""}Privacy guards may omit prohibited bodies or uncertain URL boundaries. Counts are separate, not distinct evidence totals; no omitted text is displayed. A missing metric means not recorded, not zero.</p>`;
+}
+
 function renderCaseReviewSection(rv) {
   const running = rv.run?.state === "running";
   const l = rv.latest;
-  const coverage = (c) => { const n = key => Number.isSafeInteger(c?.[key]) && c[key] >= 0 ? String(c[key]) : "not recorded"; return c ? `<p class="small review-coverage"><strong>Bounded partial selection:</strong> ${n("events_included")} of ${n("events_total")} parsed events included; ${n("events_omitted")} omitted. ${n("findings_included")} of ${n("findings_total")} findings (${n("findings_omitted")} omitted); ${n("correlations_included")} of ${n("correlations_total")} correlations (${n("correlations_omitted")} omitted); ${n("sources_included")} of ${n("sources_total")} source coverage records (${n("sources_omitted")} omitted). ${n("undated_total")} undated events in the case. Missing supporting references: ${n("missing_supporting_refs")}; available supporting events omitted: ${n("supporting_refs_omitted")}; unflagged observations included: ${n("unflagged_included")}; source parse coverage not recorded: ${n("parse_coverage_not_recorded")}. Global source statuses: ${n("sources_imported")} imported, ${n("sources_failed")} parse failures, ${n("sources_unsupported")} unsupported, ${n("sources_not_imported")} supported but not imported. Command lines omitted by the body guard: ${n("command_lines_omitted")}.</p>` : ""; };
+  const coverage = (c) => { const n = key => Number.isSafeInteger(c?.[key]) && c[key] >= 0 ? String(c[key]) : "not recorded"; return c ? `<p class="small review-coverage"><strong>Bounded partial selection:</strong> ${n("events_included")} of ${n("events_total")} parsed events included; ${n("events_omitted")} omitted. ${n("findings_included")} of ${n("findings_total")} findings (${n("findings_omitted")} omitted); ${n("correlations_included")} of ${n("correlations_total")} correlations (${n("correlations_omitted")} omitted); ${n("sources_included")} of ${n("sources_total")} source coverage records (${n("sources_omitted")} omitted). ${n("undated_total")} undated events in the case. Missing supporting references: ${n("missing_supporting_refs")}; available supporting events omitted: ${n("supporting_refs_omitted")}; unflagged observations included: ${n("unflagged_included")}; source parse coverage not recorded: ${n("parse_coverage_not_recorded")}. Global source statuses: ${n("sources_imported")} imported, ${n("sources_failed")} parse failures, ${n("sources_unsupported")} unsupported, ${n("sources_not_imported")} supported but not imported.</p>` : ""; };
   let why = !rv.configured ? "Set up a provider in Settings → Integrations." : !rv.allowed ? "Choose pseudonymized egress for an external destination." : rv.events === 0 ? "No parsed events are available." : running ? "A bounded review is running." : "Inspect a preview before starting.";
   return `<h3>AI Case Review <span class="external-optional">Optional · bounded</span></h3>
     <p class="small"><strong>Optional AI commentary, not a finding or evidence.</strong> A single request reviews selected parsed findings, correlations, supporting events, context and unflagged observations. It never changes findings or severity.</p>
@@ -5981,7 +5991,7 @@ function renderCaseReviewSection(rv) {
     ${l ? `<div class="review-commentary"><p><strong>Optional AI commentary — not evidence or a new finding.</strong></p>
       ${l.stale ? `<p class="field-error-box">Stale: relevant parsed events, correlations, findings, source coverage or stored VirusTotal context changed since this request. This does not measure the age or freshness of the outside opinion.</p>` : ""}
       <p class="small">Privacy preparation at this attempt: ${l.privacy ? `${esc(l.privacy.status)} · ${esc(l.privacy.contract)} · ${esc(l.privacy.payload_bytes)} payload bytes. A local check, not proof of anonymity.` : "not recorded (older result)."}</p>
-      ${coverage(l.coverage)}${renderStoredVTCoverage(l.coverage)}
+      ${coverage(l.coverage)}${renderReviewPrivacyOmissions(l.coverage)}${renderStoredVTCoverage(l.coverage)}
       <p class="small">${esc(l.created_at)} · ${esc(l.destination)} · ${esc(l.model)}${l.prompt_tokens || l.completion_tokens ? ` · ${l.prompt_tokens} tokens in, ${l.completion_tokens} out` : ""}</p>
       ${l.status === "ok" ? renderReviewClaimGroups(l.sentences,(kind,id)=>externalCitation(kind,id,{reviewID:l.id})) : `<p>No usable commentary: ${esc(l.error || "request failed or interrupted")}. The request payload is recorded separately.</p>`}
       <p class="small">${l.rejected || 0} line(s) rejected. Anchoring validation does not prove truth. Read every claim against its references.</p>
@@ -6018,7 +6028,7 @@ function wireCaseReviewSection(content, caseId, rv, say) {
       card.dataset.fingerprint = p.source_fingerprint;
       const box = card.querySelector("#rv-preview-box");
       box.textContent = `Destination: ${p.destination} · Model: ${p.model}\nPayload SHA-256: ${p.sha256}\n\n${p.system}\n\n${p.user}`; box.hidden = false;
-      const plan = card.querySelector("#rv-plan"); plan.innerHTML = '<p>Actual selection and coverage (not exhaustive); stored VT only, no lookup or model call on preview.</p>' + renderStoredVTCoverage(p.coverage) + '<pre class="small"></pre>'; plan.querySelector("pre").textContent = JSON.stringify(p.coverage ?? "not recorded"); plan.hidden = false;
+      const plan = card.querySelector("#rv-plan"); plan.innerHTML = '<p>Actual selection and coverage (not exhaustive); stored VT only, no lookup or model call on preview.</p>' + renderReviewPrivacyOmissions(p.coverage) + renderStoredVTCoverage(p.coverage) + '<pre class="small"></pre>'; plan.querySelector("pre").textContent = JSON.stringify(p.coverage ?? "not recorded"); plan.hidden = false;
       if (ack) ack.checked = false;
       card.querySelector("#rv-why").textContent = "Preview built locally; nothing sent. Starting recomputes and refuses a changed payload.";
       sync();

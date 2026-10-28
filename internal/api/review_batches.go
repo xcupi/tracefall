@@ -194,7 +194,7 @@ func (s *Service) PlanReviewBatches(caseID string, budget BatchBudget) (plan Rev
 					packet.Privacy = pr.Privacy
 					packet.Privacy.PayloadBytes = size
 					packet.Coverage = pr.Coverage
-					if cv := pr.Coverage; cv.EventsOmitted > 0 || cv.FindingsOmitted > 0 || cv.CorrelationsOmitted > 0 || cv.CommandLinesOmitted > 0 || cv.MissingSupportingRefs > 0 || cv.SupportingRefsOmitted > 0 {
+					if reviewCoverageIncomplete(pr.Coverage) {
 						plan.InputIncomplete = true
 					}
 					for _, v := range pr.FrozenVT {
@@ -247,6 +247,13 @@ func (s *Service) PlanReviewBatches(caseID string, budget BatchBudget) (plan Rev
 	keep = true
 	return plan, nil
 }
+
+// reviewCoverageIncomplete classifies actual prepared coverage, not a preflight
+// estimate. An absent historical prose metric is unknown, never a measured zero.
+func reviewCoverageIncomplete(cv narrative.ReviewCoverage) bool {
+	return cv.EventsOmitted > 0 || cv.FindingsOmitted > 0 || cv.CorrelationsOmitted > 0 || cv.CommandLinesOmitted > 0 || (cv.ProseValuesOmitted != nil && *cv.ProseValuesOmitted > 0) || cv.MissingSupportingRefs > 0 || cv.SupportingRefsOmitted > 0
+}
+
 func (s *Service) batchInput(caseID, runID, kind string, offset, size int, names narrative.Names) (narrative.ReviewInput, error) {
 	ctx, cancel := s.reviewPreparationContext()
 	defer cancel()

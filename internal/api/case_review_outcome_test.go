@@ -178,7 +178,7 @@ func TestCaseReviewRevocationWinsValidatedOutcome(t *testing.T) {
 			}
 			b, _ := json.Marshal(status)
 			script := ""
-			for _, name := range []string{"esc", "externalCitation", "renderStoredVTCoverage", "renderReviewClaimGroups", "renderCaseReviewSection"} {
+			for _, name := range []string{"esc", "externalCitation", "renderStoredVTCoverage", "renderReviewPrivacyOmissions", "renderReviewClaimGroups", "renderCaseReviewSection"} {
 				script += extract(name) + "\n"
 			}
 			script += "const assert=require('node:assert/strict');const html=renderCaseReviewSection(" + string(b) + ");assert.match(html,/cancelled/);assert.ok(!html.includes('Stored opinion flagged'));"

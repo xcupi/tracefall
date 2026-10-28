@@ -26,7 +26,7 @@ func TestUI_ReviewVTFrozenCitation(t *testing.T) {
 		}
 		return rest
 	}
-	script := extract("esc") + "\n" + extract("externalCitation") + "\n" + extract("renderStoredVTCoverage") + "\n" + extract("renderStoredVTSource") + "\n" + extract("renderReviewClaimGroups") + "\n" + extract("renderCaseReviewSection") + `
+	script := extract("esc") + "\n" + extract("externalCitation") + "\n" + extract("renderStoredVTCoverage") + "\n" + extract("renderStoredVTSource") + "\n" + extract("renderReviewClaimGroups") + "\n" + extract("renderReviewPrivacyOmissions") + "\n" + extract("renderCaseReviewSection") + `
 const assert=require('node:assert/strict');
 const single=externalCitation('enrichment','original/<id>',{reviewID:'review/full'});
 assert.match(single,/data-source-kind="enrichment"/,'Stored enrichment is an actionable source');

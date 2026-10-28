@@ -197,7 +197,7 @@ func (s *Service) runReviewBatches(ctx context.Context, p ReviewBatchPlan, packe
 				break
 			}
 			p.SynthesisState = "ready"
-			if cv := packet.Coverage; cv.MissingSupportingRefs > 0 || cv.SupportingRefsOmitted > 0 || cv.EventsOmitted > 0 {
+			if reviewCoverageIncomplete(packet.Coverage) {
 				p.InputIncomplete = true
 			}
 			if err = s.store.SaveBatchPacket(p.CaseID, p.ID, packet.Seq, "ready", packet); err != nil {
@@ -208,6 +208,9 @@ func (s *Service) runReviewBatches(ctx context.Context, p ReviewBatchPlan, packe
 			validators = append(validators, validator)
 		}
 		packet := &packets[i]
+		if reviewCoverageIncomplete(packet.Coverage) {
+			p.InputIncomplete = true
+		}
 		if ctx.Err() != nil {
 			state, reason = "cancelled", "cancelled"
 			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
@@ -315,7 +318,7 @@ func (s *Service) runReviewBatches(ctx context.Context, p ReviewBatchPlan, packe
 		}
 	}
 	if state == "succeeded" && (p.InputIncomplete || p.EnabledBatches < p.TotalBatches || p.FindingsOmitted > 0 || p.CorrelationsOmitted > 0 || p.Snapshot.Coverage.SourcesFailed > 0 || p.Snapshot.Coverage.SourcesUnsupported > 0 || p.Snapshot.Coverage.SourcesNotImported > 0 || p.Snapshot.Coverage.ParseCoverageNotRecorded > 0 || p.Snapshot.SourceParseGaps > 0) {
-		state, reason = "partial", "budget/claim omissions or source parse gaps; not whole-case review"
+		state, reason = "partial", "budget/claim/privacy omissions or source parse gaps; not whole-case review"
 	}
 	if p.Budget.Synthesis {
 		p.SynthesisState = "omitted"
