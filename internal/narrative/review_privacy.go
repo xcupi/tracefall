@@ -13,7 +13,7 @@ import (
 // rather than silently changing Summary's allowed text or output contract.
 // ReviewPrivacyContract versions the preparation contract, not case egress.
 // Bumping it invalidates preview acknowledgements even if the text is unchanged.
-const ReviewPrivacyContract = "parsed-review-privacy-v3"
+const ReviewPrivacyContract = "parsed-review-privacy-v4"
 
 // ReviewPrivacy describes a local check. It never grants transmission permission
 // and is intentionally kept outside the model's system/user evidence packet.
@@ -67,6 +67,12 @@ func reviewURL(raw string) (string, bool) {
 }
 
 func redactReviewValue(value string) string {
+	// This gate covers ALL copied prose, not only event CommandLine. Rules
+	// embed commands in descriptions, and ambiguity must be rejected before
+	// any redactor can hide it or Apply can learn a reversible entity.
+	if !reviewCommandURLsCertain(value) {
+		return "omitted_ambiguous_url"
+	}
 	// Query strings and fragments can hold credentials under arbitrary key names.
 	// Remove URLs' sensitive components before assignment masking can consume a
 	// closing quote or a following URL, and before pseudonymization/truncation.

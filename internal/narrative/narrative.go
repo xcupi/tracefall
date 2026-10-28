@@ -92,6 +92,8 @@ type Prepared struct {
 	leaks map[string]bool
 	// reviewRefs is populated only by the separately bounded review path.
 	reviewRefs map[string]Cite
+	// Counts copied values omitted by the review URL gate, never raw commands.
+	reviewProseValuesOmitted int
 }
 
 // ErrLeak means the text that was about to be sent still held something
@@ -318,6 +320,9 @@ func build(in Input, names Names) (*Prepared, error) {
 // and checked.
 func (pr *Prepared) text(s string, max int) string {
 	if pr.reviewRefs != nil {
+		if !reviewCommandURLsCertain(s) {
+			pr.reviewProseValuesOmitted++
+		}
 		s = redactReviewValue(s)
 	}
 	if pr.reviewRefs != nil && reviewProhibitedBody.MatchString(s) {

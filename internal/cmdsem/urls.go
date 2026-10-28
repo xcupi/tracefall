@@ -67,6 +67,12 @@ func mapURLs(text string, replace func(string) string) (string, bool) {
 		for end < len(text) {
 			c := text[end]
 			if c <= ' ' || c == '"' || c == '>' || (c == '\'' && singleQuoted) {
+				// Escaped whitespace may continue the URL in common command
+				// grammars. Do not certify a truncated prefix as the whole URL.
+				// Even homogeneous escape runs retain the ordinary boundary.
+				if c <= ' ' && urlQuoteEscaped(text, end) {
+					certain = false
+				}
 				break
 			}
 			if c == '<' {

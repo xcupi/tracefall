@@ -75,6 +75,10 @@ type ReviewCoverage struct {
 	SupportingRefsOmitted    int    `json:"supporting_refs_omitted"`
 	UnflaggedIncluded        int    `json:"unflagged_included"`
 	ParseCoverageNotRecorded int    `json:"parse_coverage_not_recorded"`
+
+	// Counts copied prose values omitted for ambiguous URLs, not whole findings
+	// or event commands. Nil historically: absence is not a measured zero.
+	ProseValuesOmitted *int `json:"prose_values_omitted,omitempty"`
 }
 
 type ReviewPrepared struct {
@@ -166,6 +170,7 @@ func buildReview(in ReviewInput, names Names) (*ReviewPrepared, error) {
 	result := &ReviewPrepared{Prepared: p}
 	cv := &result.Coverage
 	*cv = ReviewCoverage{VTRecorded: true, Scope: "bounded_partial_parsed_case", EventsTotal: len(in.Events), FindingsTotal: len(in.Findings), CorrelationsTotal: len(in.Correlations), SourcesTotal: len(in.Sources)}
+	cv.ProseValuesOmitted = &p.reviewProseValuesOmitted
 	for _, s := range names.Hosts {
 		p.p.Learn(pseudonym.Host, s)
 	}
@@ -480,6 +485,10 @@ End each item in actual supplied references [F1, E1], [C1] or [K1]. Use only iss
 		p.System += "\nV references are stored external opinions, not primary forensic evidence or compromise proof. Preserve lookup time and verdict denominator. Unknown time stays unknown. Not_found means no matching accessible record at lookup time, not safety or never-submission. Zero detections is not safety. This is not a new/current check; never promote reputation to evidence."
 	}
 	appendReviewVT(result, in, aliases, &b)
+	// Emit after every copied value has passed the prose gate. Separate from
+	// omitted event commands: a command and its derived description are not
+	// two command lines. Count afresh for each convergent preparation pass.
+	fmt.Fprintf(&b, "K1 prose_context_totals | prose_values_omitted=%d\n", p.reviewProseValuesOmitted)
 	if len(p.leaks) > 0 {
 		return nil, ErrLeak
 	}

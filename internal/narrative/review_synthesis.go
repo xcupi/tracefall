@@ -24,6 +24,7 @@ func PrepareReviewSynthesis(in ReviewInput, commentary []Sentence) (*ReviewPrepa
 		p.System += "\nSYNTHESIS: compare only the validated commentary with the primary excerpts. Commentary is not evidence. Preserve each item's kind, disagreements, uncertainty and original primary citations. Never promote a hypothesis or possible_conflict into an established observation; unclassified is an abstention, not an observation. Do not automatically reconcile conflicting detector claims. Do not infer agreement or identity from prior packet-local pseudonyms. Do not claim global, raw-image, or whole-case coverage."
 		p.User += "\nVALIDATED COMMENTARY (not primary evidence):\n"
 		omitted := 0
+		primaryProseOmitted := p.reviewProseValuesOmitted
 		var omittedIndices []int
 		for index, sentence := range commentary {
 			var refs []string
@@ -55,6 +56,7 @@ func PrepareReviewSynthesis(in ReviewInput, commentary []Sentence) (*ReviewPrepa
 				continue
 			}
 			sort.Strings(refs)
+			beforeProse := p.reviewProseValuesOmitted
 			text := p.text(sentence.Text, DefaultLimits.MaxSentenceRunes)
 			kind := sentence.Kind
 			if !knownReviewKind(kind) {
@@ -64,12 +66,18 @@ func PrepareReviewSynthesis(in ReviewInput, commentary []Sentence) (*ReviewPrepa
 			line := fmt.Sprintf("commentary_only | kind=%s | %s [%s]\n", kind, text, strings.Join(refs, ", "))
 			// Reserve room for catalog/omission counts after preparation.
 			if len(p.System)+len(p.User)+len(line) > ReviewMaxBytes-4096 {
+				p.reviewProseValuesOmitted = beforeProse
 				omitted++
 				omittedIndices = append(omittedIndices, index)
 				continue
 			}
 			p.User += line
 		}
+		// PrepareReview emitted primary-only totals before commentary existed.
+		// Keep the packet and optional recorded coverage in agreement.
+		p.User = strings.Replace(p.User,
+			fmt.Sprintf("K1 prose_context_totals | prose_values_omitted=%d\n", primaryProseOmitted),
+			fmt.Sprintf("K1 prose_context_totals | prose_values_omitted=%d\n", p.reviewProseValuesOmitted), 1)
 		if len(p.leaks) > 0 {
 			return nil, len(commentary), ErrLeak
 		}
