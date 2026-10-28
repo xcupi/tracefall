@@ -15,7 +15,7 @@ func TestReviewRegsvrIndependentDLLTarget(t *testing.T) {
 		t.Run(tt.cmd, func(t *testing.T) {
 			fs := (newScheduledTask{}).Evaluate([]model.Event{taskEvent("e", "ActionReview", "alice", tt.cmd, "regsvr32.exe")})
 			if tt.severity == "" {
-				if len(fs) != 0 {
+				if !contextOnlyTaskFindings(fs) {
 					t.Fatalf("data activated: %+v", fs)
 				}
 				return

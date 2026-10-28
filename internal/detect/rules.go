@@ -120,7 +120,7 @@ func (r powershellEncodedCommand) Evaluate(events []model.Event) []model.Finding
 		if !procclass.IsPowerShell(e.ProcessName) {
 			continue
 		}
-		indicators := powerShellRuleIndicators(e.CommandLine, e.EventType == model.EventPowerShellScript)
+		indicators := conservativePowerShellIndicators(e.CommandLine, e.EventType == model.EventPowerShellScript)
 		if len(indicators) == 0 {
 			continue
 		}
@@ -128,7 +128,7 @@ func (r powershellEncodedCommand) Evaluate(events []model.Event) []model.Finding
 	}
 
 	for _, e := range byType(events, model.EventPowerShellScript) {
-		indicators := powerShellRuleIndicators(e.CommandLine, e.EventType == model.EventPowerShellScript)
+		indicators := conservativePowerShellIndicators(e.CommandLine, e.EventType == model.EventPowerShellScript)
 		if len(indicators) == 0 {
 			continue
 		}
@@ -139,9 +139,9 @@ func (r powershellEncodedCommand) Evaluate(events []model.Event) []model.Finding
 }
 
 func (r powershellEncodedCommand) finding(e model.Event, cmd string, indicators []string) model.Finding {
-	title := "PowerShell execution with suspicious command indicators"
+	title := "PowerShell command/script review"
 	desc := fmt.Sprintf(
-		"PowerShell activity on host %s (user %s) at %s matched %d invocation indicator(s): %s. The record does not establish successful execution, malicious intent or authorization. Command/script: %s",
+		"PowerShell activity on host %s (user %s) at %s matched %d review indicator(s): %s. The record does not establish successful execution, malicious intent or authorization. Command/script: %s",
 		e.Host, orDash(e.User), fmtTime(e.Timestamp), len(indicators), strings.Join(indicators, ", "), truncate(cmdsem.Redact(cmd), 300))
 	severity, confidence := powerShellEvidenceLevel(indicators)
 	return newFinding(e.CaseID, r.ID(), title, severity, confidence, desc,
@@ -202,7 +202,12 @@ func (r newScheduledTask) Evaluate(events []model.Event) []model.Finding {
 	for _, e := range byType(events, model.EventScheduledTaskCreate) {
 		severity, confidence, indicators := taskActionEvidence(e)
 		if len(indicators) == 0 {
-			continue // Configuration remains on the timeline, not one finding per task.
+			severity, confidence = "low", "low"
+			reason := "configuration observation only; action interpretation uncertain or routine"
+			if e.CommandLine == "" || e.ProcessName == "" {
+				reason = "configuration observation only; normalized action missing"
+			}
+			indicators = []string{reason}
 		}
 		title := fmt.Sprintf("Scheduled Task action review: %s", orDash(e.Extra["task_name"]))
 		when := "registration date is not recorded in the task file"
@@ -245,10 +250,11 @@ func (r suspiciousProcessChain) Evaluate(events []model.Event) []model.Finding {
 		// It establishes neither payload staging nor an authorization verdict.
 		self := e.ParentProcessName == e.ProcessName || (procclass.IsPowerShell(e.ParentProcessName) && procclass.IsPowerShell(e.ProcessName))
 		strong := self && strongNestedInvocation(e)
+		severity, confidence := model.SeverityHigh, model.ConfidenceMedium
 		if self && !strong {
-			continue
+			severity, confidence = model.SeverityLow, model.ConfidenceLow
 		}
-		childSuspicious := strong || procclass.HasSuspiciousPath(e.ProcessPath) || procclass.IsScriptHost(e.ProcessName)
+		childSuspicious := self || strong || procclass.HasSuspiciousPath(e.ProcessPath) || procclass.IsScriptHost(e.ProcessName)
 		if !childSuspicious {
 			continue
 		}
@@ -258,9 +264,9 @@ func (r suspiciousProcessChain) Evaluate(events []model.Event) []model.Finding {
 				"the relationship does not establish successful payload execution, malicious intent or authorization.",
 			e.ParentProcessName, e.ProcessName, e.PID, orDash(e.ProcessPath), fmtTime(e.Timestamp), e.Host)
 		if strong {
-			desc += " Self-nesting was selected only because the child command also has encoded/hidden or dynamic/download/decode invocation evidence."
+			desc += " Self-nesting priority was raised because the child command also has encoded/hidden or dynamic/download/decode invocation evidence."
 		}
-		findings = append(findings, newFinding(e.CaseID, r.ID(), title, model.SeverityHigh, model.ConfidenceMedium,
+		findings = append(findings, newFinding(e.CaseID, r.ID(), title, severity, confidence,
 			desc, []string{"T1059", "T1059.001"}, []model.Event{e}))
 	}
 	return orderInvocationFindings(findings)

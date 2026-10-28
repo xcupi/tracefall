@@ -286,6 +286,8 @@ var redactions = []struct {
 	re   *regexp.Regexp
 	repl string
 }{
+	// Only the authority component: ordinary emails and path/query @ remain.
+	{ci(`(https?://)[^\s/\x3f#"'<>]+@`), `${1}<redacted>@`},
 	// net user NAME PASSWORD [/add ...]
 	{ci(`(\bnet1?(?:\.exe)?\s+user\s+(?:"[^"]+"|[^/\s]+)\s+)("[^"]+"|[^/\s]+)`), `${1}<redacted>`},
 	// echo "user:secret" | chpasswd

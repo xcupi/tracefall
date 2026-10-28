@@ -18,8 +18,10 @@ const (
 	psDecode    = "Base64 conversion with dynamic expression invocation"
 )
 
-var psExecutable = regexp.MustCompile(`(?i)^\s*(?:"(?:[^"\r\n]*\\)?(?:powershell|pwsh)(?:\.exe)?"|(?:[^\s"]*\\)?(?:powershell|pwsh)(?:\.exe)?)(?:\s+|$)`)
+var psExecutable = regexp.MustCompile(`(?i)^\s*(?:"(?:[^"\r\n]*[\\/])?(?:powershell|pwsh)(?:\.exe)?"|(?:[^\s"]*[\\/])?(?:powershell|pwsh)(?:\.exe)?)(?:\s+|$)`)
+var nestedPowerShellHost = regexp.MustCompile(`(?im)(?:^|[;|&=({])\s*(?:[^\s"']*[\\/])?(?:powershell|pwsh)(?:\.exe)?(?:\s+|$)`)
 var optionToken = regexp.MustCompile(`"[^"\r\n]*"|'[^'\r\n]*'|[^\s]+`)
+var quotedPowerShellCall = regexp.MustCompile(`(?m)(?:^|[;|({])\s*&\s+`)
 var dynamicInvocation = regexp.MustCompile(`(?im)(?:^|[;|&=({])\s*(?:iex|invoke-expression)(?:\s|\(|$)`)
 var downloadInvocation = regexp.MustCompile(`(?i)\.\s*(?:downloadstring|downloadfile)\s*\(`)
 var webRequestInvocation = regexp.MustCompile(`(?im)(?:^|[;|&=({])\s*(?:invoke-webrequest|iwr|invoke-restmethod|irm)(?:\s|\(|$)`)
@@ -35,13 +37,28 @@ func powerShellRuleIndicators(cmd string, script bool) []string {
 }
 
 func powerShellInvocationEvidence(cmd string, script bool) ([]string, string) {
+	labels, target, _ := classifiedPowerShellEvidence(cmd, script)
+	return labels, target
+}
+
+type invocationState uint8
+
+const (
+	invocationContext   invocationState = iota // known literal/argument or routine context
+	invocationUncertain                        // unsupported grammar; never permission to drop baseline lead
+	invocationSelected                         // affirmative labels, independently calibrated by evidence level
+)
+
+// Classification is independent of selection: unsupported syntax is not benign.
+func classifiedPowerShellEvidence(cmd string, script bool) ([]string, string, invocationState) {
 	var labels []string
+	uncertain := false
 	target := ""
 	body := cmd
 	if !script {
 		loc := psExecutable.FindStringIndex(cmd)
 		if loc == nil {
-			return nil, ""
+			return nil, "", invocationUncertain
 		}
 		rest := cmd[loc[1]:]
 		body = ""
@@ -54,43 +71,82 @@ func powerShellInvocationEvidence(cmd string, script bool) ([]string, string) {
 				n := tokens[i+1]
 				value = strings.ToLower(strings.Trim(rest[n[0]:n[1]], `"'`))
 			}
+			inline := false
+			colon := strings.IndexByte(token, ':')
+			if colon > 0 && strings.HasPrefix(token, "-") {
+				value, token, inline = token[colon+1:], token[:colon], true
+			}
+			token = canonicalPowerShellOption(token)
 			// Recognized host value options consume exactly one token. Do not
 			// guess unknown abbreviations or consume a following switch as a value.
 			if powerShellHostValueOption(token, cmd) {
 				if value == "" || strings.HasPrefix(value, "-") {
+					uncertain = true
 					break
 				}
-				i++
+				if !inline {
+					i++
+				}
 				continue
 			}
 			switch token {
 			case "-nop", "-noprofile":
 				labels = append(labels, psNoProfile)
 			case "-ep", "-exec", "-executionpolicy":
+				if value == "" || strings.HasPrefix(value, "-") {
+					uncertain = true
+					i = len(tokens)
+					break
+				}
 				if value == "bypass" {
 					labels = append(labels, psBypass)
 				}
-				i++
+				if !inline {
+					i++
+				}
 			case "-w", "-windowstyle":
+				if value == "" || strings.HasPrefix(value, "-") {
+					uncertain = true
+					i = len(tokens)
+					break
+				}
 				if value == "hidden" || value == "1" {
 					labels = append(labels, psHidden)
 				}
-				i++
+				if !inline {
+					i++
+				}
 			case "-e", "-ec", "-enc", "-encodedcommand":
 				if value == "" || strings.HasPrefix(value, "-") {
+					uncertain = true
 					i = len(tokens)
 					break
 				}
 				labels = append(labels, psEncoded)
-				i++ // One opaque payload; subsequent tokens remain host options.
+				if !inline {
+					i++
+				} // One opaque payload; subsequent tokens remain host options.
 			case "-f", "-file":
+				if value == "" || strings.HasPrefix(value, "-") {
+					uncertain = true
+					i = len(tokens)
+					break
+				}
 				if value != "" && !strings.HasPrefix(value, "-") {
-					n := tokens[i+1]
-					target = strings.Trim(rest[n[0]:n[1]], `"'`)
+					if inline {
+						target = strings.Trim(rest[at[0]+colon+1:at[1]], `"'`)
+					} else {
+						n := tokens[i+1]
+						target = strings.Trim(rest[n[0]:n[1]], `"'`)
+					}
 				}
 				i = len(tokens) // Remaining tokens belong to the script.
 			case "-c", "-command":
-				body = strings.TrimSpace(rest[at[1]:])
+				bodyStart := at[1]
+				if inline {
+					bodyStart = at[0] + colon + 1
+				}
+				body = strings.TrimSpace(rest[bodyStart:])
 				if len(body) >= 2 && ((body[0] == '"' && body[len(body)-1] == '"') || (body[0] == '\'' && body[len(body)-1] == '\'')) {
 					body = body[1 : len(body)-1]
 				}
@@ -98,6 +154,7 @@ func powerShellInvocationEvidence(cmd string, script bool) ([]string, string) {
 			case "-nologo", "-nol", "-noexit", "-noe", "-noninteractive", "-noni", "-sta", "-mta", "-interactive", "-i", "-login", "-l", "-noprofileloadtime", "-sshservermode", "-sshs":
 				// Supported valueless host switches.
 			default:
+				uncertain = strings.HasPrefix(token, "-")
 				if !strings.HasPrefix(token, "-") {
 					if strings.HasSuffix(token, ".ps1") {
 						target = strings.Trim(rest[at[0]:at[1]], `"'`)
@@ -109,7 +166,27 @@ func powerShellInvocationEvidence(cmd string, script bool) ([]string, string) {
 			}
 		}
 	}
-	code := withoutPowerShellLiterals(body)
+	code, incomplete := maskPowerShellLiterals(body)
+	uncertain = uncertain || incomplete || strings.Contains(body, "@'") || strings.Contains(body, `@"`) || quotedPowerShellCall.MatchString(code)
+	if script {
+		// Masked text supplies positions; original bytes preserve host payload and
+		// -Command quoting. One nested-host level only, never recursive evaluation.
+		for _, loc := range nestedPowerShellHost.FindAllStringIndex(code, -1) {
+			start := loc[0]
+			for start < loc[1] && strings.ContainsRune(" \t\r\n;|&=({", rune(code[start])) {
+				start++
+			}
+			end := start
+			for end < len(code) && !strings.ContainsRune(";|", rune(code[end])) && code[end] != 10 && code[end] != 13 {
+				end++
+			}
+			nested, _ := powerShellInvocationEvidence(body[start:end], false)
+			labels = append(labels, nested...)
+		}
+	}
+	if target == "" {
+		target = commandPositionTarget(body, true)
+	}
 	dynamic := dynamicInvocation.MatchString(code)
 	if downloadInvocation.MatchString(code) || (dynamic && webRequestInvocation.MatchString(code)) {
 		labels = append(labels, psDownload)
@@ -122,7 +199,50 @@ func powerShellInvocationEvidence(cmd string, script bool) ([]string, string) {
 	if dynamic && decodeInvocation.MatchString(code) {
 		labels = append(labels, psDecode)
 	}
-	return labels, target
+	if len(labels) == 0 && len(indicatorsIn(code)) != 0 {
+		uncertain = true
+	}
+	state := invocationContext
+	if uncertain {
+		state = invocationUncertain
+	}
+	if len(labels) != 0 && !uncertain {
+		state = invocationSelected
+	}
+	return labels, target, state
+}
+
+// Keep baseline-eligible weak/unsupported text visible without treating keyword
+// matches as invocation proof. Known quoted/comment data and -File arguments
+// remain non-selected when the supported lexical form establishes that boundary.
+func conservativePowerShellIndicators(cmd string, script bool) []string {
+	labels, _, state := classifiedPowerShellEvidence(cmd, script)
+	if state == invocationUncertain && len(indicatorsIn(cmd)) != 0 {
+		labels = append(labels, "baseline keyword lead; invocation interpretation uncertain (not execution evidence)")
+	}
+	return labels
+}
+
+// Unique prefixes only for the supported host parameters; explicit historical
+// aliases remain in the switch. Do not infer arbitrary abbreviated options.
+func canonicalPowerShellOption(s string) string {
+	for _, full := range []string{"-encodedcommand", "-windowstyle", "-executionpolicy", "-command"} {
+		min := len(full)
+		switch full {
+		case "-encodedcommand":
+			min = len("-encodedc")
+		case "-windowstyle":
+			min = len("-wi")
+		case "-executionpolicy":
+			min = len("-ex")
+		case "-command":
+			min = len("-com")
+		}
+		if len(s) >= min && strings.HasPrefix(full, s) {
+			return full
+		}
+	}
+	return s
 }
 
 // Explicit host options from about_PowerShell_exe/about_Pwsh; this is not
@@ -147,6 +267,11 @@ func powerShellHostValueOption(option, cmd string) bool {
 // Blank quoted data and comments before looking for invocation constructs.
 // Delimiters are kept apart so removing a literal cannot join two identifiers.
 func withoutPowerShellLiterals(s string) string {
+	code, _ := maskPowerShellLiterals(s)
+	return code
+}
+
+func maskPowerShellLiterals(s string) (string, bool) {
 	b := []byte(s)
 	var quote byte
 	lineComment, blockComment := false, false
@@ -220,7 +345,7 @@ func withoutPowerShellLiterals(s string) string {
 		// lexical state: masked escapes must not manufacture token boundaries.
 		tokenBoundary = strings.ContainsRune(" 	\r\n;|&=(){},", rune(ch))
 	}
-	return string(b)
+	return string(b), quote != 0 || blockComment
 }
 
 var cmdCommand = regexp.MustCompile(`(?i)^\s*(?:"(?:[^"\r\n]*\\)?cmd(?:\.exe)?"|(?:[^\s"]*\\)?cmd(?:\.exe)?)\s+(?:/d\s+)?/[ck]\s+(.+)$`)
@@ -263,6 +388,11 @@ func taskActionEvidence(e model.Event) (string, string, []string) {
 	}
 	labels := interpreterInvocationIndicators(e)
 	targets := taskLoaderTargets(e.ProcessName, tokens[1:])
+	if e.ProcessName == "cmd.exe" {
+		if m := cmdCommand.FindStringSubmatch(e.CommandLine); m != nil {
+			targets = []string{commandPositionTarget(m[1], false)}
+		}
+	}
 	if procclass.IsPowerShell(e.ProcessName) {
 		_, target := powerShellInvocationEvidence(e.CommandLine, false)
 		targets = []string{target}
@@ -286,10 +416,23 @@ func taskActionEvidence(e model.Event) (string, string, []string) {
 	if remote {
 		labels = append(labels, "remote script/loader action")
 	}
+	inline := false
+	if e.ProcessName == "mshta.exe" || e.ProcessName == "rundll32.exe" {
+		for _, target := range targets {
+			t := strings.ToLower(target)
+			inline = inline || strings.HasPrefix(t, "javascript:") || strings.HasPrefix(t, "vbscript:")
+		}
+		if inline {
+			labels = append(labels, "inline active-code loader action (outcome unknown)")
+		}
+	}
 	if len(labels) == 0 {
 		return "", "", nil
 	}
 	severity, confidence := powerShellEvidenceLevel(labels)
+	if inline {
+		severity, confidence = "medium", "medium"
+	}
 	if writable {
 		severity, confidence = "medium", "low"
 	}
@@ -366,8 +509,40 @@ func taskLoaderTargets(proc string, args []string) []string {
 	return nil
 }
 
+// Bounded first-command selection only; subsequent arguments are never targets.
+// CMD's outer /c quoting and PowerShell's explicit call operator are supported.
+func commandPositionTarget(body string, ps bool) string {
+	s := strings.TrimSpace(body)
+	if !ps && len(s) > 1 && s[0] == '"' && s[len(s)-1] == '"' {
+		s = strings.TrimSpace(s[1 : len(s)-1])
+	}
+	call := ps && strings.HasPrefix(s, "&")
+	if call {
+		s = strings.TrimSpace(s[1:])
+	}
+	tokens := optionToken.FindAllString(s, 1)
+	if len(tokens) == 0 {
+		return ""
+	}
+	token := tokens[0]
+	if ps && !call && (token[0] == '\'' || token[0] == '"') {
+		return ""
+	}
+	target := strings.Trim(token, `"'`)
+	lower := strings.ToLower(target)
+	for _, ext := range []string{".ps1", ".bat", ".cmd", ".exe", ".com"} {
+		if strings.HasSuffix(lower, ext) {
+			return target
+		}
+	}
+	return ""
+}
+
 func taskWritableTarget(path string) bool {
 	p := strings.ToLower(path)
+	if strings.HasPrefix(p, "javascript:") || strings.HasPrefix(p, "vbscript:") {
+		return false
+	}
 	for _, marker := range []string{`\appdata\`, `\temp\`, `\users\public\`, `\downloads\`} {
 		if strings.Contains(p, marker) {
 			return true

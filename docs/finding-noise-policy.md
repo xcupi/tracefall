@@ -1,159 +1,138 @@
-# Invocation-evidence finding selection
+# Conservative invocation finding priority
 
-This policy applies only to `suspicious-process-chain`, `new-scheduled-task`
-and `powershell-encoded-command`. It changes lead selection and priority, not
-parsing, event retention, correlation identity or analyst adjudication.
+Applies only to `suspicious-process-chain`, `new-scheduled-task` and
+`powershell-encoded-command`. Changes priority and derived descriptions, not
+parsing, raw event retention, correlation identity or analyst adjudication.
 
-## Recorded parent relationships
+## Classification contract
 
-CMD self-nesting and nesting within the PowerShell host family are not selected
-by ancestry alone, even when the child interpreter path is writable. They are
-not classified as benign or authorized either. A self-nested child remains a
-high/medium review lead when its command supplies independent encoded + hidden,
-or dynamic expression + download/Base64-conversion invocation evidence.
+A bounded lexical selector is not an interpreter. Failure to recognize a form
+is **uncertainty, not proof of benignness**. The selector distinguishes:
 
-The recognized CMD wrapper is a direct `/c` or `/k` PowerShell invocation, with
-optional `/d`. Other distinct-child gates are unchanged. Descriptions state a
-recorded parent relationship and do not assert payload success or actor intent.
-This rule retains fixed high severity / medium confidence for selected leads.
+1. **Selected evidence:** affirmative supported invocation/target labels, whose
+   priority is calibrated independently below.
+2. **Known context:** supported literal/comment/script-argument boundaries or
+   routine configuration. Task observations remain low/low findings; known
+   PowerShell quoted data/comments and `-File` arguments do not by themselves
+   select that rule.
+3. **Uncertain:** unsupported syntax, missing host-option values, mismatching
+   recorded invocation identity, incomplete lexical quoting/comments, here-string
+   forms or indirect/call-operator forms. If the original baseline PowerShell
+   keyword predicate matched, preserve a low/low keyword lead with an explicit
+   uncertainty reason. Independently recognized stronger indicators retain their
+   priority; uncertainty never upgrades a keyword to execution evidence.
 
-## Scheduled task configuration
+This is the authorized conservative redesign, replacing the earlier drop-on-no-
+selector policy. More low-priority context is intentional, not evidence that
+those commands were malicious. No-profile/bypass combinations, repetition and
+Base64 conversion alone are not independent hostile evidence. No baseline
+keyword and no supported positive behavior means no new PowerShell finding.
+An unquoted search keyword can conservatively remain low/low; no claim of
+execution is made. Known quoted search data and comments remain negative controls.
 
-A task definition is observed configuration, not proof of actor creation,
-execution or successful malicious persistence. Its registration date is
-**author-recorded**, not independently verified. Unknown dates remain unknown.
+## Decision matrix
 
-Routine configuration stays on the timeline without a per-task finding. An
-interpreter name, a task namespace, a system directory, or ProgramData alone
-neither establishes hostility nor supplies an allowlist. Selection considers
-the normalized command action, requiring agreement with its process identity:
-
-| Action evidence | Severity / confidence |
+| Evidence | Severity / confidence |
 | --- | --- |
-| No-profile / execution-policy bypass only | low / low |
-| Encoded, hidden, direct download or dynamic-expression invocation | medium / medium |
-| Temp/AppData/Public/Downloads action target alone | medium / low |
-| Hidden + writable action target | high / medium |
-| Encoded + hidden; dynamic expression + download/decode | high / medium |
-| Remote script/loader action | high / medium |
+| Interpreter self-nesting alone (including missing command) | low / low |
+| Task configuration, routine/unknown/missing normalized action | low / low |
+| No-profile/bypass alone; uncertain baseline keyword lead | low / low |
+| Known encoded payload, hidden option, download/dynamic invocation | medium / medium |
+| Task mshta/rundll32 `javascript:` or `vbscript:` action target | medium / medium |
+| Task Temp/AppData/Public/Downloads executed action target alone | medium / low |
+| Encoded + hidden; dynamic + download/Base64 conversion | high / medium |
+| Task hidden + writable target; remote supported loader target | high / medium |
+| Existing distinct-child script-host/non-standard-path ancestry gate | high / medium |
 
-Remote target selection reads only executable-specific loader positions:
-WSH's first script after supported switches (UNC paths, not HTTP URLs), mshta's
-first HTA target, rundll32's first DLL/entry-point token, and regsvr32's DLL plus
-its separately unquoted `/i:` target **only with scrobj.dll**. An install argument
-never replaces independent DLL-path evidence; either target can select a lead.
-URLs/UNC paths in subsequent script/data
-arguments do not select a lead. Unknown switches stop target selection rather
-than licensing a search through arbitrary arguments. The same selected target
-supplies writable-path evidence: a stock-directory WSH wrapper around a Temp or
-AppData script is medium/low, not automatically high. PowerShell `-File` and
-implicit `.ps1` targets share the host-option scan; command text and arguments
-after the first script target are not additional executable targets.
-Missing, COM-only or otherwise unsupported normalized actions are retained as
-evidence without a finding, not certified safe. XML action parsing is unchanged.
+A task definition is an observed configuration, not proof of actor creation,
+execution or malicious persistence. Task-file registration dates are author-
+recorded, not independently verified. Missing normalized action is named as
+missing; neither target nor intent is invented. A task name, system directory or
+ProgramData neither proves hostility nor grants an allowlist.
 
-The finding/catalog title is now **Scheduled Task action review**. Its rule ID
-and ATT&CK mapping remain unchanged.
+CMD→CMD is retained at low/low without stronger evidence. PowerShell-family
+self-nesting also retains low/low. This family treatment can add leads compared
+with the frozen baseline; it must not be described as merely retaining all old
+PowerShell→PowerShell results. Strong nested invocation raises priority, not
+proof of outcome. Existing distinct-child gates remain unchanged.
 
-## PowerShell invocation indicators
+## Supported forms and boundaries
 
-Process records require both a PowerShell process identity and a matching
-recorded executable invocation. PowerShell script-block events carry their own
-artifact context. Options are matched as launch tokens, before command/script
-arguments; `-encoding` is not `-enc`. Supported encoded forms are `-e`, `-ec`,
-`-enc`, and `-EncodedCommand`. Hidden window forms include `-w hidden`, `-w 1`,
-and `-WindowStyle hidden`. Recognized host value options (input/output format,
-configuration, encoded arguments, Windows PowerShell console/version, and pwsh
-working directory/settings/pipe options) consume one value; documented explicit
-aliases are enumerated, not guessed by arbitrary prefix matching. Missing
-values or unknown switches do not license scanning arbitrary words as code.
-An encoded command consumes one opaque payload token, then host-option scanning
-continues: hidden + encoded priority does not depend on flag order. Payload
-validity, decoding and successful native execution are not established.
+- PowerShell host identity accepts bare names and quoted/unquoted paths using
+  backslash or forward slash. Launch options stop at `-File`/implicit script
+  arguments or `-Command` text; data arguments are not host switches.
+- Encoded aliases `-e`, `-ec`, `-enc`, `-EncodedCommand`, plus unique
+  `-encodedc...` prefixes; window `-w`/`-wi...`; policy `-ep`/`-ex...`; command
+  `-c`/`-com...` are recognized. These are bounded explicit parameter families,
+  not arbitrary prefix guessing. Colon-value forms are recognized. An encoded
+  payload remains opaque; flag order does not create independent corroboration.
+- Recognized host metadata options consume a value. Unknown switches/missing
+  values stop scanning, preserving uncertainty rather than scanning their data.
+- Script-block records recognize one nested unquoted PowerShell host at a
+  lexical command position. Quoted/commented host names and search arguments
+  are not nested launches. This supported behavior can add previously unselected
+  script leads; it is not advertised as baseline parity.
+- Task action and normalized process identity must agree for positive target
+  evidence. WSH selects its first script after supported switches; mshta and
+  rundll32 select their first loader target. Their inline active-code schemes
+  are affirmative medium/medium leads, not just fallback. Subsequent literal
+  arguments do not become inline actions.
+- Regsvr32's DLL is independent of its `/i:` argument; the install target is
+  assessed as a loader target only with scrobj.dll. URL/UNC data supplied to an
+  unrelated DLL does not earn remote-loader priority.
+- Task `cmd /c` or `/k` (optional `/d`) supports one direct command position,
+  including the outer quoting form. PowerShell `-Command path.ps1` and
+  `-c "& 'path.ps1'"` select the first script target. `Write-Output path.ps1`
+  and later script arguments do not become executable targets.
+- Literal/comment masking preserves token boundaries and backtick escapes.
+  `foo#bar`/`foo<#bar#>` are not comments. Here-strings and incomplete lexical
+  forms are not certified data by a failed selector; baseline keyword leads
+  remain uncertain.
 
-The selector blanks quoted literal data and line/block comments before matching
-invocation constructs. Outside quotes, a backtick escapes the next character;
-escaped hashes/quotes are not comment/string openers and escaped semicolons are
-not statement boundaries. Comment openers must begin at a token boundary:
-`foo#bar` and `foo<#bar#>` are literal non-comment tokens. Standalone line/block
-comments and quoted data remain masked. It does not interpret
-the script. A search for the words
-IEX, DownloadString or encoded options is not itself execution of those forms.
-Base64 conversion, WebClient construction and web API requests alone are not
-selected. A DownloadString/DownloadFile method invocation remains a lead; a web
-request cmdlet additionally requires a dynamic-expression invocation.
+No command, script, decoder or payload is executed by these selectors or tests.
+Separate constructs in one script are not proof of executed shared data flow.
+Arbitrary aliases, dynamic construction, interpolation, arbitrary wrappers and
+complete PowerShell/CMD/loader grammars remain unsupported. The fallback is a
+baseline-retention policy, not universal detection of unknown syntax.
 
-- No-profile and policy-bypass options, alone or together: **low / low**.
-- Encoded, hidden, download or dynamic invocation: **medium / medium**.
-- Encoded + hidden, or dynamic + download/decode: **high / medium**.
+## Derived-output privacy and identity
 
-Repeated tokens do not count as independent corroboration. Encoded payloads are
-**not decoded or executed** and are never assumed benign. A record does not
-prove a command completed, downloaded code ran, or activity was authorized.
-Command-derived descriptions use `cmdsem.Redact` before truncation.
+`cmdsem.Redact` masks HTTP(S) URL userinfo in command-derived output before
+truncation, including percent-encoded user/password characters. The URL host,
+path and query remain; ordinary emails and path/query `@` are not userinfo.
+Stored `Event.CommandLine` is unchanged. The common helper remains best-effort
+known-shape redaction, not a guarantee that sensitive attachments are sanitized.
 
-### Native syntax references
+One finding per affected rule/event is deterministic (time then event ID).
+Single findings keep IDs derived from case, rule and supporting events even
+when title, prose or priority changes. Existing analyst decisions on retained
+IDs remain applicable; removed literal-data findings are not analyst clearance.
+The catalog titles are **Scheduled Task action review** and **PowerShell
+command/script review**. Rule IDs and ATT&CK mappings are unchanged.
 
-- [Windows PowerShell host options](https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_powershell_exe?view=powershell-5.1)
-- [pwsh host options and File/Command boundaries](https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_pwsh?view=powershell-7.5)
-- [PowerShell 7.5 host parser](https://github.com/PowerShell/PowerShell/blob/v7.5.0/src/Microsoft.PowerShell.ConsoleHost/host/msh/CommandLineParameterParser.cs): encoded-command parsing consumes its value without ending the host-option loop, unlike command text.
-- [WSH script and data positions](https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/wscript), [regsvr32 DLL and install argument](https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/regsvr32), [rundll32 DLL target](https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/rundll32).
-- [PowerShell comment-token boundaries](https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_comments?view=powershell-7.5), including the `Foo#Bar` and `Foo<#Bar#>` non-comment examples.
+## Verification scope
 
-These are syntax references, not proof that any recorded command executed.
-No PowerShell/WSH/loader invocation is run by the tests.
+Tests explicitly update earlier no-finding task and self-nesting expectations
+for the approved low/low retention policy; strong positive expectations are
+kept, and data-only task arguments must not earn target/invocation priority.
+Tests exercise direct/filtered inputs, RunFrom, deterministic output, stable
+IDs, the three supported-form regressions and finding/report redaction while
+checking stored synthetic commands remain unchanged.
 
-## Contracts and historical decisions
+Private compiled proof uses the same immutable normalized SQLite snapshot and
+one sequentially reused working database, never a second extracted-evidence
+copy. Ordered event and observation row digests must match before and after.
+Persisted finding deltas use rule + event set, not title. Reports and
+investigations are read back through API, with no provider/IOC transmission.
+These are software and priority-change proofs, not native-reader fidelity,
+whole-case completeness or false-positive accuracy measurements. Full-suite
+integration and independent review are separate parent gates; no main merge
+or push is performed here.
 
-Only these three rules use the new selectors. Shared `procclass` and the legacy
-indicator helper used by other rules are unchanged. The old task-only substring
-predicate was retired. Inputs remain process creation, PowerShell script blocks
-and scheduled-task configuration, as appropriate. Tests compare full versus
-declared-filter evaluation and exercise `RunFrom`, shuffled input and tied or
-unrecorded times. The affected event-level outputs use time/ID tie-breaks.
-
-Single findings retain IDs derived from case, rule and supporting events, even
-when their title, description or priority changes. Reanalysis can remove IDs
-from current results. Existing decisions on retained IDs still apply; removal
-is not an analyst clearance. Preserve historical analysis/exports when reviewing
-changed classifications. No decision migration or backfill was added.
-
-Investigation facets remain ancestry/execution, scripting and persistence
-mechanism review, respectively. No grouping/scoring, static UI category or
-ATT&CK registry changes were needed. API tests verify investigation readback and
-that reports carry the task-configuration and execution-limit caveats.
-
-## Verification and limits
-
-Tests use neutral synthetic commands, no network requests or payload execution.
-Paired controls cover self-nesting versus independent hostile invocation,
-renamed routine tasks versus suspicious actions in a stock-looking namespace,
-system-directory hostile actions, unknown encoded content, missing context,
-literal/comment searches, web API calls, and credential-safe finding/report
-text. The old undated-task test now uses a selecting action; the writable-target
-control explicitly expects a medium/low lead instead of path-only high.
-
-The selector is deliberately lexical, not a complete PowerShell/CMD grammar or
-data-flow analysis. It does not resolve arbitrary aliases, dynamic command
-construction, interpolation, all here-string forms, additional wrapper levels,
-or every executable/loader syntax. Separate constructs in one recorded script
-are not proof of a shared executed data flow. Unselected events remain available
-for investigation. These limitations are not evidence of benignness.
-
-Focused validation commands (use an explicit scratch `GOCACHE`, `GOPROXY=off`):
-
-```text
-go test ./internal/detect ./internal/investigate ./internal/correlate ./internal/procclass ./internal/cmdsem ./internal/report ./internal/artifacts -count=1 -timeout 10m
-go test ./internal/api -run 'TestAnalyze_|TestScenarioF_PowerShellDownload|TestReport_|TestUI_' -count=1 -timeout 15m
-go test -race ./internal/detect ./internal/investigate ./internal/correlate ./internal/cmdsem -count=1 -timeout 10m
-go test -race ./internal/api -run 'TestAnalyze_InvocationNoiseControlsAndReport|TestReport_NewEvidenceDetailsAreReadableAndCommandsAreRedacted' -count=1 -timeout 5m
-go build ./...
-go vet ./...
-git diff --check
-```
-
-Private software proof compares frozen-baseline and candidate binaries against
-the same normalized SQLite snapshot, with ordered event/observation hashes and
-stable-event-set deltas. It does not establish native-reader fidelity, whole-case
-examination completeness or false-positive accuracy. Full-suite integration and
-independent review remain separate gates; this work does not merge or publish.
+Syntax references: [Windows PowerShell host](https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_powershell_exe?view=powershell-5.1),
+[pwsh host](https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_pwsh?view=powershell-7.5),
+[PowerShell comment boundaries](https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_comments?view=powershell-7.5),
+[WSH](https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/wscript),
+[regsvr32](https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/regsvr32),
+[rundll32](https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/rundll32).
+These document syntax, not the outcome of any recorded command.

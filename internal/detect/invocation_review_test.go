@@ -30,7 +30,7 @@ func TestReviewWritableScriptTarget(t *testing.T) {
 			if len(fs) != 1 || fs[0].Severity != "medium" || fs[0].Confidence != "low" {
 				t.Fatalf("%s lost writable script target low-confidence lead: %+v", tt.proc, fs)
 			}
-		} else if len(fs) != 0 {
+		} else if !contextOnlyTaskFindings(fs) {
 			t.Fatalf("%s data became writable target: %+v", tt.proc, fs)
 		}
 	}
@@ -62,7 +62,7 @@ func TestReviewRemoteActionTargetNotData(t *testing.T) {
 			if len(fs) != 1 || fs[0].Severity != "high" {
 				t.Fatalf("%s remote target lost: %+v", tt.proc, fs)
 			}
-		} else if len(fs) != 0 {
+		} else if !contextOnlyTaskFindings(fs) {
 			t.Fatalf("%s data selected as remote target: %+v", tt.proc, fs)
 		}
 	}
