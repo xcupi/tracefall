@@ -618,10 +618,10 @@ func reportCoverage(files []model.SourceFile) report.Coverage {
 				companions++
 				continue
 			}
-			if hr := c.HiveReplay; hr != nil && hr.State == string(regf.RecoveryClean) && !c.Incomplete() && c.RecordsRead == 0 && len(hr.Companions) == 0 {
-				continue // a cleanly written hive with no logs: nothing to say beyond the events
+			summary := "parse coverage: not recorded"
+			if c.Measured() {
+				summary = fmt.Sprintf("read=%d mapped=%d unmapped=%d undated=%d records_failed=%d chunks_failed=%d capped=%t", c.RecordsRead, c.Mapped, c.Unmapped, c.Undated, c.RecordsFailed, c.ChunksFailed, c.LimitReached)
 			}
-			summary := fmt.Sprintf("read=%d mapped=%d unmapped=%d undated=%d records_failed=%d chunks_failed=%d capped=%t", c.RecordsRead, c.Mapped, c.Unmapped, c.Undated, c.RecordsFailed, c.ChunksFailed, c.LimitReached)
 			if len(c.Notes) > 0 {
 				summary += "; " + strings.Join(c.Notes, "; ")
 			}

@@ -9240,13 +9240,28 @@ function renderSourceFileProvenance(p) {
 // evidence itself is still stored and still hashed; what it lacks is a
 // point on a clock.
 function parseCoverageText(c) {
- if (!c) return "Coverage not recorded";
- return `read=${c.records_read} mapped=${c.mapped} unmapped=${c.unmapped} undated=${c.undated} records_failed=${c.records_failed} chunks_failed=${c.chunks_failed} capped=${!!c.limit_reached}${(c.notes || []).length ? "; " + c.notes.join("; ") : ""}`;
+  if (!c) return "Coverage not recorded";
+  // Mirror model.ParseCoverage.Measured, not object presence. Historical bare
+  // {} is a recorded zero; metadata-only objects are not measurements. Keep
+  // this explicit field list in parity with TestUI_ParseCoverageMeasuredParity.
+  const measured = c.emitted_events != null ||
+    ["records_read", "mapped", "unmapped", "undated", "records_failed", "chunks_read", "chunks_failed", "unlisted_records"].some(k => (c[k] ?? 0) !== 0) ||
+    c.limit_reached === true || (c.by_event || []).length > 0 ||
+    (!c.companion_of && c.hive_replay == null && !(c.notes || []).length);
+  let text = measured ? `read=${c.records_read ?? 0} mapped=${c.mapped ?? 0} unmapped=${c.unmapped ?? 0} undated=${c.undated ?? 0} records_failed=${c.records_failed ?? 0} chunks_failed=${c.chunks_failed ?? 0} capped=${!!c.limit_reached}` : "Coverage not recorded";
+  if ((c.notes || []).length) text += "; " + c.notes.join("; ");
+  if (c.hive_replay) {
+    text += "; hive transaction logs: " + c.hive_replay.state;
+    if ((c.hive_replay.logs_applied || []).length) text += "; logs applied: " + c.hive_replay.logs_applied.length;
+    for (const companion of c.hive_replay.companions || []) text += `; companion ${companion.path}: ${companion.status}`;
+  }
+  if (c.companion_of) text += "; companion of " + c.companion_of;
+  return text;
 }
 
 function noEventNote(sf, eventCount) {
   if (eventCount !== 0 || sf.import_status !== "imported") return "";
-  if (sf.parse_coverage) return `<div class="muted small">Parsed successfully; ${esc(parseCoverageText(sf.parse_coverage))}. Unmapped records were not analyzed; zero mapped events is not evidence of no activity.</div>`;
+  if (sf.parse_coverage) return `<div class="muted small">Parsed successfully; ${esc(parseCoverageText(sf.parse_coverage))}. No normalized events were produced. Unmapped records were not analyzed; this is not evidence of no activity.</div>`;
   return `<div class="muted small" style="margin-top:4px">Parsed successfully. No normalized events were produced. Coverage was not recorded; inspect the source and any structured records before concluding that no activity occurred.</div>`;
 }
 

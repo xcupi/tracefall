@@ -444,11 +444,33 @@ func buildReview(in ReviewInput, names Names) (*ReviewPrepared, error) {
 			status = "not_recorded"
 		}
 		fmt.Fprintf(&b, "%s | source=%s acquisition=%s status=%s | ", a, knownAlias(sources, s.ID), knownAlias(acqs, s.CollectionID), status)
-		if c := s.ParseCoverage; c.Measured() {
-			fmt.Fprintf(&b, "parse_coverage=recorded records_read=%d mapped=%d unmapped=%d undated=%d records_failed=%d chunks_failed=%d limit_reached=%t notes_present=%t\n", c.RecordsRead, c.Mapped, c.Unmapped, c.Undated, c.RecordsFailed, c.ChunksFailed, c.LimitReached, len(c.Notes) > 0)
+		c := s.ParseCoverage
+		if c.Measured() {
+			fmt.Fprintf(&b, "parse_coverage=recorded records_read=%d mapped=%d unmapped=%d undated=%d records_failed=%d chunks_failed=%d limit_reached=%t", c.RecordsRead, c.Mapped, c.Unmapped, c.Undated, c.RecordsFailed, c.ChunksFailed, c.LimitReached)
 		} else {
-			b.WriteString("parse_coverage=not_recorded\n")
+			b.WriteString("parse_coverage=not_recorded")
 		}
+		if c != nil {
+			// Structural caveats are independent of numeric coverage. Never copy
+			// notes, reasons, log paths, or arbitrary enum bytes into the packet
+			// (or teach them to the reversible pseudonym dictionary).
+			fmt.Fprintf(&b, " notes_present=%t", len(c.Notes) > 0)
+			if hr := c.HiveReplay; hr != nil {
+				state := "unclassified_state_not_sent"
+				switch hr.State {
+				case "clean", "replayed", "replayed_partial", "not_recoverable", "no_logs":
+					state = hr.State
+				}
+				notExtracted := 0
+				for _, companion := range hr.Companions {
+					if companion.Status != model.CompanionExtracted {
+						notExtracted++
+					}
+				}
+				fmt.Fprintf(&b, " hive_replay=%s logs_applied=%d companions_not_extracted=%d recovery_caveat_present=%t", state, len(hr.LogsApplied), notExtracted, hr.Reason != "" || state != "clean")
+			}
+		}
+		b.WriteByte('\n')
 	}
 	for i, e := range evs {
 		basis := "recorded_instant"
