@@ -69,20 +69,21 @@ type CoverageEvent struct {
 	Mapped   int    `json:"mapped"`
 }
 
-// Measured reports whether the coverage records something a parser read. Nil is
-// not recorded; coverage that only carries the CompanionOf label is not a
-// measurement either, and must never be read as "records_read=0".
+// Measured reports whether parser metrics were recorded, independently of
+// descriptive metadata and Incomplete's caveats. Nil and metadata-only coverage
+// are not measurements. A bare zero object remains measured for compatibility:
+// historical JSON cannot distinguish that recorded zero from absent counters.
+// EmittedEvents, including an explicit zero, is an unambiguous measurement.
 func (c *ParseCoverage) Measured() bool {
 	if c == nil {
 		return false
 	}
-	if c.CompanionOf == "" {
+	if c.EmittedEvents != nil || c.RecordsRead != 0 || c.Mapped != 0 || c.Unmapped != 0 ||
+		c.Undated != 0 || c.RecordsFailed != 0 || c.ChunksRead != 0 || c.ChunksFailed != 0 || c.LimitReached ||
+		len(c.ByEvent) > 0 || c.UnlistedRecords != 0 {
 		return true
 	}
-	// A companion row is labeled with CompanionOf and nothing else was read.
-	return c.EmittedEvents != nil || len(c.Notes) > 0 || c.RecordsRead != 0 || c.Mapped != 0 || c.Unmapped != 0 ||
-		c.Undated != 0 || c.RecordsFailed != 0 || c.ChunksRead != 0 || c.ChunksFailed != 0 || c.LimitReached ||
-		len(c.ByEvent) > 0 || c.UnlistedRecords != 0 || c.HiveReplay != nil
+	return c.CompanionOf == "" && c.HiveReplay == nil && len(c.Notes) == 0
 }
 
 func (c *ParseCoverage) Incomplete() bool {
