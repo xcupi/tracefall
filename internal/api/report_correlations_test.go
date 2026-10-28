@@ -50,7 +50,7 @@ func TestReport_CorrelationOnlyEvidenceIsLoadedAndRendered(t *testing.T) {
 		}
 		found = true
 		var got []model.Correlation
-		if err := json.Unmarshal(f.Data, &got); err != nil {
+		if err := json.Unmarshal(citedFileBytes(t, f.Data, f.Path), &got); err != nil {
 			t.Fatal(err)
 		}
 		if len(got) != 1 || len(got[0].EventIDs) != 1 || got[0].EventIDs[0] != ev.ID {
@@ -96,7 +96,7 @@ func TestReport_BundleRetainsObservationDetailsPastBothHTMLCaps(t *testing.T) {
 			continue
 		}
 		var got []model.Event
-		if err := json.Unmarshal(f.Data, &got); err != nil {
+		if err := json.Unmarshal(citedFileBytes(t, f.Data, f.Path), &got); err != nil {
 			t.Fatal(err)
 		}
 		if len(got) != 301 || got[300].ID != "long-event-300" || got[300].SourceReference != "http:301" || got[300].Extra["uri"] != "/object-300" || got[300].Extra["response_sha256"] != strings.Repeat("cd", 32) {

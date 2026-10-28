@@ -57,35 +57,32 @@ type reportBuild struct {
 	Manifest     report.Manifest
 	ManifestJSON []byte
 
-	// spool is the timeline file written to disk for this build, empty when
-	// there is none. The caller removes it once the bundle is written.
-	spool string
+	// spools are owned temporary attachments, released after every consumer.
+	spools []string
 }
 
 // release removes the spooled timeline, if any. Call it after the bundle is
 // written.
 func (b reportBuild) release() {
-	if b.spool != "" {
-		os.Remove(b.spool)
+	for _, path := range b.spools {
+		os.Remove(path)
 	}
 }
 
 // buildReport assembles, renders and hashes the report. Its only write is the
 // timeline spool in the case's reports folder, which the caller releases.
 func (s *Service) buildReport(caseID string, now time.Time) (reportBuild, error) {
-	var spool string
-	b, err := s.assembleAndRender(caseID, now, &spool)
+	var spools []string
+	b, err := s.assembleAndRender(caseID, now, &spools)
 	if err != nil {
-		if spool != "" {
-			os.Remove(spool)
-		}
+		(reportBuild{spools: spools}).release()
 		return reportBuild{}, err
 	}
-	b.spool = spool
+	b.spools = spools
 	return b, nil
 }
 
-func (s *Service) assembleAndRender(caseID string, now time.Time, spool *string) (reportBuild, error) {
+func (s *Service) assembleAndRender(caseID string, now time.Time, spools *[]string) (reportBuild, error) {
 	c, err := s.GetCase(caseID)
 	if err != nil {
 		return reportBuild{}, err
@@ -137,10 +134,11 @@ func (s *Service) assembleAndRender(caseID string, now time.Time, spool *string)
 	for _, c := range correlations {
 		citedIDs = append(citedIDs, c.EventIDs...)
 	}
-	cited, err := s.store.EventsByIDs(citedIDs)
+	citedFile, cited, err := s.spoolReportCited(context.Background(), caseID, citedIDs, findings, correlations)
 	if err != nil {
-		return reportBuild{}, fmt.Errorf("loading cited events: %w", err)
+		return reportBuild{}, fmt.Errorf("building cited-events.json: %w", err)
 	}
+	*spools = append(*spools, citedFile.Path)
 	invs, err := s.caseInvestigations(caseID, findings, correlations)
 	if err != nil {
 		return reportBuild{}, fmt.Errorf("computing investigations: %w", err)
@@ -153,7 +151,7 @@ func (s *Service) assembleAndRender(caseID string, now time.Time, spool *string)
 	if err != nil {
 		return reportBuild{}, fmt.Errorf("building timeline.csv: %w", err)
 	}
-	*spool = tlPath
+	*spools = append(*spools, tlPath)
 	var fl bytes.Buffer
 	if err := writeFindingsCSV(findings, statuses, &fl); err != nil {
 		return reportBuild{}, fmt.Errorf("building findings.csv: %w", err)
@@ -166,22 +164,11 @@ func (s *Service) assembleAndRender(caseID string, now time.Time, spool *string)
 	if err != nil {
 		return reportBuild{}, fmt.Errorf("building correlations.json: %w", err)
 	}
-	resolved := make([]model.Event, 0, len(cited))
-	for _, e := range cited {
-		if e.CaseID == caseID {
-			resolved = append(resolved, e)
-		}
-	}
-	sort.Slice(resolved, func(i, j int) bool { return resolved[i].ID < resolved[j].ID })
-	ej, err := json.MarshalIndent(resolved, "", "  ")
-	if err != nil {
-		return reportBuild{}, fmt.Errorf("building cited-events.json: %w", err)
-	}
 	files := []report.File{
 		report.SpooledFile("timeline.csv", tlPath, tlSHA, tlSize),
 		report.NewFile("findings.csv", fl.Bytes()),
 		report.NewFile("correlations.json", cj),
-		report.NewFile("cited-events.json", ej),
+		citedFile,
 	}
 
 	ext, err := s.reportExternal(caseID)
@@ -190,7 +177,7 @@ func (s *Service) assembleAndRender(caseID string, now time.Time, spool *string)
 	}
 
 	d := s.assembleReportData(reportInputs{
-		c: c, now: now, collections: collections, sourceFiles: sourceFiles, events: cited,
+		c: c, now: now, collections: collections, sourceFiles: sourceFiles, cited: cited,
 		eventTotal: eventTotal, timeline: timeline, invs: invs,
 		findings: findings, correlations: correlations, runs: runs, audit: auditLog,
 		statuses: statuses, notes: notes, summary: summary,
@@ -198,7 +185,10 @@ func (s *Service) assembleAndRender(caseID string, now time.Time, spool *string)
 	})
 
 	d.Attachments = append(d.Attachments, report.Attachment{Name: files[2].Name, Description: "All correlations and their complete ordered event-reference lists.", SHA256: files[2].SHA256, Bytes: files[2].Size, Rows: len(correlations)})
-	d.Attachments = append(d.Attachments, report.Attachment{Name: files[3].Name, Description: "All resolved cited events, with complete normalized fields and record references (sensitive evidence, not redacted).", SHA256: files[3].SHA256, Bytes: files[3].Size, Rows: len(resolved)})
+	// Preserve the legacy HTML inventory's empty digest/size for this attachment;
+	// the bundle manifest carries its actual streamed digest and size. Correcting
+	// the presentation inventory is separate from this byte-compatible rewrite.
+	d.Attachments = append(d.Attachments, report.Attachment{Name: files[3].Name, Description: "All resolved cited events, with complete normalized fields and record references (sensitive evidence, not redacted).", Rows: cited.rows})
 	// the model-drafted summary cites findings by the numbers this report gave them
 	d.Narrative, err = s.reportNarrative(caseID, d.Findings, findings)
 	if err != nil {
@@ -225,6 +215,7 @@ type reportInputs struct {
 	// or a correlation); eventTotal is the whole case, and timeline is the
 	// streamed aggregate of all of it.
 	events       []model.Event
+	cited        *reportCited
 	eventTotal   int
 	timeline     *timelineAgg
 	invs         []model.Investigation
@@ -255,6 +246,10 @@ func (s *Service) assembleReportData(in reportInputs) report.Data {
 		evByID[e.ID] = e
 	}
 
+	lookup := func(id string) (model.Event, bool) { e, ok := evByID[id]; return e, ok }
+	if in.cited != nil {
+		lookup = in.cited.lookup
+	}
 	d := report.Data{}
 	d.Meta = report.Meta{
 		Title: reportTitle, CaseID: c.ID, CaseName: c.Name, Description: c.Description,
@@ -290,7 +285,7 @@ func (s *Service) assembleReportData(in reportInputs) report.Data {
 	cited := map[string]bool{}
 	ruleFired := map[string]int{}
 	for i, f := range fs {
-		d.Findings = append(d.Findings, reportFinding(i+1, f, evByID, srcByID, in.statuses, notesByTarget))
+		d.Findings = append(d.Findings, reportFinding(i+1, f, lookup, srcByID, in.statuses, notesByTarget))
 		ruleFired[f.RuleID]++
 		for _, id := range f.SupportingEvents {
 			cited[id] = true
@@ -308,7 +303,7 @@ func (s *Service) assembleReportData(in reportInputs) report.Data {
 		out := report.Correlation{Number: fmt.Sprintf("C-%03d", i+1), ID: c.ID, Type: c.Type, Title: c.Title, Description: c.Description, FirstSeen: reportTime(c.FirstSeen), LastSeen: reportTime(c.LastSeen), EventCount: len(c.EventIDs)}
 		for _, id := range c.EventIDs {
 			cited[id] = true
-			e, ok := evByID[id]
+			e, ok := lookup(id)
 			if !ok {
 				out.MissingEvents++
 				continue
@@ -326,7 +321,12 @@ func (s *Service) assembleReportData(in reportInputs) report.Data {
 	for _, e := range evByID {
 		caseEvents = append(caseEvents, e)
 	}
-	d.Timeline = reportTimeline(in.timeline, caseEvents, cited, srcByID)
+	if in.cited != nil {
+		d.Timeline = timelineFromAgg(in.timeline, in.cited.key, srcByID)
+		d.Timeline.KeyOmitted = in.cited.keyOmitted
+	} else {
+		d.Timeline = reportTimeline(in.timeline, caseEvents, cited, srcByID)
+	}
 	d.Coverage = reportCoverage(in.sourceFiles)
 	d.Rules = reportRules(fs, ruleFired)
 
@@ -488,12 +488,12 @@ func reportAnalysis(c model.Case, sum Summary, runs []model.AnalysisRun) report.
 	return a
 }
 
-func reportFinding(n int, f model.Finding, evByID map[string]model.Event, srcByID map[string]model.SourceFile,
+func reportFinding(n int, f model.Finding, lookup func(string) (model.Event, bool), srcByID map[string]model.SourceFile,
 	statuses map[string]model.AnalystStatus, notes map[string][]string) report.Finding {
 
 	supporting := make([]model.Event, 0, len(f.SupportingEvents))
 	for _, id := range f.SupportingEvents {
-		if e, ok := evByID[id]; ok {
+		if e, ok := lookup(id); ok {
 			supporting = append(supporting, e)
 		}
 	}
