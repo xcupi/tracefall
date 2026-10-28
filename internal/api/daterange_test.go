@@ -6,7 +6,6 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -364,20 +363,43 @@ func TestDateRange_FindingsShareTheSameBoundSemantics(t *testing.T) {
 	if len(findings) == 0 {
 		t.Skip("no findings to filter")
 	}
-	// Every finding must carry a usable window; the client-side filter
-	// compares against these two fields and nothing else.
+	// Resolve cited evidence instead of treating a display title as a temporal
+	// contract. Do not invent instants for zone-less task configuration records.
+	var ids []string
 	for _, f := range findings {
-		if f.FirstSeen.IsZero() && f.LastSeen.IsZero() && strings.HasPrefix(f.Title, "Scheduled Task persistence") {
-			// The fixture task XML records a zone-less local date. That
-			// reading is kept undated rather than guessed as UTC, so a
-			// finding resting only on it honestly has no window.
-			continue
+		ids = append(ids, f.SupportingEvents...)
+	}
+	var events []model.Event
+	if rec := doJSON(t, mux, "POST", "/api/cases/"+c.ID+"/events/lookup", map[string]any{"ids": ids}, &events); rec.Code != http.StatusOK {
+		t.Fatalf("supporting events lookup: %d", rec.Code)
+	}
+	byID := map[string]model.Event{}
+	for _, e := range events {
+		byID[e.ID] = e
+	}
+	unknown, dated := 0, 0
+	for _, f := range findings {
+		if !findingRangeIsHonest(f, byID) {
+			t.Errorf("finding %q has an unsupported time window (first=%s last=%s)", f.Title, f.FirstSeen, f.LastSeen)
 		}
-		if f.FirstSeen.IsZero() || f.LastSeen.IsZero() {
-			t.Errorf("finding %q has no time window (first=%s last=%s)", f.Title, f.FirstSeen, f.LastSeen)
+		if f.FirstSeen.IsZero() && f.LastSeen.IsZero() {
+			unknown++
+		} else {
+			dated++
 		}
-		if f.LastSeen.Before(f.FirstSeen) {
-			t.Errorf("finding %q has last_seen before first_seen", f.Title)
+	}
+	if unknown == 0 || dated == 0 {
+		t.Fatalf("fixture must exercise both undated tasks and dated windows: unknown=%d dated=%d", unknown, dated)
+	}
+	// Dated timeline filters must not assign the undated supporting evidence to
+	// an arbitrary calendar window. The findings endpoint itself is unfiltered.
+	page := searchEvents(t, mux, c.ID, vals("from", "2000-01-01", "to", "2100-01-01", "page_size", "100"))
+	if page.Total != len(page.Items) {
+		t.Fatal("dated fixture check requires a complete event page")
+	}
+	for _, e := range page.Items {
+		if e.Timestamp.IsZero() {
+			t.Errorf("undated supporting event %s included in dated range", e.ID)
 		}
 	}
 }

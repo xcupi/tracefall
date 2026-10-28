@@ -3,6 +3,7 @@ package narrative
 import (
 	"net/url"
 	"regexp"
+	"strings"
 
 	"tracefall/internal/cmdsem"
 	"tracefall/internal/pseudonym"
@@ -23,7 +24,9 @@ type ReviewPrivacy struct {
 	RequiresSeparatePermission bool   `json:"requires_separate_permission"`
 }
 
-var reviewURL = regexp.MustCompile(`(?i)\b[a-z][a-z0-9+.-]{1,15}://[^\s"'<>]+`)
+// Accept cmdsem's exact userinfo marker without treating arbitrary angle-bracket
+// text as URL data. Commands may already be redacted before reaching this layer.
+var reviewURL = regexp.MustCompile(`(?i)\b[a-z][a-z0-9+.-]{1,15}://(?:<redacted>|[^\s"'<>])+`)
 
 const reviewCredentialKeys = `(?:access[_-]?token|refresh[_-]?token|id[_-]?token|session[_-]?(?:token|id)|sessionid|aws[_-](?:access[_-]key[_-]id|secret[_-]access[_-]key|session[_-]token)|client[_-]secret|private[_-]key)`
 
@@ -32,12 +35,21 @@ var reviewCredentialFlag = regexp.MustCompile(`(?i)((?:--?|/)` + reviewCredentia
 
 func redactReviewValue(value string) string {
 	value = cmdsem.Redact(value)
-	value = reviewCredentialAssignment.ReplaceAllString(value, "${1}"+pseudonym.Redacted)
-	value = reviewCredentialFlag.ReplaceAllString(value, "${1}"+pseudonym.Redacted)
 	// Query strings and fragments can hold credentials under arbitrary key names.
-	// Remove them wholesale, before pseudonymization and per-field truncation.
+	// Remove URLs' sensitive components before assignment masking can consume a
+	// closing quote or a following URL, and before pseudonymization/truncation.
 	// Malformed URLs fail closed for this value; never retain raw parse errors.
-	return reviewURL.ReplaceAllStringFunc(value, func(raw string) string {
+	value = reviewURL.ReplaceAllStringFunc(value, func(raw string) string {
+		// Remove authority userinfo before parsing: redaction markers themselves
+		// are not necessarily valid URL userinfo and must never become entities.
+		start := strings.Index(raw, "://") + 3
+		end := len(raw)
+		if i := strings.IndexAny(raw[start:], "/?#"); i >= 0 {
+			end = start + i
+		}
+		if at := strings.LastIndexByte(raw[start:end], '@'); at >= 0 {
+			raw = raw[:start] + raw[start+at+1:]
+		}
 		u, err := url.Parse(raw)
 		if err != nil {
 			return pseudonym.Redacted
@@ -49,4 +61,6 @@ func redactReviewValue(value string) string {
 		u.RawFragment = ""
 		return u.String()
 	})
+	value = reviewCredentialAssignment.ReplaceAllString(value, "${1}"+pseudonym.Redacted)
+	return reviewCredentialFlag.ReplaceAllString(value, "${1}"+pseudonym.Redacted)
 }
