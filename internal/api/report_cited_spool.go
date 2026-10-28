@@ -138,9 +138,18 @@ func (s *Service) spoolReportCited(ctx context.Context, caseID string, ids []str
 			}
 		}
 	}
+	// Store resolution trims tokens, but HTML key membership historically uses
+	// the original references. A padded-only reference resolves for the full
+	// attachment, not for the key timeline or evidence-table lookup.
+	rawCited := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		rawCited[id] = true
+	}
 	keys := make([]string, 0, len(c.meta))
 	for id := range c.meta {
-		keys = append(keys, id)
+		if rawCited[id] {
+			keys = append(keys, id)
+		}
 	}
 	sort.Slice(keys, func(i, j int) bool { return less(keys[i], keys[j]) })
 	if len(keys) > maxKeyEvents {

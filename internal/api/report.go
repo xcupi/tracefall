@@ -61,16 +61,15 @@ type reportBuild struct {
 	spools []string
 }
 
-// release removes the spooled timeline, if any. Call it after the bundle is
-// written.
+// release removes every temporary attachment. Call it after the last consumer.
 func (b reportBuild) release() {
 	for _, path := range b.spools {
 		os.Remove(path)
 	}
 }
 
-// buildReport assembles, renders and hashes the report. Its only write is the
-// timeline spool in the case's reports folder, which the caller releases.
+// buildReport assembles, renders and hashes the report. Its only writes are
+// temporary attachments in the case's reports folder, released by the caller.
 func (s *Service) buildReport(caseID string, now time.Time) (reportBuild, error) {
 	var spools []string
 	b, err := s.assembleAndRender(caseID, now, &spools)
