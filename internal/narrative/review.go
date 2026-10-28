@@ -378,6 +378,14 @@ func buildReview(in ReviewInput, names Names) (*ReviewPrepared, error) {
 		if e.CommandLine == "" {
 			continue
 		}
+		// Inspect original boundaries before any redactor can hide an ambiguous
+		// suffix and before eventLine can learn reversible pseudonym entities.
+		if !reviewCommandURLsCertain(e.CommandLine) {
+			e.CommandLine = ""
+			commandState[e.ID] = "omitted_ambiguous_url"
+			cv.CommandLinesOmitted++
+			continue
+		}
 		command := cmdsem.Redact(e.CommandLine)
 		if reviewProhibitedBody.MatchString(command) {
 			e.CommandLine = ""
