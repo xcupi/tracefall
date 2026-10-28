@@ -275,6 +275,7 @@ func maskPowerShellLiterals(s string) (string, bool) {
 	b := []byte(s)
 	var quote byte
 	lineComment, blockComment := false, false
+	unresolvedExpression := false
 	tokenBoundary := true
 	for i := 0; i < len(b); i++ {
 		ch := b[i]
@@ -297,6 +298,13 @@ func maskPowerShellLiterals(s string) (string, bool) {
 			continue
 		}
 		if quote != 0 {
+			// Expandable-string subexpressions execute, unlike literal text.
+			// Do not parse their nested grammar or promote masked keywords to
+			// invocation proof: preserve baseline-eligible uncertainty instead.
+			// The escape branch below consumes pairs, including doubled backticks.
+			if quote == '"' && ch == '$' && i+1 < len(b) && b[i+1] == '(' {
+				unresolvedExpression = true
+			}
 			b[i] = ' '
 			if ch == '`' && quote == '"' && i+1 < len(b) {
 				b[i+1] = ' '
@@ -345,7 +353,7 @@ func maskPowerShellLiterals(s string) (string, bool) {
 		// lexical state: masked escapes must not manufacture token boundaries.
 		tokenBoundary = strings.ContainsRune(" 	\r\n;|&=(){},", rune(ch))
 	}
-	return string(b), quote != 0 || blockComment
+	return string(b), unresolvedExpression || quote != 0 || blockComment
 }
 
 var cmdCommand = regexp.MustCompile(`(?i)^\s*(?:"(?:[^"\r\n]*\\)?cmd(?:\.exe)?"|(?:[^\s"]*\\)?cmd(?:\.exe)?)\s+(?:/d\s+)?/[ck]\s+(.+)$`)
