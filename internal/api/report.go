@@ -613,7 +613,7 @@ func reportCoverage(files []model.SourceFile) report.Coverage {
 	var notExtracted []string
 	for _, sf := range files {
 		if c := sf.ParseCoverage; c != nil {
-			if c.CompanionOf != "" && sf.ArtifactType == model.ArtifactRegistryTransactionLog && !c.Measured() {
+			if c.CompanionOf != "" && sf.ArtifactType == model.ArtifactRegistryTransactionLog && !c.Measured() && len(c.Notes) == 0 && c.HiveReplay == nil {
 				// Summarised in one line below, outside the capped list.
 				companions++
 				continue

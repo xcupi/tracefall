@@ -8,6 +8,35 @@ import (
 	"tracefall/internal/model"
 )
 
+func TestReport_CompanionMetadataCaveats(t *testing.T) {
+	for _, raw := range []string{
+		`{"companion_of":"vol1/SYSTEM","notes":["reader caveat"]}`,
+		`{"companion_of":"vol1/SYSTEM","hive_replay":{"state":"clean"}}`,
+		`{"companion_of":"vol1/SYSTEM","notes":["reader caveat"],"hive_replay":{"state":"not_recoverable"}}`,
+	} {
+		var c *model.ParseCoverage
+		if err := json.Unmarshal([]byte(raw), &c); err != nil {
+			t.Fatal(err)
+		}
+		got := reportCoverage([]model.SourceFile{{Path: "vol1/SYSTEM.LOG1", ArtifactType: model.ArtifactRegistryTransactionLog, ParseCoverage: c}})
+		if len(got.ParserDiagnostics) != 1 {
+			t.Fatalf("lost companion diagnostic: %+v", got)
+		}
+		text := got.ParserDiagnostics[0].Value
+		if !strings.Contains(text, "parse coverage: not recorded") || strings.Contains(text, "read=0") {
+			t.Errorf("lost unknown metric state: %s", text)
+		}
+		for _, note := range c.Notes {
+			if !strings.Contains(text, note) {
+				t.Errorf("lost note: %s", text)
+			}
+		}
+		if c.HiveReplay != nil && !strings.Contains(text, "hive transaction logs: "+c.HiveReplay.State) {
+			t.Errorf("lost replay: %s", text)
+		}
+	}
+}
+
 func TestReport_MetadataCoveragePresentation(t *testing.T) {
 	for _, tc := range []struct {
 		name, raw, want string
