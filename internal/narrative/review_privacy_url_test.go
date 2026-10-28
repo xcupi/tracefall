@@ -15,6 +15,7 @@ func TestReviewPrivacy_URLMarkerAndBoundaryVariants(t *testing.T) {
 		"apostrophe userinfo": `curl "https://alice:Dummy'Secret@api.example.test/download?private=DummyQuery#DummyFragment"`,
 		"angle marker":        `curl "https://<redacted>@api.example.test/download?private=DummyQuery#DummyFragment"`,
 		"bracket marker":      `curl "https://[REDACTED]@api.example.test/download?private=DummyQuery#DummyFragment"`,
+		"literal stars":       "curl \"https://\x2a\x2a\x2a@api.example.test/download?private=DummyQuery#DummyFragment\"",
 		"no auth":             `curl "https://api.example.test/download?private=DummyQuery#DummyFragment"`,
 		"query only":          `curl 'https://api.example.test/download?private=DummyQuery'`,
 		"fragment only":       `curl "https://api.example.test/download#DummyFragment"`,

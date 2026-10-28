@@ -24,22 +24,17 @@ type ReviewPrivacy struct {
 	RequiresSeparatePermission bool   `json:"requires_separate_permission"`
 }
 
-// Accept cmdsem's exact userinfo marker without treating arbitrary angle-bracket
-// text as URL data. Commands may already be redacted before reaching this layer.
-var reviewURL = regexp.MustCompile(`(?i)\b[a-z][a-z0-9+.-]{1,15}://(?:<redacted>|[^\s"'<>])+`)
-
 const reviewCredentialKeys = `(?:access[_-]?token|refresh[_-]?token|id[_-]?token|session[_-]?(?:token|id)|sessionid|aws[_-](?:access[_-]key[_-]id|secret[_-]access[_-]key|session[_-]token)|client[_-]secret|private[_-]key)`
 
 var reviewCredentialAssignment = regexp.MustCompile(`(?i)(\b` + reviewCredentialKeys + `\b["']?\s*[=:]\s*)("[^"]*"|'[^']*'|\S+)`)
 var reviewCredentialFlag = regexp.MustCompile(`(?i)((?:--?|/)` + reviewCredentialKeys + `(?:[=:]|\s+))("[^"]*"|'[^']*'|\S+)`)
 
 func redactReviewValue(value string) string {
-	value = cmdsem.Redact(value)
 	// Query strings and fragments can hold credentials under arbitrary key names.
 	// Remove URLs' sensitive components before assignment masking can consume a
 	// closing quote or a following URL, and before pseudonymization/truncation.
 	// Malformed URLs fail closed for this value; never retain raw parse errors.
-	value = reviewURL.ReplaceAllStringFunc(value, func(raw string) string {
+	value = cmdsem.MapURLs(value, func(raw string) string {
 		// Remove authority userinfo before parsing: redaction markers themselves
 		// are not necessarily valid URL userinfo and must never become entities.
 		start := strings.Index(raw, "://") + 3
@@ -61,6 +56,7 @@ func redactReviewValue(value string) string {
 		u.RawFragment = ""
 		return u.String()
 	})
+	value = cmdsem.Redact(value)
 	value = reviewCredentialAssignment.ReplaceAllString(value, "${1}"+pseudonym.Redacted)
 	return reviewCredentialFlag.ReplaceAllString(value, "${1}"+pseudonym.Redacted)
 }

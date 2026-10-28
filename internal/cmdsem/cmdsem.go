@@ -308,31 +308,24 @@ var redactions = []struct {
 	{regexp.MustCompile(`(\b(?:sqlcmd|osql|bcp)(?:\.exe)?\b[^|;&\n]*?\s-P\s*)("[^"]*"|'[^']*'|\S+)`), `${1}<redacted>`},
 }
 
-// Non-overlapping authority candidates keep this scan linear. Apostrophe is a
-// valid RFC 3986 userinfo sub-delimiter, except when it closes an outer single
-// quote. Path/query/fragment bytes and ordinary email addresses are untouched.
-var urlAuthority = ci(`'https?://[^\s/\x3f#"'<>]+|https?://[^\s/\x3f#"<>]+`)
-
+// General command redaction preserves URL path/query/fragment; narrative egress
+// applies its stricter policy using the same bounded spans.
 func redactURLUserinfo(cmd string) string {
-	var out strings.Builder
-	cursor := 0
-	for _, loc := range urlAuthority.FindAllStringIndex(cmd, -1) {
-		if cmd[loc[0]] == '\'' {
-			loc[0]++ // Outer single quote is a boundary, not authority data.
+	return MapURLs(cmd, func(raw string) string {
+		schemeEnd := strings.Index(raw, "://") + 3
+		scheme := strings.ToLower(raw[:schemeEnd-3])
+		if scheme != "http" && scheme != "https" {
+			return raw
 		}
-		authority := cmd[loc[0]:loc[1]]
-		if at := strings.LastIndexByte(authority, '@'); at >= 0 {
-			schemeEnd := strings.Index(authority, "://") + 3
-			out.WriteString(cmd[cursor : loc[0]+schemeEnd])
-			out.WriteString("<redacted>")
-			cursor = loc[0] + at
+		end := len(raw)
+		if i := strings.IndexAny(raw[schemeEnd:], "/?#"); i >= 0 {
+			end = schemeEnd + i
 		}
-	}
-	if cursor == 0 {
-		return cmd
-	}
-	out.WriteString(cmd[cursor:])
-	return out.String()
+		if at := strings.LastIndexByte(raw[schemeEnd:end], '@'); at >= 0 {
+			return raw[:schemeEnd] + "<redacted>" + raw[schemeEnd+at:]
+		}
+		return raw
+	})
 }
 
 // Redact masks known command-line secret shapes in derived finding/report text.
