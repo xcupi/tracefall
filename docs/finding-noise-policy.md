@@ -39,8 +39,10 @@ the normalized command action, requiring agreement with its process identity:
 
 Remote target selection reads only executable-specific loader positions:
 WSH's first script after supported switches (UNC paths, not HTTP URLs), mshta's
-first HTA target, rundll32's first DLL/entry-point token, and regsvr32's DLL or
-`/i:` target **only with scrobj.dll**. URLs/UNC paths in subsequent script/data
+first HTA target, rundll32's first DLL/entry-point token, and regsvr32's DLL plus
+its separately unquoted `/i:` target **only with scrobj.dll**. An install argument
+never replaces independent DLL-path evidence; either target can select a lead.
+URLs/UNC paths in subsequent script/data
 arguments do not select a lead. Unknown switches stop target selection rather
 than licensing a search through arbitrary arguments. The same selected target
 supplies writable-path evidence: a stock-directory WSH wrapper around a Temp or
@@ -72,7 +74,9 @@ validity, decoding and successful native execution are not established.
 The selector blanks quoted literal data and line/block comments before matching
 invocation constructs. Outside quotes, a backtick escapes the next character;
 escaped hashes/quotes are not comment/string openers and escaped semicolons are
-not statement boundaries. Real comments remain masked. It does not interpret
+not statement boundaries. Comment openers must begin at a token boundary:
+`foo#bar` and `foo<#bar#>` are literal non-comment tokens. Standalone line/block
+comments and quoted data remain masked. It does not interpret
 the script. A search for the words
 IEX, DownloadString or encoded options is not itself execution of those forms.
 Base64 conversion, WebClient construction and web API requests alone are not
@@ -94,6 +98,7 @@ Command-derived descriptions use `cmdsem.Redact` before truncation.
 - [pwsh host options and File/Command boundaries](https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_pwsh?view=powershell-7.5)
 - [PowerShell 7.5 host parser](https://github.com/PowerShell/PowerShell/blob/v7.5.0/src/Microsoft.PowerShell.ConsoleHost/host/msh/CommandLineParameterParser.cs): encoded-command parsing consumes its value without ending the host-option loop, unlike command text.
 - [WSH script and data positions](https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/wscript), [regsvr32 DLL and install argument](https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/regsvr32), [rundll32 DLL target](https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/rundll32).
+- [PowerShell comment-token boundaries](https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_comments?view=powershell-7.5), including the `Foo#Bar` and `Foo<#Bar#>` non-comment examples.
 
 These are syntax references, not proof that any recorded command executed.
 No PowerShell/WSH/loader invocation is run by the tests.

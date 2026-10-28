@@ -150,11 +150,13 @@ func withoutPowerShellLiterals(s string) string {
 	b := []byte(s)
 	var quote byte
 	lineComment, blockComment := false, false
+	tokenBoundary := true
 	for i := 0; i < len(b); i++ {
 		ch := b[i]
 		if lineComment {
 			if ch == '\n' {
 				lineComment = false
+				tokenBoundary = true
 			} else {
 				b[i] = ' '
 			}
@@ -202,16 +204,21 @@ func withoutPowerShellLiterals(s string) string {
 			quote = ch
 			b[i] = ' '
 		case '#':
-			lineComment = true
-			b[i] = ' '
+			if tokenBoundary {
+				lineComment = true
+				b[i] = ' '
+			}
 		case '<':
-			if i+1 < len(b) && b[i+1] == '#' {
+			if tokenBoundary && i+1 < len(b) && b[i+1] == '#' {
 				blockComment = true
 				b[i] = ' '
 				b[i+1] = ' '
 				i++
 			}
 		}
+		// Comment openers embedded in non-comment tokens are literal. Keep
+		// lexical state: masked escapes must not manufacture token boundaries.
+		tokenBoundary = strings.ContainsRune(" 	\r\n;|&=(){},", rune(ch))
 	}
 	return string(b)
 }
@@ -255,20 +262,26 @@ func taskActionEvidence(e model.Event) (string, string, []string) {
 		return "", "", nil
 	}
 	labels := interpreterInvocationIndicators(e)
-	target := taskLoaderTarget(e.ProcessName, tokens[1:])
+	targets := taskLoaderTargets(e.ProcessName, tokens[1:])
 	if procclass.IsPowerShell(e.ProcessName) {
-		_, target = powerShellInvocationEvidence(e.CommandLine, false)
+		_, target := powerShellInvocationEvidence(e.CommandLine, false)
+		targets = []string{target}
 	}
-	writable := taskWritableTarget(first) || taskWritableTarget(target)
+	writable := taskWritableTarget(first)
+	for _, target := range targets {
+		writable = writable || taskWritableTarget(target)
+	}
 	// ProgramData alone is routine application storage. Temp/AppData executable
 	// targets remain low-confidence review leads, not high-severity verdicts.
 	if writable {
 		labels = append(labels, "user-writable action target")
 	}
-	loaderTarget := taskLoaderTarget(e.ProcessName, tokens[1:])
-	remote := strings.HasPrefix(strings.ToLower(loaderTarget), `\\`)
-	if e.ProcessName == "mshta.exe" || e.ProcessName == "regsvr32.exe" {
-		remote = remote || strings.HasPrefix(strings.ToLower(loaderTarget), "http://") || strings.HasPrefix(strings.ToLower(loaderTarget), "https://")
+	remote := false
+	for _, loaderTarget := range targets {
+		remote = remote || strings.HasPrefix(strings.ToLower(loaderTarget), `\\`)
+		if e.ProcessName == "mshta.exe" || e.ProcessName == "regsvr32.exe" {
+			remote = remote || strings.HasPrefix(strings.ToLower(loaderTarget), "http://") || strings.HasPrefix(strings.ToLower(loaderTarget), "https://")
+		}
 	}
 	if remote {
 		labels = append(labels, "remote script/loader action")
@@ -296,18 +309,23 @@ func taskActionEvidence(e model.Event) (string, string, []string) {
 
 // Select only executable-specific loader positions, never subsequent data.
 // URL loading is supported here only for mshta and scrobj /i, not WSH/DLL paths.
-func taskLoaderTarget(proc string, args []string) string {
-	clean := func(s string) string { return strings.Trim(s, `"'`) }
+func taskLoaderTargets(proc string, args []string) []string {
+	clean := func(s string) string {
+		if len(s) >= 2 && ((s[0] == '"' && s[len(s)-1] == '"') || (s[0] == '\'' && s[len(s)-1] == '\'')) {
+			return s[1 : len(s)-1]
+		}
+		return s
+	}
 	switch proc {
 	case "mshta.exe", "rundll32.exe":
 		if len(args) > 0 {
-			return strings.SplitN(clean(args[0]), ",", 2)[0]
+			return []string{strings.SplitN(clean(args[0]), ",", 2)[0]}
 		}
 	case "wscript.exe", "cscript.exe":
 		for _, arg := range args {
 			t := clean(arg)
 			if !strings.HasPrefix(t, "/") {
-				return t
+				return []string{t}
 			}
 			s := strings.ToLower(strings.TrimLeft(t, "/"))
 			switch s {
@@ -317,7 +335,7 @@ func taskLoaderTarget(proc string, args []string) string {
 			if strings.HasPrefix(s, "e:") || strings.HasPrefix(s, "job:") || strings.HasPrefix(s, "t:") {
 				continue
 			}
-			return ""
+			return nil
 		}
 	case "regsvr32.exe":
 		var install, dll string
@@ -328,11 +346,11 @@ func taskLoaderTarget(proc string, args []string) string {
 				continue
 			}
 			if strings.HasPrefix(s, "/i:") {
-				install = t[3:]
+				install = clean(t[3:])
 				continue
 			}
 			if strings.HasPrefix(s, "/") || dll != "" {
-				return ""
+				return nil
 			}
 			dll = t
 		}
@@ -341,11 +359,11 @@ func taskLoaderTarget(proc string, args []string) string {
 			base = base[i+1:]
 		}
 		if base == "scrobj.dll" && install != "" {
-			return install
+			return []string{dll, install}
 		}
-		return dll
+		return []string{dll}
 	}
-	return ""
+	return nil
 }
 
 func taskWritableTarget(path string) bool {
