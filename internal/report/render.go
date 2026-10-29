@@ -367,7 +367,7 @@ const reportHTML = `{{define "observation"}}
 <table>
   <tr><th>File</th><th>Description</th><th class="num">Rows</th><th class="num">Bytes</th><th>SHA-256</th></tr>
   {{range .Attachments}}
-  <tr><td class="mono">{{.Name}}</td><td>{{.Description}}</td><td class="num">{{.Rows}}</td><td class="num">{{.Bytes}}</td><td class="mono">{{.SHA256}}</td></tr>
+  <tr><td class="mono nowrap">{{.Name}}</td><td>{{.Description}}</td><td class="num">{{.Rows}}</td><td class="num">{{.Bytes}}</td><td class="mono">{{.SHA256}}</td></tr>
   {{end}}
 </table>
 <p class="small">The SHA-256 of this report document is recorded in manifest.json, delivered with it. To check a delivered bundle, compute the SHA-256 of each file (for example with <span class="mono">sha256sum</span>) and compare it with manifest.json.</p>

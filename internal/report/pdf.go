@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -88,7 +89,7 @@ func RenderPDF(ctx context.Context, html []byte) ([]byte, error) {
 		if ctx.Err() != nil {
 			return nil, fmt.Errorf("report: PDF rendering timed out: %w", ctx.Err())
 		}
-		return nil, fmt.Errorf("report: PDF rendering failed: %w", err)
+		return nil, fmt.Errorf("report: PDF rendering failed: %w%s", err, browserFailure(stderr.String()))
 	}
 
 	pdf, err := os.ReadFile(out)
@@ -99,4 +100,23 @@ func RenderPDF(ctx context.Context, html []byte) ([]byte, error) {
 		return nil, errors.New("report: the browser output is not a PDF")
 	}
 	return pdf, nil
+}
+
+// browserFailure explains a browser crash from its own FATAL line. The
+// detail goes to the server log (the HTTP response stays generic). A
+// socket path that is too long is named explicitly because the cause is
+// the deployment's TMPDIR, not the report, and "signal: aborted" alone
+// does not say so.
+func browserFailure(stderr string) string {
+	for _, line := range strings.Split(stderr, "\n") {
+		if !strings.Contains(line, "FATAL") {
+			continue
+		}
+		msg := strings.TrimSpace(line[strings.Index(line, "FATAL"):])
+		if strings.Contains(msg, "Socket path too long") {
+			msg += " (the browser binds a unix socket under TMPDIR; use a shorter TMPDIR for the server)"
+		}
+		return ": " + msg
+	}
+	return ""
 }
