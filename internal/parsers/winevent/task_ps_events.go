@@ -63,7 +63,11 @@ func normalizeTaskPSEvent(ev *model.Event, in Input) (handled, mapped bool) {
 				meaning = "Task Scheduler recorded that a task action started."
 			} else {
 				ev.Extra["action"] = "task_action_completed"
-				setExtra(ev, "result_code", p["ResultCode"])
+				// Completion is the scheduler observation, not proof of program
+				// success. Preserve presence and the decoded literal, as for 202.
+				if value, recorded := p["ResultCode"]; recorded {
+					ev.Extra["result_code"] = value
+				}
 				meaning = "Task Scheduler recorded that a task action completed, with the result code shown."
 			}
 		case 202:

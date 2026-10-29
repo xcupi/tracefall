@@ -32,12 +32,13 @@ recorded ResultCode presence and literal text to `extra.result_code`. Its
 interpretation: a zero, padded, malformed, missing or empty code does not turn
 that failure into success or establish payload execution/effects.
 
-The existing Event 201 completion path still passes ResultCode through shared
-`setExtra`, which trims whitespace and omits empty/dash tokens. Native raw 201
-fidelity is repaired here, but normalized 201 literal fidelity is NOT repaired.
-A separate narrowly authorized shared-mapper change with presence/literal guard
-tests is required to close that downstream gate. This reader patch must not be
-represented as full native-to-normalized fidelity for Event 201.
+The Event 201 completion path also copies ResultCode with explicit presence and
+literal text, without `setExtra` trimming or empty/dash omission. Its
+`action=task_action_completed` and `outcome=observed` remain unchanged: completion
+is a scheduler observation, not proof of a successful program outcome. Zero,
+nonzero, missing and malformed codes are retained without numeric interpretation
+or new status inference. Only ResultCode changes on this path; all other field
+policies and existing record semantics are unchanged.
 
 CSV production is unchanged and explicitly deferred. CSV maps are normalized
 export values, not original XML/BinXML string literals. Neither lost export
@@ -56,11 +57,26 @@ stringification; Security records carrying ResultCode do not gain new mapping
 semantics. A compiling Go-overlay old-trim mutation must fail a literal
 assertion without changing tracked source bytes.
 
-Acceptance proof is retained outside the repository. A fresh compiled isolated
-worker comparison on one existing selected working source checks complete raw
-and normalized hash-row parity with retained reference output. It is not a
-new whole-source independent-reader census or a whole-case completeness claim.
-A fresh tiny compiled HTTP import checks persisted Event 202 Unicode/control
-padding against the native string and an independent reader. Targeted tests,
-races, vet and builds are separate from parent independent review and the full
-suite; neither the full suite nor a new whole-case import is part of this fix.
+Acceptance proof is retained outside the repository. The reader-fix baseline
+`cf688c2` retains its selected-source worker comparison, full raw/normalized
+hash-row parity and 113 Event 202 failures. That existing native census/import
+was not repeated for this mapper-only follow-up. It is not a new whole-source
+independent-reader census or a whole-case completeness claim.
+
+The follow-up closes native Event 201/202 ResultCode fidelity for the tested
+matrix: 22 synthetic native records through raw evidence, shared normalization,
+a compiled isolated worker and a fresh persisted HTTP import. Controls include
+missing versus present empty, dash, Unicode/control padding, malformed strings,
+zero/leading zeroes and actual UInt32 substitutions with unchanged decimal
+stringification. Production detection/correlation negative controls add no
+program-success, payload-execution or maliciousness conclusions. Existing
+provider/channel, other scheduler records and classic PowerShell tests remain
+green. Shared Input tests and representable native/CSV adapter tests prove
+semantic parity, not recovery of literals already lost by CSV formatting.
+A compiling old-`setExtra` overlay must fail literal assertions; inherited strict
+201 empty/padded overlays must pass without weakening their assertions.
+
+Targeted tests, races, scoped vet and builds are separate from parent independent
+review of the whole `ed04145..final` reader-plus-mapper range before merge. The
+full suite, a new whole-case import, arbitrary EventData literal fidelity and
+CSV original XML/BinXML fidelity are NOT VERIFIED by this vertical slice.

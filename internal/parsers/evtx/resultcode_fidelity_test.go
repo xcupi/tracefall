@@ -43,7 +43,7 @@ func TestNativeResultCodeLiteral(t *testing.T) {
 			if !e.Timestamp.Equal(ts) || e.Timestamp.Nanosecond() != 123456700 || e.SourceReference != "record:9" || e.Extra["event_provider"] != provider || e.Extra["event_channel"] != channel || e.Host != "HOST01" || e.Extra["evtx_computer"] != "host01" {
 				t.Fatal("record identity, provider/channel case or time changed")
 			}
-			// Adapter must feed the same literal to the unchanged shared mapper.
+			// Adapter must feed the same literal to the shared mapper.
 			want := model.Event{Extra: map[string]string{}}
 			if !winevent.Normalize(&want, winevent.Input{EventID: id, Channel: channel, Provider: provider, Data: raw.Data}) {
 				t.Fatal("shared mapping rejected record")
@@ -53,17 +53,26 @@ func TestNativeResultCodeLiteral(t *testing.T) {
 			if got != wantValue || gotOK != wantOK {
 				t.Fatal("adapter/shared literal input parity lost")
 			}
-			if id == 202 && (got != value || !gotOK || e.Extra["outcome"] != "failure" || e.EventType != model.EventScheduledTaskRun) {
-				t.Fatal("failure literal/outcome lost")
+			if got != value || !gotOK {
+				t.Fatalf("native %d normalized literal = %q (%t), want %q", id, got, gotOK, value)
+			}
+			action, outcome := "task_action_completed", "observed"
+			if id == 202 {
+				action, outcome = "task_action_failed", "failure"
+			}
+			if e.Extra["action"] != action || e.Extra["outcome"] != outcome || e.EventType != model.EventScheduledTaskRun {
+				t.Fatal("literal code changed recorded action/outcome")
 			}
 		}
 	}
-	result, err := parser.New().Parse(writeLog(t, []evtxgen.Event{{RecordID: 10, EventID: 202, Provider: provider, Channel: channel, Timestamp: ts}}))
-	if err != nil || len(result.Events) != 1 {
-		t.Fatalf("missing-field parse: %v", err)
-	}
-	if _, ok := result.Events[0].Extra["result_code"]; ok {
-		t.Fatal("missing result code fabricated")
+	for _, id := range []int{201, 202} {
+		result, err := parser.New().Parse(writeLog(t, []evtxgen.Event{{RecordID: 10, EventID: id, Provider: provider, Channel: channel, Timestamp: ts}}))
+		if err != nil || len(result.Events) != 1 {
+			t.Fatalf("missing-field parse: %v", err)
+		}
+		if _, ok := result.Events[0].Extra["result_code"]; ok {
+			t.Fatal("missing result code fabricated")
+		}
 	}
 }
 
