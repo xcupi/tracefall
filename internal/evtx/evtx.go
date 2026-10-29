@@ -1365,6 +1365,13 @@ func extractData(section *node, into map[string]string, depth int) {
 	for i, f := range section.children {
 		text := strings.TrimSpace(f.text)
 		name := firstNonEmpty(f.attrs["Name"], f.attrs["name"])
+		// ResultCode is a recorded token, not a value to canonicalize before
+		// validation. Preserve its decoded string (including empty/padding)
+		// for both named Data and UserData leaves, regardless of event kind.
+		// Other named and positional fields retain their existing contract.
+		if name == "ResultCode" || (name == "" && len(f.children) == 0 && f.name == "ResultCode") {
+			text = f.text
+		}
 		switch {
 		case name != "":
 			into[name] = text
