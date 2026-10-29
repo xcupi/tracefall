@@ -814,16 +814,24 @@ func reportLimitations(d report.Data, in reportInputs) []string {
 		if !c.Incomplete() {
 			continue
 		}
+		// Notes, parser losses and unsupported kinds are independent facts.
+		// A harmless allocation note must not hide either loss counters or the
+		// case-wide warning that unmapped records are not a benign verdict.
+		if c.Unmapped > 0 {
+			unmappedOnly++
+			unmappedRecords += c.Unmapped
+		}
+		var details []string
 		if len(c.Notes) > 0 {
-			problems = append(problems, sf.Path+": "+strings.Join(c.Notes, "; "))
-			continue
+			details = append(details, strings.Join(c.Notes, "; "))
 		}
 		if c.Undated > 0 || c.RecordsFailed > 0 || c.ChunksFailed > 0 || c.LimitReached || c.UnlistedRecords > 0 {
-			problems = append(problems, fmt.Sprintf("%s: parser coverage is incomplete; records_failed=%d chunks_failed=%d undated=%d capped=%t unmapped=%d. See source-level parser coverage before drawing conclusions.", sf.Path, c.RecordsFailed, c.ChunksFailed, c.Undated, c.LimitReached, c.Unmapped))
-			continue
+			details = append(details, fmt.Sprintf("parser coverage is incomplete; records_failed=%d chunks_failed=%d undated=%d capped=%t unmapped=%d. See source-level parser coverage before drawing conclusions.", c.RecordsFailed, c.ChunksFailed, c.Undated, c.LimitReached, c.Unmapped))
 		}
-		unmappedOnly++
-		unmappedRecords += c.Unmapped
+		if len(details) > 0 {
+			// Keep one bounded diagnostic entry per source, not per caveat.
+			problems = append(problems, sf.Path+": "+strings.Join(details, "; "))
+		}
 	}
 	sort.Strings(problems)
 	for i, l := range problems {
