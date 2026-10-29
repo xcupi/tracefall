@@ -479,6 +479,9 @@ type reader struct {
 	// not just where in this slice.
 	base int
 	pos  int
+	// Only template-definition elements carry the dependency identifier.
+	// Literal fragments (including BinXML substitution values) omit it.
+	inTemplate bool
 }
 
 // at returns the chunk-relative offset of the current position.
@@ -637,8 +640,10 @@ func (f *File) parseElement(c *chunk, r *reader, token byte, subs []subValue, de
 	if depth > f.lim.MaxDepth {
 		return nil, fmt.Errorf("%w: BinXML nested deeper than %d elements", ErrLimitExceeded, f.lim.MaxDepth)
 	}
-	if _, err := r.u16(); err != nil { // dependency identifier
-		return nil, err
+	if r.inTemplate {
+		if _, err := r.u16(); err != nil { // dependency identifier
+			return nil, err
+		}
 	}
 	if _, err := r.u32(); err != nil { // data size
 		return nil, err
@@ -859,12 +864,12 @@ func (f *File) parseTemplateInstance(c *chunk, r *reader, depth int) (*node, err
 	if err != nil {
 		return nil, err
 	}
-	return f.parseBinXMLDepth(c, tmpl.body, tmpl.bodyStart, subs, depth)
+	return f.parseBinXMLDepth(c, tmpl.body, tmpl.bodyStart, subs, depth, true)
 }
 
-func (f *File) parseBinXMLDepth(c *chunk, data []byte, base int, subs []subValue, depth int) (*node, error) {
+func (f *File) parseBinXMLDepth(c *chunk, data []byte, base int, subs []subValue, depth int, inTemplate bool) (*node, error) {
 	root := &node{name: "#document"}
-	r := &reader{b: data, base: base}
+	r := &reader{b: data, base: base, inTemplate: inTemplate}
 	if err := f.parseTokens(c, r, root, subs, depth); err != nil {
 		return nil, err
 	}
@@ -952,7 +957,7 @@ func (f *File) readSubstitution(c *chunk, r *reader, subs []subValue, depth int)
 		// name references resolve. A malformed fragment is an error for
 		// the record, not an empty value: silently rendering it empty is
 		// how EventData disappeared from every Windows log.
-		sub, err := f.parseBinXMLDepth(c, v.data, v.off, nil, depth+1)
+		sub, err := f.parseBinXMLDepth(c, v.data, v.off, nil, depth+1, false)
 		if err != nil {
 			return "", err
 		}
@@ -988,7 +993,7 @@ func (f *File) contentSubstitution(c *chunk, r *reader, parent *node, subs []sub
 	if depth+1 > f.lim.MaxDepth {
 		return "", fmt.Errorf("%w: nested BinXML substitution too deep", ErrLimitExceeded)
 	}
-	doc, err := f.parseBinXMLDepth(c, v.data, v.off, nil, depth+1)
+	doc, err := f.parseBinXMLDepth(c, v.data, v.off, nil, depth+1, false)
 	if err != nil {
 		return "", err
 	}
