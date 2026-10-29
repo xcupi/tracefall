@@ -85,6 +85,7 @@ func (s *Service) spoolReportCited(ctx context.Context, caseID string, ids []str
 	c := &reportCited{meta: map[string]reportCitedMeta{}, display: map[string]model.Event{}}
 	each := func(fn func(model.Event) error) error {
 		_, err := forEachReportCited(ctx, caseID, ids, s.store.EventsByIDs, func(e model.Event) error {
+			_ = s.checkpoint("cited-event") // observer only: ctx itself stops the stream
 			c.meta[e.ID] = reportCitedMeta{e.Timestamp, e.ArtifactType, e.CollectionID, e.Host, e.User}
 			return fn(e)
 		})

@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"io"
 	"sort"
 	"time"
@@ -50,12 +51,23 @@ func (a *timelineAgg) add(e model.Event) {
 // of the same events, in one streamed pass. The CSV is byte-identical to the
 // one ExportTimelineCSV writes, because both use timelineCSVWriter.
 func (s *Service) streamTimeline(caseID string, w io.Writer) (*timelineAgg, error) {
+	return s.streamTimelineCtx(context.Background(), caseID, w)
+}
+
+// streamTimelineCtx is streamTimeline that stops at the next event once ctx is
+// done. The store query in flight is not cancellable (ForEachEvent takes no
+// context); the walk and the writer stop at the next row.
+func (s *Service) streamTimelineCtx(ctx context.Context, caseID string, w io.Writer) (*timelineAgg, error) {
 	tw, err := newTimelineCSVWriter(w)
 	if err != nil {
 		return nil, err
 	}
 	agg := newTimelineAgg()
 	err = s.store.ForEachEvent(caseID, func(e model.Event) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		_ = s.checkpoint("timeline-event") // observer only: ctx above stops the stream
 		agg.add(e)
 		return tw.add(e)
 	})

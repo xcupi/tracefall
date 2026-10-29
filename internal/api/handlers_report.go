@@ -30,6 +30,9 @@ func reportHeaders(w http.ResponseWriter, contentType, filename string, inline b
 func (h *handlers) reportHTML(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	html, sum, err := h.as(r).ReportHTML(id)
+	if clientGone(r, err) {
+		return
+	}
 	if h.fail(w, err) {
 		return
 	}
@@ -43,8 +46,8 @@ func (h *handlers) reportHTML(w http.ResponseWriter, r *http.Request) {
 func (h *handlers) reportBundle(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	d, err := h.as(r).ReportBundleFile(id)
-	if isCancelled(err) {
-		return // the client left while queued; nobody is listening
+	if clientGone(r, err) {
+		return // the client left; nobody is listening
 	}
 	if h.fail(w, err) {
 		return
@@ -63,6 +66,9 @@ func (h *handlers) reportBundle(w http.ResponseWriter, r *http.Request) {
 func (h *handlers) reportPDF(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	pdf, err := h.as(r).ReportPDF(r.Context(), id)
+	if clientGone(r, err) {
+		return
+	}
 	switch {
 	case errors.Is(err, report.ErrNoRenderer):
 		writeError(w, http.StatusNotImplemented,

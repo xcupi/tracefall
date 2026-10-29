@@ -62,13 +62,16 @@ func (s *Service) ReportBundleFile(caseID string) (*BundleDownload, error) {
 		return nil, err
 	}
 	defer b.release()
+	if err := s.checkpoint("bundle-write"); err != nil {
+		return nil, err
+	}
 
 	dir := s.reportsDir(caseID)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("creating the report directory: %w", err)
 	}
 	path := filepath.Join(dir, ".download-"+uuid.NewString()+".tmp")
-	sum, size, err := writeBundleFile(path, now, b)
+	sum, size, err := writeBundleFileCtx(s.opCtx(), path, now, b)
 	if err != nil {
 		os.Remove(path)
 		return nil, fmt.Errorf("writing the report bundle: %w", err)
@@ -78,12 +81,20 @@ func (s *Service) ReportBundleFile(caseID string) (*BundleDownload, error) {
 		os.Remove(path)
 		return nil, fmt.Errorf("opening the report bundle: %w", err)
 	}
+	// Issuance commits at the audit entry below. Until then an abandoned
+	// request leaves no file and no history entry.
+	if err := s.checkpoint("pre-issue"); err != nil {
+		f.Close()
+		os.Remove(path)
+		return nil, err
+	}
 	d := &BundleDownload{File: f, Size: size, BundleSHA256: sum, ReportSHA256: b.Manifest.Report.SHA256, path: path}
 	if os.Remove(path) == nil {
 		d.path = ""
 	}
 	s.audit(caseID, model.AuditExport, model.TargetCase, caseID,
 		fmt.Sprintf("Forensic report bundle issued (report.html SHA-256 %s)", d.ReportSHA256))
+	_ = s.checkpoint("issued")
 	return d, nil
 }
 

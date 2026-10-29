@@ -2,6 +2,7 @@ package report
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"html/template"
 )
@@ -18,6 +19,39 @@ func Render(d Data) ([]byte, error) {
 		return nil, fmt.Errorf("report: rendering: %w", err)
 	}
 	return buf.Bytes(), nil
+}
+
+// RenderContext is Render that stops once ctx is done. html/template cannot be
+// interrupted from outside, so the buffer it writes into refuses further writes
+// after cancellation; Execute then returns at its next write. Nothing is
+// returned for a cancelled render.
+func RenderContext(ctx context.Context, d Data) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	var buf bytes.Buffer
+	if err := reportTmpl.Execute(&ctxBuffer{ctx: ctx, buf: &buf}, d); err != nil {
+		if cerr := ctx.Err(); cerr != nil {
+			return nil, cerr
+		}
+		return nil, fmt.Errorf("report: rendering: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+type ctxBuffer struct {
+	ctx context.Context
+	buf *bytes.Buffer
+}
+
+func (c *ctxBuffer) Write(p []byte) (int, error) {
+	if err := c.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return c.buf.Write(p)
 }
 
 var reportTmpl = template.Must(template.New("report").Funcs(template.FuncMap{

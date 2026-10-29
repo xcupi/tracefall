@@ -82,6 +82,9 @@ func (s *Service) buildReport(caseID string, now time.Time) (reportBuild, error)
 }
 
 func (s *Service) assembleAndRender(caseID string, now time.Time, spools *[]string) (reportBuild, error) {
+	if err := s.checkpoint("start"); err != nil {
+		return reportBuild{}, err
+	}
 	c, err := s.GetCase(caseID)
 	if err != nil {
 		return reportBuild{}, err
@@ -129,28 +132,40 @@ func (s *Service) assembleAndRender(caseID string, now time.Time, spools *[]stri
 	if err != nil {
 		return reportBuild{}, fmt.Errorf("counting events: %w", err)
 	}
+	if err := s.checkpoint("loaded"); err != nil {
+		return reportBuild{}, err
+	}
 	citedIDs := findingEventIDs(findings)
 	for _, c := range correlations {
 		citedIDs = append(citedIDs, c.EventIDs...)
 	}
-	citedFile, cited, err := s.spoolReportCited(context.Background(), caseID, citedIDs, findings, correlations)
+	citedFile, cited, err := s.spoolReportCited(s.opCtx(), caseID, citedIDs, findings, correlations)
 	if err != nil {
 		return reportBuild{}, fmt.Errorf("building cited-events.json: %w", err)
 	}
 	*spools = append(*spools, citedFile.Path)
-	invs, err := s.caseInvestigations(caseID, findings, correlations)
+	if err := s.checkpoint("cited"); err != nil {
+		return reportBuild{}, err
+	}
+	invs, err := s.caseInvestigationsCtx(s.opCtx(), caseID, findings, correlations)
 	if err != nil {
 		return reportBuild{}, fmt.Errorf("computing investigations: %w", err)
+	}
+	if err := s.checkpoint("investigations"); err != nil {
+		return reportBuild{}, err
 	}
 
 	// Attachments first: the report prints their hashes. The timeline is the
 	// case's whole event list as CSV, so it is spooled to disk rather than held
 	// in memory; its digest is computed while it is written.
-	tlPath, timeline, tlSHA, tlSize, err := s.spoolTimeline(caseID, s.reportsDir(caseID))
+	tlPath, timeline, tlSHA, tlSize, err := s.spoolTimelineCtx(s.opCtx(), caseID, s.reportsDir(caseID))
 	if err != nil {
 		return reportBuild{}, fmt.Errorf("building timeline.csv: %w", err)
 	}
 	*spools = append(*spools, tlPath)
+	if err := s.checkpoint("timeline"); err != nil {
+		return reportBuild{}, err
+	}
 	var fl bytes.Buffer
 	if err := writeFindingsCSV(findings, statuses, &fl); err != nil {
 		return reportBuild{}, fmt.Errorf("building findings.csv: %w", err)
@@ -170,6 +185,9 @@ func (s *Service) assembleAndRender(caseID string, now time.Time, spools *[]stri
 		citedFile,
 	}
 
+	if err := s.checkpoint("attachments"); err != nil {
+		return reportBuild{}, err
+	}
 	ext, err := s.reportExternal(caseID)
 	if err != nil {
 		return reportBuild{}, fmt.Errorf("loading outside-service answers: %w", err)
@@ -193,8 +211,14 @@ func (s *Service) assembleAndRender(caseID string, now time.Time, spools *[]stri
 	if err != nil {
 		return reportBuild{}, fmt.Errorf("loading the model-drafted summary: %w", err)
 	}
-	html, err := report.Render(d)
+	if err := s.checkpoint("render"); err != nil {
+		return reportBuild{}, err
+	}
+	html, err := report.RenderContext(s.opCtx(), d)
 	if err != nil {
+		return reportBuild{}, err
+	}
+	if err := s.checkpoint("rendered"); err != nil {
 		return reportBuild{}, err
 	}
 	m := report.NewManifest(d, "report.html", html, files)
@@ -938,8 +962,14 @@ func (s *Service) ReportHTML(caseID string) ([]byte, string, error) {
 	// The HTML is already rendered; the spooled timeline is not part of it.
 	defer b.release()
 	sum := b.Manifest.Report.SHA256
+	// Issuance commits at the audit entry: abandoned before it, nothing is
+	// recorded; once recorded, the report stands.
+	if err := s.checkpoint("pre-issue"); err != nil {
+		return nil, "", err
+	}
 	s.audit(caseID, model.AuditExport, model.TargetCase, caseID,
 		fmt.Sprintf("Forensic report issued as HTML (report.html SHA-256 %s)", sum))
+	_ = s.checkpoint("issued") // observer only: the issuance above stands
 	return b.HTML, sum, nil
 }
 
@@ -956,8 +986,14 @@ func (s *Service) ReportPDF(ctx context.Context, caseID string) ([]byte, error) 
 		return nil, err
 	}
 	defer b.release()
+	if err := s.checkpoint("pdf"); err != nil {
+		return nil, err
+	}
 	pdf, err := report.RenderPDF(ctx, b.HTML)
 	if err != nil {
+		return nil, err
+	}
+	if err := s.checkpoint("pre-issue"); err != nil {
 		return nil, err
 	}
 	s.audit(caseID, model.AuditExport, model.TargetCase, caseID,

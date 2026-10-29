@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"io"
@@ -17,6 +18,15 @@ var spoolSeq atomic.Uint64
 // written, so the content is never held in memory. The caller owns the file
 // and removes it once the bundle is written.
 func (s *Service) spoolTimeline(caseID, dir string) (path string, agg *timelineAgg, sum string, size int64, err error) {
+	return s.spoolTimelineCtx(context.Background(), caseID, dir)
+}
+
+// spoolTimelineCtx is spoolTimeline that stops, and removes its file, once ctx
+// is done.
+func (s *Service) spoolTimelineCtx(ctx context.Context, caseID, dir string) (path string, agg *timelineAgg, sum string, size int64, err error) {
+	if err := ctx.Err(); err != nil {
+		return "", nil, "", 0, err
+	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", nil, "", 0, err
 	}
@@ -28,7 +38,7 @@ func (s *Service) spoolTimeline(caseID, dir string) (path string, agg *timelineA
 	}
 	h := sha256.New()
 	counter := &countWriter{w: io.MultiWriter(f, h)}
-	agg, err = s.streamTimeline(caseID, counter)
+	agg, err = s.streamTimelineCtx(ctx, caseID, ctxWriter{ctx: ctx, w: counter})
 	if cerr := f.Close(); err == nil {
 		err = cerr
 	}

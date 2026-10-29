@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -90,17 +91,22 @@ func (s *Service) GenerateCaseReport(caseID, jobID string) (StoredReport, error)
 // and size. The bundle is streamed: the spooled timeline is copied from its
 // own file, never loaded whole.
 func writeBundleFile(path string, generated time.Time, b reportBuild) (string, int64, error) {
+	return writeBundleFileCtx(context.Background(), path, generated, b)
+}
+
+// writeBundleFileCtx is writeBundleFile that stops mid-stream once ctx is done.
+// The caller removes the partial file on error.
+func writeBundleFileCtx(ctx context.Context, path string, generated time.Time, b reportBuild) (string, int64, error) {
+	if err := ctx.Err(); err != nil {
+		return "", 0, err
+	}
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
 	if err != nil {
 		return "", 0, err
 	}
 	h := sha256.New()
 	cw := &countWriter{w: io.MultiWriter(f, h)}
-	all := append([]report.File{
-		{Name: "report.html", Data: b.HTML},
-		{Name: report.ManifestName, Data: b.ManifestJSON},
-	}, b.Files...)
-	if err := report.BundleTo(cw, generated, all); err != nil {
+	if err := writeBundleTo(ctx, cw, generated, b); err != nil {
 		f.Close()
 		return "", 0, err
 	}
@@ -108,4 +114,13 @@ func writeBundleFile(path string, generated time.Time, b reportBuild) (string, i
 		return "", 0, err
 	}
 	return hex.EncodeToString(h.Sum(nil)), cw.n, nil
+}
+
+// writeBundleTo streams the bundle ZIP to w, stopping once ctx is done.
+func writeBundleTo(ctx context.Context, w io.Writer, generated time.Time, b reportBuild) error {
+	all := append([]report.File{
+		{Name: "report.html", Data: b.HTML},
+		{Name: report.ManifestName, Data: b.ManifestJSON},
+	}, b.Files...)
+	return report.BundleTo(ctxWriter{ctx: ctx, w: w}, generated, all)
 }
