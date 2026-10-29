@@ -318,7 +318,7 @@ func (s *Service) StartNarrative(caseID string, acknowledge bool) (NarrativeStat
 	s.narr.runs[caseID] = run
 	s.narr.mu.Unlock()
 	handedOff = true
-	go func() { defer release(); s.runNarrative(ctx, caseID, pr, run, host, local, sum, client) }()
+	go s.runNarrative(ctx, caseID, pr, run, host, local, sum, client, release)
 	return s.NarrativeStatus(caseID)
 }
 
@@ -336,7 +336,7 @@ func (s *Service) CancelNarrative(caseID string) error {
 	return nil
 }
 
-func (s *Service) runNarrative(ctx context.Context, caseID string, pr *narrative.Prepared, run *narrativeRun, host string, local bool, sum string, client llm.Chatter) {
+func (s *Service) runNarrative(ctx context.Context, caseID string, pr *narrative.Prepared, run *narrativeRun, host string, local bool, sum string, client llm.Chatter, release func()) {
 	n := model.Narrative{ID: uuid.NewString(), CaseID: caseID, CreatedAt: time.Now().UTC(), Destination: host, Local: local, Model: client.ModelName(),
 		PayloadSystem: pr.System, PayloadUser: pr.User, PayloadSHA256: sum, FindingIDs: pr.FindingIDs, RequestedBy: s.auditActor(), SentencesJSON: "[]"}
 	finish := func(state, reason string) {
@@ -346,15 +346,19 @@ func (s *Service) runNarrative(ctx context.Context, caseID string, pr *narrative
 		if serr := s.store.SaveNarrative(n); serr != nil && state == "finished" {
 			state, reason = "failed", "could not store the draft"
 		}
-		run.mu.Lock()
-		run.st.State, run.st.FinishedAt, run.st.Reason = state, time.Now().UTC().Format(time.RFC3339), reason
-		run.mu.Unlock()
 		run.cancel()
 		s.audit(caseID, model.AuditNarrativeFinished, model.TargetCase, caseID, fmt.Sprintf(
 			"Summary request %s: %d sentence(s) kept, %d dropped by validation.%s%s",
 			state, len(sentencesOf(n)), n.Rejected,
 			map[bool]string{true: fmt.Sprintf(" %d prompt and %d completion tokens.", n.PromptTokens, n.CompletionTokens), false: ""}[n.PromptTokens > 0 || n.CompletionTokens > 0],
 			map[bool]string{true: " " + reason + ".", false: ""}[reason != ""]))
+		// A terminal run must have no remaining persistence or provider lease.
+		// Status readers may tear down storage or select another provider as
+		// soon as they observe completion, including failure/cancellation.
+		run.mu.Lock()
+		release()
+		run.st.State, run.st.FinishedAt, run.st.Reason = state, time.Now().UTC().Format(time.RFC3339), reason
+		run.mu.Unlock()
 	}
 
 	msgs := []llm.Message{{Role: "system", Content: pr.System}, {Role: "user", Content: pr.User}}
