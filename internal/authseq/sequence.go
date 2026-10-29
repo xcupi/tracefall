@@ -2,6 +2,7 @@
 package authseq
 
 import (
+	"net/netip"
 	"sort"
 	"strings"
 	"time"
@@ -42,7 +43,7 @@ func BeforeSuccess(events []model.Event, threshold int, gap, window time.Duratio
 	}
 	domain := func(e model.Event) string { return strings.ToLower(e.Extra["target_domain"]) }
 	compatible := func(f, s model.Event) bool {
-		if f.NetworkSource != "" && s.NetworkSource != "" && f.NetworkSource != s.NetworkSource {
+		if f.NetworkSource != "" && s.NetworkSource != "" && sourceKey(f.NetworkSource) != sourceKey(s.NetworkSource) {
 			return false
 		}
 		if domain(f) != "" && domain(s) != "" && domain(f) != domain(s) {
@@ -75,7 +76,7 @@ func BeforeSuccess(events []model.Event, threshold int, gap, window time.Duratio
 		// One stream per failure context (source, domain, subject session).
 		streams := map[string]*stream{}
 		ctxOf := func(e model.Event) string {
-			return strings.Join([]string{e.NetworkSource, domain(e), subject(e)}, "\x00")
+			return strings.Join([]string{sourceKey(e.NetworkSource), domain(e), subject(e)}, "\x00")
 		}
 		for _, e := range es {
 			if e.EventType == model.EventLogonFailure {
@@ -128,4 +129,15 @@ func BeforeSuccess(events []model.Event, threshold int, gap, window time.Duratio
 		}
 	}
 	return out
+}
+
+// sourceKey canonicalizes valid literal addresses for comparison only. Unmap
+// merges IPv4-mapped IPv6 with IPv4, but not IPv4-compatible IPv6. Zones remain
+// part of identity. Invalid strings are exact recorded literals (no trimming,
+// hostname case folding, port stripping, DNS lookup or address inference).
+func sourceKey(raw string) string {
+	if addr, err := netip.ParseAddr(raw); err == nil {
+		return "ip\x00" + addr.WithZone("").Unmap().String() + "\x00" + addr.Zone()
+	}
+	return "literal\x00" + raw
 }

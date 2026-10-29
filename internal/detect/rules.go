@@ -9,6 +9,7 @@ import (
 
 	"tracefall/internal/authseq"
 	"tracefall/internal/cmdsem"
+	"tracefall/internal/hostid"
 	"tracefall/internal/model"
 	"tracefall/internal/procclass"
 )
@@ -310,98 +311,110 @@ func (executionThenPersistence) ID() string { return "execution-persistence-temp
 
 const persistenceWindow = 15 * time.Minute
 
-// Inputs names the event types this rule reads. Every event it can
-// match is among them; the engine loads only these, so a rule's memory is
-// bounded by what it reads, not by the case.
+// Identity contradictions can be recorded on any event type, not only on
+// execution/configuration rows. Read the full inventory for this rule rather
+// than silently dropping those blockers in the filtered production path.
 func (r executionThenPersistence) Inputs() model.EventFilter {
-	return model.EventFilter{Types: []string{model.EventProcessCreate, model.EventPrefetchExecution, model.EventRegistryRunKey, model.EventScheduledTaskCreate, model.EventRegistryPersistence, model.EventServiceInstall}}
+	return model.EventFilter{All: true}
 }
 
 func (r executionThenPersistence) Evaluate(events []model.Event) []model.Finding {
+	names := hostid.AcquisitionNames(events)
 	execs := append(append([]model.Event{}, byType(events, model.EventProcessCreate)...), byType(events, model.EventPrefetchExecution)...)
-
+	key := func(e model.Event) string { return eventKey(e.CaseID+"\x00"+names[e.ID], execTarget(e)) }
+	indexed := indexEvents(execs, key)
 	var persistence []model.Event
-	persistence = append(persistence, byType(events, model.EventRegistryRunKey)...)
-	persistence = append(persistence, byType(events, model.EventScheduledTaskCreate)...)
-	// Phase 4: registry persistence locations beyond Run/RunOnce
-	// (Winlogon/IFEO/AppInit_DLLs/service ImagePath) and service
-	// installation are both "this binary is now set to run again later"
-	// mechanisms just as much as a Run key or scheduled task is, so they
-	// belong in the same execution-then-persistence temporal check.
-	persistence = append(persistence, byType(events, model.EventRegistryPersistence)...)
-	persistence = append(persistence, byType(events, model.EventServiceInstall)...)
-
-	// Index execs by (host, target) so each persistence event's lookup
-	// below is O(1) instead of rescanning every execution in the case --
-	// see rule.go's eventKey/indexEvents doc.
-	execsByHostTarget := indexEvents(execs, func(e model.Event) string { return eventKey(e.Host, execTarget(e)) })
-
+	for _, typ := range []string{model.EventRegistryRunKey, model.EventScheduledTaskCreate, model.EventRegistryPersistence, model.EventServiceInstall} {
+		persistence = append(persistence, byType(events, typ)...)
+	}
+	sort.Slice(persistence, func(i, j int) bool {
+		if !persistence[i].Timestamp.Equal(persistence[j].Timestamp) {
+			return persistence[i].Timestamp.Before(persistence[j].Timestamp)
+		}
+		return persistence[i].ID < persistence[j].ID
+	})
 	var findings []model.Finding
 	for _, p := range persistence {
 		target := persistenceTarget(p)
-		if target == "" {
+		if target == "" || names[p.ID] == "" || !temporalRecorded(p) {
 			continue
 		}
-		// One finding per persistence event, backed by the single best
-		// matching execution -- not one per (exec, persistence) pair.
-		// Process-create (4688) is authoritative evidence of execution;
-		// Prefetch only approximates it (see pecmd's confidence note), so
-		// it's used only when no process-create match exists.
-		ex, ok := bestExecutionMatch(execsByHostTarget[eventKey(p.Host, target)], p, target)
+		ex, ok := bestExecutionMatch(indexed[key(p)], p, target, names)
 		if !ok {
 			continue
 		}
-		// "Then" needs two known times; undated evidence has no order.
-		if ex.Timestamp.IsZero() || p.Timestamp.IsZero() {
-			continue
+		path, _ := temporalTargetPath(p)
+		exPath, _ := temporalTargetPath(ex)
+		severity, confidence := model.SeverityLow, model.ConfidenceLow
+		basis := "Only the basename matches; the full target identity is uncertain."
+		if path != "" && exPath != "" {
+			basis = "The recorded full target paths match case-insensitively; path equality does not prove file-content identity."
+			if ex.EventType == model.EventProcessCreate {
+				severity, confidence = model.SeverityMedium, model.ConfidenceMedium
+			}
+		}
+		observation := "process-start observation"
+		if ex.EventType == model.EventPrefetchExecution {
+			observation = "Prefetch approximate execution observation"
+			basis += " Prefetch is approximate execution evidence, not a precise process-start instant."
 		}
 		mechanism, techniques := persistenceMechanism(p)
-		if procclass.IsPowerShell(ex.ProcessName) {
-			techniques = append(techniques, "T1059.001")
-		}
-		title := fmt.Sprintf("%s executed then established persistence via %s", target, mechanism)
-		desc := fmt.Sprintf(
-			"%q executed at %s on host %s, then a %s referencing the same executable was established at "+
-				"%s (%s later). Execution immediately followed by persistence for the same "+
-				"binary is a strong indicator of an intentional persistence step, not incidental activity.",
-			target, fmtTime(ex.Timestamp), p.Host, mechanism,
-			fmtTime(p.Timestamp), humanizeDuration(p.Timestamp.Sub(ex.Timestamp)))
-		findings = append(findings, newFinding(p.CaseID, r.ID(), title, model.SeverityCritical, model.ConfidenceHigh,
-			desc, techniques, []model.Event{ex, p}))
+		title := fmt.Sprintf("%s: execution observation before %s configuration (temporal context)", target, mechanism)
+		desc := fmt.Sprintf("A %s for %q is recorded at %s on host %s; %s configuration referencing that target is recorded at %s (%s later). %s This temporal context does not establish the configuration writer, intentional persistence, malice, or successful payload effects. Configuration time is not proof of execution or of when the setting took effect.", observation, target, fmtTime(ex.Timestamp), p.Host, mechanism, fmtTime(p.Timestamp), humanizeDuration(p.Timestamp.Sub(ex.Timestamp)), basis)
+		findings = append(findings, newFinding(p.CaseID, r.ID(), title, severity, confidence, desc, techniques, []model.Event{ex, p}))
 	}
 	return findings
 }
 
-// bestExecutionMatch returns the execution event that best explains
-// persistence event p establishing itself for target: the process-create
-// event nearest before p if one exists within window, otherwise the
-// nearest Prefetch execution record.
-func bestExecutionMatch(execs []model.Event, p model.Event, target string) (model.Event, bool) {
-	var bestCreate, bestPrefetch model.Event
-	foundCreate, foundPrefetch := false, false
-
+// Select context, not a process-instance or writer attribution. Prefer exact
+// paths, then process starts over approximate Prefetch, then latest time/ID.
+func bestExecutionMatch(execs []model.Event, p model.Event, target string, names map[string]string) (model.Event, bool) {
+	var best model.Event
+	found := false
+	pp, conflict := temporalTargetPath(p)
+	if conflict || !temporalRecorded(p) {
+		return best, false
+	}
+	rank := func(e model.Event) int {
+		path, _ := temporalTargetPath(e)
+		n := 0
+		if pp != "" && path != "" {
+			n += 2
+		}
+		if e.EventType == model.EventProcessCreate {
+			n++
+		}
+		return n
+	}
 	for _, ex := range execs {
-		if ex.Host != p.Host || execTarget(ex) != target {
+		if names[ex.ID] == "" || names[ex.ID] != names[p.ID] || ex.CaseID != p.CaseID || execTarget(ex) != target || !temporalRecorded(ex) {
+			continue
+		}
+		ep, bad := temporalTargetPath(ex)
+		if bad || (ep != "" && pp != "" && ep != pp) {
+			continue
+		}
+		exact := ep != "" && pp != ""
+		if !exact && (p.CollectionID == "" || ex.CollectionID == "") {
+			continue
+		}
+		// Cross-acquisition references require known scopes and exact full paths.
+		// Basename-only uncertainty stays within its original acquisition.
+		if ex.CollectionID != p.CollectionID && (!exact || ex.CollectionID == "" || p.CollectionID == "") {
 			continue
 		}
 		if !p.Timestamp.After(ex.Timestamp) || !withinWindow(ex.Timestamp, p.Timestamp, persistenceWindow) {
 			continue
 		}
-		switch ex.EventType {
-		case model.EventProcessCreate:
-			if !foundCreate || ex.Timestamp.After(bestCreate.Timestamp) {
-				bestCreate, foundCreate = ex, true
-			}
-		case model.EventPrefetchExecution:
-			if !foundPrefetch || ex.Timestamp.After(bestPrefetch.Timestamp) {
-				bestPrefetch, foundPrefetch = ex, true
-			}
+		if !found || rank(ex) > rank(best) || (rank(ex) == rank(best) && (ex.Timestamp.After(best.Timestamp) || (ex.Timestamp.Equal(best.Timestamp) && ex.ID < best.ID))) {
+			best, found = ex, true
 		}
 	}
-	if foundCreate {
-		return bestCreate, true
-	}
-	return bestPrefetch, foundPrefetch
+	return best, found
+}
+
+func temporalRecorded(e model.Event) bool {
+	return !e.Timestamp.IsZero() && e.ArtifactType != model.ArtifactMemoryAnalysis && e.Extra["timestamp_basis"] != "memory_snapshot"
 }
 
 // persistenceMechanism names the persistence mechanism a persistence event
@@ -409,8 +422,8 @@ func bestExecutionMatch(execs []model.Event, p model.Event, target string) (mode
 // executionThenPersistence's finding text. Registry persistence is
 // further split by regpersist's classification (stored in
 // Extra["registry_persistence_type"] by the parser that produced it) so a
-// Winlogon or IFEO hijack is described -- and mapped -- accurately rather
-// than lumped in with a plain Run key.
+// Winlogon or IFEO configuration is named separately from a plain Run key;
+// the location alone does not establish a malicious hijack.
 func persistenceMechanism(p model.Event) (mechanism string, techniques []string) {
 	switch p.EventType {
 	case model.EventScheduledTaskCreate:
@@ -420,9 +433,9 @@ func persistenceMechanism(p model.Event) (mechanism string, techniques []string)
 	case model.EventRegistryPersistence:
 		switch p.Extra["registry_persistence_type"] {
 		case "winlogon":
-			return "Winlogon Shell/Userinit hijack", []string{"T1547.004"}
+			return "Winlogon launch configuration", []string{"T1547.004"}
 		case "ifeo":
-			return "Image File Execution Options debugger hijack", []string{"T1546.012"}
+			return "Image File Execution Options debugger configuration", []string{"T1546.012"}
 		case "appinit_dlls":
 			return "AppInit_DLLs", []string{"T1547.001"}
 		case "service_image_path":
@@ -439,13 +452,13 @@ func persistenceMechanism(p model.Event) (mechanism string, techniques []string)
 // points at, for matching against prior execution events.
 func persistenceTarget(e model.Event) string {
 	if e.ProcessName != "" {
-		return e.ProcessName
+		return strings.ToLower(e.ProcessName)
 	}
 	return ""
 }
 
 func execTarget(e model.Event) string {
-	return e.ProcessName
+	return strings.ToLower(e.ProcessName)
 }
 
 // humanizeDuration renders a short elapsed-time phrase for finding

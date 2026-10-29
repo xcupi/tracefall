@@ -140,9 +140,9 @@ func TestBruteForceThenSuccess(t *testing.T) {
 func TestExecutionThenPersistence_OneFindingPerPersistenceEvent(t *testing.T) {
 	base := mustTime("2026-01-15T09:15:10Z")
 	events := []model.Event{
-		{ID: "create", EventType: model.EventProcessCreate, Host: "H1", ProcessName: "update.exe", Timestamp: base},
-		{ID: "prefetch", EventType: model.EventPrefetchExecution, Host: "H1", ProcessName: "update.exe", Timestamp: base.Add(1 * time.Second)},
-		{ID: "regkey", EventType: model.EventRegistryRunKey, Host: "H1", ProcessName: "update.exe", Timestamp: base.Add(52 * time.Second)},
+		{ID: "create", EventType: model.EventProcessCreate, CaseID: "case", CollectionID: "acq", Host: "H1", ProcessName: "update.exe", Timestamp: base},
+		{ID: "prefetch", EventType: model.EventPrefetchExecution, CaseID: "case", CollectionID: "acq", Host: "H1", ProcessName: "update.exe", Timestamp: base.Add(1 * time.Second)},
+		{ID: "regkey", EventType: model.EventRegistryRunKey, CaseID: "case", CollectionID: "acq", Host: "H1", ProcessName: "update.exe", Timestamp: base.Add(52 * time.Second)},
 	}
 	findings := executionThenPersistence{}.Evaluate(events)
 	if len(findings) != 1 {
@@ -155,8 +155,8 @@ func TestExecutionThenPersistence_OneFindingPerPersistenceEvent(t *testing.T) {
 
 	// Outside the persistence window: should not fire.
 	tooLate := []model.Event{
-		{ID: "create", EventType: model.EventProcessCreate, Host: "H1", ProcessName: "update.exe", Timestamp: base},
-		{ID: "regkey", EventType: model.EventRegistryRunKey, Host: "H1", ProcessName: "update.exe", Timestamp: base.Add(1 * time.Hour)},
+		{ID: "create", EventType: model.EventProcessCreate, CaseID: "case", CollectionID: "acq", Host: "H1", ProcessName: "update.exe", Timestamp: base},
+		{ID: "regkey", EventType: model.EventRegistryRunKey, CaseID: "case", CollectionID: "acq", Host: "H1", ProcessName: "update.exe", Timestamp: base.Add(1 * time.Hour)},
 	}
 	if got := (executionThenPersistence{}).Evaluate(tooLate); len(got) != 0 {
 		t.Errorf("got %d findings outside the persistence window, want 0", len(got))
@@ -502,8 +502,8 @@ func TestRemoteLogonObserved(t *testing.T) {
 func TestExecutionThenPersistence_ExtendedPersistenceTypes(t *testing.T) {
 	base := mustTime("2026-01-15T09:15:10Z")
 	events := []model.Event{
-		{ID: "create", EventType: model.EventProcessCreate, Host: "H1", ProcessName: "svc.exe", Timestamp: base},
-		{ID: "svcinstall", EventType: model.EventServiceInstall, Host: "H1", ProcessName: "svc.exe", Extra: map[string]string{"service_name": "WeirdSvc"}, Timestamp: base.Add(30 * time.Second)},
+		{ID: "create", EventType: model.EventProcessCreate, CaseID: "case", CollectionID: "acq", Host: "H1", ProcessName: "svc.exe", Timestamp: base},
+		{ID: "svcinstall", EventType: model.EventServiceInstall, CaseID: "case", CollectionID: "acq", Host: "H1", ProcessName: "svc.exe", Extra: map[string]string{"service_name": "WeirdSvc"}, Timestamp: base.Add(30 * time.Second)},
 	}
 	f := executionThenPersistence{}.Evaluate(events)
 	if len(f) != 1 {

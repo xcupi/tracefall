@@ -166,12 +166,12 @@ var ruleDocs = map[string]RuleDoc{
 		Techniques: []string{"T1110"},
 	},
 	"execution-persistence-temporal": {
-		Title:        "Execution followed by persistence",
-		Detects:      "A process executed and a persistence mechanism referencing the same target was established shortly afterwards.",
-		BaseSeverity: "critical", BaseConfidence: "high",
-		MaxSeverity: "critical", MaxConfidence: "high",
-		Basis:      "This is the only rule that asserts critical severity, because it requires two independent behaviours linked by a shared target and a bounded time window -- a materially stronger claim than either observation alone.",
-		Techniques: []string{"T1547.001", "T1053.005"},
+		Title:        "Execution observation before persistence configuration (temporal context)",
+		Detects:      "A dated execution observation precedes configuration referencing a matching target on the same validated host by at most fifteen minutes.",
+		BaseSeverity: "low", BaseConfidence: "low", MaxSeverity: "medium", MaxConfidence: "medium",
+		Escalates:  []string{"A process-start record and matching trustworthy full target paths (severity and confidence to medium); Prefetch remains low/low"},
+		Basis:      "Basename-only matches are uncertain low/low leads within one acquisition. Exact full paths may supply context across nonempty acquisitions of the same validated host and case. Unknown or contradictory identity, conflicting full paths, memory snapshots and unknown or unordered dates abstain. Prefetch approximates execution, not a precise process start. Neither path equality nor temporal order establishes a writer, intentional persistence, malice, file-content identity or successful payload effects.",
+		Techniques: []string{"T1547.001", "T1053.005", "T1543.003", "T1547.004", "T1546.012"},
 	},
 	"office-spawns-script-interpreter": {
 		Title:        "Office application spawned a script interpreter",
