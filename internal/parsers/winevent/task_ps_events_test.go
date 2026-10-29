@@ -19,6 +19,62 @@ const (
 	psProvider   = "PowerShell"
 )
 
+// Event 202 reports an action failure; the code text does not determine outcome.
+func TestTaskSchedulerActionFailure(t *testing.T) {
+	for _, code := range []string{"2147942402", "0", "0x00000000", "1", "unknown", "not-a-number", "-", "0000", ""} {
+		t.Run(fmt.Sprintf("code=%q", code), func(t *testing.T) {
+			data := map[string]string{"TaskName": `\Maintenance\Cleanup`, "TaskInstanceId": "{aAbBcCdD-0000-0000-0000-000000000001}", "ActionName": `C:\Tools\cleanup.exe`, "EnginePID": "00900", "ResultCode": code}
+			assertServerMapping(t, winevent.Input{Channel: taskChannel, Provider: taskProvider, EventID: 202, Data: data}, model.EventScheduledTaskRun, "", "", map[string]string{"action": "task_action_failed", "outcome": "failure", "result_code": code, "task_name": data["TaskName"], "task_instance_id": data["TaskInstanceId"], "action_name": data["ActionName"], "engine_pid": "00900"})
+		})
+	}
+	for _, code := range []string{" 0000 ", "-", "", "malformed:0"} {
+		e := model.Event{User: "logging-account"}
+		if !winevent.Normalize(&e, winevent.Input{Channel: taskChannel, Provider: taskProvider, EventID: 202, Data: map[string]string{"ResultCode": code}}) || e.Extra["result_code"] != code || e.User != "" {
+			t.Fatal("shared input literal/unknown actor not preserved")
+		}
+		if _, recorded := e.Extra["result_code"]; !recorded {
+			t.Fatal("explicit empty token lost")
+		}
+	}
+	for _, data := range []map[string]string{nil, {}, {"TaskName": "  task  ", "TaskInstanceId": "{partial}", "EnginePID": "not-pid"}} {
+		e := model.Event{Extra: map[string]string{"timestamp_partial": "Oct 20 12:34"}}
+		if !winevent.Normalize(&e, winevent.Input{Channel: taskChannel, Provider: taskProvider, EventID: 202, Data: data}) {
+			t.Fatal("partial record should retain the scheduler observation")
+		}
+		if _, ok := e.Extra["result_code"]; ok {
+			t.Fatal("missing ResultCode must not be invented")
+		}
+		for src, dst := range map[string]string{"TaskName": "task_name", "TaskInstanceId": "task_instance_id", "EnginePID": "engine_pid"} {
+			if e.Extra[dst] != data[src] {
+				t.Errorf("%s not retained literally", src)
+			}
+		}
+		if e.Extra["outcome"] != "failure" || e.Extra["action"] != "task_action_failed" || !e.Timestamp.IsZero() || e.Extra["timestamp_partial"] != "Oct 20 12:34" {
+			t.Fatal("partial fields must not fabricate a time or change the reported outcome")
+		}
+		if e.User != "" || e.ProcessName != "" || e.CommandLine != "" || e.Extra["process_id"] != "" || e.Extra["privileges"] != "" {
+			t.Fatal("action failure is not actor, process-launch or privilege evidence")
+		}
+		for _, caveat := range []string{"scheduler-reported", "payload", "causality", "maliciousness"} {
+			if !strings.Contains(e.Extra["limitations"], caveat) {
+				t.Errorf("missing caveat %q", caveat)
+			}
+		}
+	}
+}
+
+func TestTaskSchedulerActionFailureRedaction(t *testing.T) {
+	for _, id := range []int{200, 201, 202} {
+		e := model.Event{}
+		if !winevent.Normalize(&e, winevent.Input{Channel: taskChannel, Provider: taskProvider, EventID: id, Data: map[string]string{"ActionName": "net user alice DummySecret123 /add", "UserContext": "alice"}}) {
+			t.Fatal("not mapped")
+		}
+		if strings.Contains(e.Extra["action_name"], "DummySecret123") || e.Extra["action_name"] == "" || e.CommandLine != "" || e.User != "" {
+			t.Fatal("action redaction/actor boundary violated")
+		}
+	}
+}
+
 func TestTaskSchedulerExecutionRecords(t *testing.T) {
 	for _, tc := range []struct {
 		id     int
@@ -196,7 +252,7 @@ func TestPowerShellEngineParsingIsBounded(t *testing.T) {
 
 // The reserved IDs must not be reinterpreted on a wrong provider or channel.
 func TestTaskPSWrongProviderChannelNegative(t *testing.T) {
-	for _, id := range []int{100, 102, 106, 129, 140, 141, 142, 200, 201, 400, 403, 600} {
+	for _, id := range []int{100, 102, 106, 129, 140, 141, 142, 200, 201, 202, 400, 403, 600} {
 		for _, bad := range []winevent.Input{
 			{Channel: "Application", Provider: "Unrelated-Provider", EventID: id},
 			{Channel: taskChannel, Provider: psProvider, EventID: id},

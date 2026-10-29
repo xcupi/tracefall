@@ -29,7 +29,7 @@ func normalizeTaskPSEvent(ev *model.Event, in Input) (handled, mapped bool) {
 		return strings.EqualFold(in.Channel, channel) && strings.EqualFold(in.Provider, provider)
 	}
 	switch in.EventID {
-	case 100, 102, 129, 200, 201:
+	case 100, 102, 129, 200, 201, 202:
 		if !is(taskSchedulerChannel, taskSchedulerProvider) {
 			return true, false
 		}
@@ -66,9 +66,28 @@ func normalizeTaskPSEvent(ev *model.Event, in Input) (handled, mapped bool) {
 				setExtra(ev, "result_code", p["ResultCode"])
 				meaning = "Task Scheduler recorded that a task action completed, with the result code shown."
 			}
+		case 202:
+			// The event definition reports action failure, independently of the
+			// ResultCode literal. Do not decode it as HRESULT or infer success
+			// from zero, an unknown code, or an absent field. Preserve even
+			// malformed/empty recorded tokens; EnginePID is not a payload PID.
+			ev.User = "" // Neither CSV's row user nor the logging SID establishes an actor.
+			ev.Extra["action"] = "task_action_failed"
+			ev.Extra["outcome"] = "failure"
+			delete(ev.Extra, "task_instance_id") // 202 records TaskInstanceId, not InstanceId.
+			for src, dst := range map[string]string{"TaskName": "task_name", "TaskInstanceId": "task_instance_id", "EnginePID": "engine_pid", "ResultCode": "result_code"} {
+				if value, recorded := p[src]; recorded {
+					ev.Extra[dst] = value
+				}
+			}
+			setExtra(ev, "action_name", cmdsem.Redact(p["ActionName"]))
+			meaning = "Task Scheduler reported a task action failure. The outcome is scheduler-reported, not inferred from the result code."
 		}
 		ev.Extra["evidence_meaning"] = meaning
 		ev.Extra["limitations"] = "A scheduler-side observation of one record. Records sharing task_instance_id are correlated by that value only and are not merged; a missing record is not proof the step did not happen. Does not show what the launched program did, and a result code is retained as recorded without interpretation. Action text is redacted and may be incomplete. 129 carries no instance id."
+		if in.EventID == 202 {
+			ev.Extra["limitations"] = "Observation of Task Scheduler-reported action failure only (scheduler-reported outcome). Does not establish task start, process launch, payload effects, causality, maliciousness, actor identity or privilege. ResultCode is retained exactly as recorded without numeric interpretation; missing fields remain unknown. EnginePID identifies the recorded scheduler engine, not a payload process. Action text is redacted and may be incomplete. Instance identifiers do not by themselves prove effects or causality; records are not merged."
+		}
 	case 106, 140, 141, 142:
 		if !is(taskSchedulerChannel, taskSchedulerProvider) {
 			return true, false
