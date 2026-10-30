@@ -112,12 +112,21 @@ func TestExplain_EscalatedFindingIsIdentified(t *testing.T) {
 // A fixed-severity rule must not claim escalating conditions it does not
 // have.
 func TestExplain_FixedSeverityRuleSaysSo(t *testing.T) {
+	// Temporal persistence is now graded context, not a fixed Critical rule.
+	// Keep this invariant exercised by a rule that still has fixed levels.
+	doc, ok := detect.DocFor("brute-force-then-success")
+	if !ok {
+		t.Fatal("catalog is missing brute-force-then-success")
+	}
+	if doc.BaseSeverity != doc.MaxSeverity || doc.BaseConfidence != doc.MaxConfidence || len(doc.Escalates) != 0 {
+		t.Fatalf("fixture must remain a fixed-level rule: %+v", doc)
+	}
 	x := explainFinding(model.Finding{
-		RuleID: "execution-persistence-temporal", Severity: model.SeverityCritical, Confidence: model.ConfidenceHigh,
+		RuleID: doc.ID, Severity: doc.BaseSeverity, Confidence: doc.BaseConfidence,
 	}, []model.Event{evAt("1", 0, nil)})
 
 	if x.Escalated {
-		t.Error("a rule whose base severity IS critical cannot be escalated above it")
+		t.Error("a finding at a fixed rule's baseline cannot be escalated above it")
 	}
 	var found bool
 	for _, f := range x.Factors {
