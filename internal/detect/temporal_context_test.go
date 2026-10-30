@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"tracefall/internal/hostid"
 	"tracefall/internal/model"
 )
 
@@ -115,6 +116,11 @@ func TestTemporalContextIdentityInventoryAndInputs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	inventory := hostid.Inventory{}
+	for _, e := range es {
+		inventory.Add(e)
+	}
+	filtered = append(filtered, inventory.Events()...)
 	if got := (executionThenPersistence{}).Evaluate(filtered); len(got) != 0 {
 		t.Fatal("Inputs dropped identity blockers", got)
 	}

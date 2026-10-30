@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"sort"
 
+	"tracefall/internal/hostid"
 	"tracefall/internal/model"
 )
 
@@ -33,6 +34,8 @@ func Run(caseID string, events []model.Event) []model.Finding {
 // declared filter gives each rule the same findings as the full set.
 func RunFrom(caseID string, src model.EventSource) ([]model.Finding, error) {
 	var findings []model.Finding
+	var identity []model.Event
+	identityLoaded := false
 	for _, rule := range All() {
 		filter := model.EventFilter{All: true}
 		if in, ok := rule.(interface{ Inputs() model.EventFilter }); ok {
@@ -41,6 +44,22 @@ func RunFrom(caseID string, src model.EventSource) ([]model.Finding, error) {
 		events, err := src.Load(filter)
 		if err != nil {
 			return nil, fmt.Errorf("loading inputs for rule %s: %w", rule.ID(), err)
+		}
+		if in, ok := rule.(interface{ NeedsIdentityInventory() bool }); ok && in.NeedsIdentityInventory() {
+			if !identityLoaded {
+				inventory := hostid.Inventory{}
+				// Any normalized type may carry these identity facts. Each's
+				// selector chooses event types, not individual Extra keys.
+				if err := src.Each(func(string) bool { return true }, func(e model.Event) error {
+					inventory.Add(e)
+					return nil
+				}); err != nil {
+					return nil, fmt.Errorf("loading identity inventory for rule %s: %w", rule.ID(), err)
+				}
+				identity, identityLoaded = inventory.Events(), true
+			}
+			// Do not append into a source-owned backing array.
+			events = append(append([]model.Event(nil), events...), identity...)
 		}
 		findings = append(findings, rule.Evaluate(events)...)
 	}

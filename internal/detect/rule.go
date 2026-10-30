@@ -21,7 +21,12 @@ import (
 )
 
 // Rule evaluates one detection over a case's full, timestamp-sorted event
-// set and returns zero or more findings. A rule may fire more than once
+// set and returns zero or more findings. A rule may optionally implement
+// NeedsIdentityInventory() bool to receive compact case-wide hostid.Inventory
+// rows alongside its declared typed inputs. Those rows have no EventType and
+// are identity context only, never supporting observations. The inventory
+// retains distinct recorded tuples; it is not a hard memory cap.
+// A rule may fire more than once
 // (e.g. once per suspicious process) or not at all.
 type Rule interface {
 	ID() string

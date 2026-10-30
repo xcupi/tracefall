@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"tracefall/internal/hostid"
 	"tracefall/internal/model"
 )
 
@@ -27,6 +28,13 @@ func TestRuleInputs_DeclaredFilterGivesTheSameFindingsAsTheFullSet(t *testing.T)
 		typed, err := src.Load(filter)
 		if err != nil {
 			t.Fatal(err)
+		}
+		if in, ok := rule.(interface{ NeedsIdentityInventory() bool }); ok && in.NeedsIdentityInventory() {
+			inventory := hostid.Inventory{}
+			if err := src.Each(func(string) bool { return true }, func(e model.Event) error { inventory.Add(e); return nil }); err != nil {
+				t.Fatal(err)
+			}
+			typed = append(typed, inventory.Events()...)
 		}
 		want := mustJSON(t, withoutCreatedAt(rule.Evaluate(full)))
 		got := mustJSON(t, withoutCreatedAt(rule.Evaluate(typed)))

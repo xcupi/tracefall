@@ -311,21 +311,54 @@ func (executionThenPersistence) ID() string { return "execution-persistence-temp
 
 const persistenceWindow = 15 * time.Minute
 
-// Identity contradictions can be recorded on any event type, not only on
-// execution/configuration rows. Read the full inventory for this rule rather
-// than silently dropping those blockers in the filtered production path.
+// Identity facts on unrelated types arrive as compact metadata, not full
+// case observations. Only the six types below can support temporal findings.
+func (executionThenPersistence) NeedsIdentityInventory() bool { return true }
+
 func (r executionThenPersistence) Inputs() model.EventFilter {
-	return model.EventFilter{All: true}
+	return model.EventFilter{Types: []string{model.EventProcessCreate, model.EventPrefetchExecution, model.EventRegistryRunKey, model.EventScheduledTaskCreate, model.EventRegistryPersistence, model.EventServiceInstall}}
 }
 
 func (r executionThenPersistence) Evaluate(events []model.Event) []model.Finding {
-	names := hostid.AcquisitionNames(events)
-	execs := append(append([]model.Event{}, byType(events, model.EventProcessCreate)...), byType(events, model.EventPrefetchExecution)...)
+	// Only real execution/configuration observations require citation IDs;
+	// identity-only inventory rows are not observations or candidates.
+	observations, _ := model.SliceSource(events).Load(r.Inputs())
+	counts := map[string]int{}
+	for _, e := range observations {
+		counts[e.ID]++
+	}
+	valid := make([]model.Event, 0, len(observations))
+	for _, e := range observations {
+		if e.ID != "" && counts[e.ID] == 1 {
+			valid = append(valid, e)
+		}
+	}
+	// Project metadata independently of source IDs. Metadata may legitimately
+	// have empty/repeated IDs, and must neither replace an observation's
+	// identity nor lose contradictory facts through an ID-keyed lookup.
+	inventory := hostid.Inventory{}
+	for _, e := range events {
+		inventory.Add(e)
+	}
+	identityRows := inventory.Events()
+	for i := range identityRows {
+		identityRows[i].ID = fmt.Sprintf("identity:%d", i)
+	}
+	for i, e := range valid {
+		e.ID = fmt.Sprintf("observation:%d", i)
+		identityRows = append(identityRows, e)
+	}
+	resolved := hostid.AcquisitionNames(identityRows)
+	names := map[string]string{}
+	for i, e := range valid {
+		names[e.ID] = resolved[fmt.Sprintf("observation:%d", i)]
+	}
+	execs := append(append([]model.Event{}, byType(valid, model.EventProcessCreate)...), byType(valid, model.EventPrefetchExecution)...)
 	key := func(e model.Event) string { return eventKey(e.CaseID+"\x00"+names[e.ID], execTarget(e)) }
 	indexed := indexEvents(execs, key)
 	var persistence []model.Event
 	for _, typ := range []string{model.EventRegistryRunKey, model.EventScheduledTaskCreate, model.EventRegistryPersistence, model.EventServiceInstall} {
-		persistence = append(persistence, byType(events, typ)...)
+		persistence = append(persistence, byType(valid, typ)...)
 	}
 	sort.Slice(persistence, func(i, j int) bool {
 		if !persistence[i].Timestamp.Equal(persistence[j].Timestamp) {
