@@ -83,10 +83,20 @@ func (Parser) Parse(p string) (parsers.ParseResult, error) {
 	for _, c := range r.Times {
 		x[c.Role+"_filetime"] = strconv.FormatUint(c.Ticks, 10)
 		if c.Role == "initial_detection_time" {
-			e.Timestamp = c.Time()
+			instant := c.Time()
+			// Unsigned FILETIME starts in 1601. Structurally valid ticks can
+			// exceed JSON's calendar; retain them raw without dating the event.
+			if !instant.IsZero() && (instant.Year() < 1601 || instant.Year() > 9999) {
+				x["timestamp_normalization_note"] = "initial_detection_time outside supported FILETIME calendar 1601..9999; timestamp left undated; raw ticks retained"
+			} else {
+				e.Timestamp = instant
+			}
 		}
 	}
 	cov := &model.ParseCoverage{RecordsRead: 1, Mapped: 1, Notes: []string{"Strict modern Magic.Version:1.2 subset; full source EOF including padding. Raw private projection retains all typed entries and source bytes. Unknown flags have no inferred semantics."}}
+	if note := x["timestamp_normalization_note"]; note != "" {
+		cov.Notes = append(cov.Notes, note)
+	}
 	if e.Timestamp.IsZero() {
 		cov.Undated = 1
 	}

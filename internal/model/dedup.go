@@ -82,6 +82,12 @@ func (e Event) ComputeDedupHash() string {
 			parts = append(parts, e.Extra[key])
 		}
 	}
+	// History identity is the recorded detection plus its complete stateful
+	// source content, not a filename or collection. Keep identifiers literal:
+	// parser GUIDs are canonical, while malformed synthetic IDs stay distinct.
+	if e.ArtifactType == ArtifactDefenderHistory {
+		parts = append(parts, e.Extra["detection_id"], e.Extra["source_sha256"])
+	}
 	// A task namespace path identifies the configured object, not an import
 	// path. Equal commands in distinct tasks are distinct configurations.
 	if e.ArtifactType == ArtifactScheduledTask {
