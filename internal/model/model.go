@@ -1172,10 +1172,14 @@ type Finding struct {
 
 // Correlation types.
 const (
-	CorrelationTemporal      = "temporal"
-	CorrelationEntity        = "entity"
-	CorrelationProcessChain  = "process_chain"
-	CorrelationActivityChain = "activity_chain"
+	// Task contexts are navigable evidence associations, never finding support,
+	// investigation grouping edges or independent corroboration.
+	CorrelationTaskInstanceContext = "task_instance_context"
+	CorrelationTaskProcessContext  = "task_process_context"
+	CorrelationTemporal            = "temporal"
+	CorrelationEntity              = "entity"
+	CorrelationProcessChain        = "process_chain"
+	CorrelationActivityChain       = "activity_chain"
 	// CorrelationCredentialChain (Phase 4) links a credential-related
 	// event sequence: repeated failed logons into a success, or explicit
 	// credential use into the privileged activity that followed it. See

@@ -10017,6 +10017,8 @@ function toggleAttackTechniqueDetail(card, t) {
 // ---------------- Correlations tab ----------------
 
 const CORR_LABELS = {
+  task_instance_context: "Task instance context",
+  task_process_context: "Task process context",
   activity_chain: "Activity chain",
   process_chain: "Process chain",
   entity: "Entity correlation",
@@ -10074,6 +10076,10 @@ async function renderCorrelationsTab(content, caseId) {
 }
 
 function renderCorrelationCard(c, eventsById, eventFindingIdx, caseId) {
+  const contextOnly = c.correlation_type === "task_instance_context" || c.correlation_type === "task_process_context";
+  const span = contextOnly
+    ? `Recorded observation window: ${esc(fmtTime(c.first_seen))} — ${esc(fmtTime(c.last_seen))} (known times only; not causal order)`
+    : `${esc(fmtTime(c.first_seen))} &rarr; ${esc(fmtTime(c.last_seen))}`;
   const collIds = new Set(c.event_ids.map((id) => eventsById[id] && eventsById[id].collection_id).filter(Boolean));
   const collectionsLine = collIds.size > 1 ? `<div class="muted small" style="margin-top:6px">Spans ${[...collIds].map(collectionLabel).join(", ")}</div>` : "";
   const card = h(`
@@ -10084,7 +10090,7 @@ function renderCorrelationCard(c, eventsById, eventFindingIdx, caseId) {
       </div>
       <div class="finding-title">${esc(c.title)}</div>
       <div class="finding-desc">${esc(c.description)}</div>
-      <div class="muted small correlation-span">${esc(fmtTime(c.first_seen))} &rarr; ${esc(fmtTime(c.last_seen))}</div>
+      <div class="muted small correlation-span">${span}</div>
       ${collectionsLine}
       <div class="correlation-detail-host"></div>
     </div>`);

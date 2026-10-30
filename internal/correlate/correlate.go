@@ -65,6 +65,7 @@ var typedInputTypes = []string{
 	model.EventLogonExplicitCreds,
 	model.EventRegistryRunKey,
 	model.EventScheduledTaskCreate,
+	model.EventScheduledTaskRun,
 	model.EventRegistryPersistence,
 	model.EventServiceInstall,
 	model.EventNetworkConnection,
@@ -129,6 +130,21 @@ func RunFrom(caseID string, src model.EventSource) ([]model.Correlation, error) 
 	out = append(out, BuildActivityChains(caseID, typed)...)
 	out = append(out, BuildCredentialChains(caseID, typed)...)
 	out = append(out, BuildServiceChains(caseID, typed)...)
+	// Only task endpoint IDs need uniqueness counts. References cover actual
+	// untyped records too; compact identity projections are not real records.
+	taskIDs := map[string]int{}
+	for _, e := range typed {
+		if e.EventType == model.EventScheduledTaskRun || e.EventType == model.EventProcessCreate {
+			taskIDs[e.ID] = 0
+		}
+	}
+	for _, r := range refs {
+		if _, ok := taskIDs[r.ID]; ok {
+			taskIDs[r.ID]++
+		}
+	}
+	out = append(out, buildTaskInstanceContexts(caseID, typed, taskIDs)...)
+	out = append(out, buildTaskProcessContexts(caseID, typed, taskIDs)...)
 	out = append(out, buildSQLWindows(caseID, typed)...)
 	out = append(out, BuildWebResourceCorrelations(caseID, typed)...)
 	reg := hostid.Build(typed)
