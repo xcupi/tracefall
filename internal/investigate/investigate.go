@@ -146,7 +146,8 @@ func buildInvestigation(caseID string, g group, acc *groupAcc, findingsByID map[
 	}
 	scoring := newGroupAcc()
 	for _, m := range acc.members {
-		if supported[m.id] {
+		if supported[m.id] && m.typ != model.EventAntimalwareHistory {
+			// Defender history is same-producer context, never independent diversity.
 			scoring.add(m)
 		}
 	}

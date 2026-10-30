@@ -343,6 +343,8 @@ const (
 	// state that a process creation was blocked are read; the rest is skipped
 	// and counted. Prefix times carry no zone.
 	ArtifactDefenderMPLog = "defender_mplog"
+	// ArtifactDefenderHistory is a stateful Defender snapshot, not execution proof.
+	ArtifactDefenderHistory = "defender_detection_history"
 	// ArtifactSRUM is the System Resource Usage Monitor database (SRUDB.dat),
 	// an ESE database. Windows writes, about once an hour, what each
 	// application and service used in that interval: CPU, I/O, and bytes sent
@@ -985,6 +987,9 @@ const (
 	// is the engine's own label for what it saw. It does not prove the
 	// resource ran, and a CmdLine resource is a command-line string, not a file.
 	EventAntimalwareDetection = "antimalware_detection"
+	// EventAntimalwareHistory is one engine history observation, not a process
+	// start or a successful action. Its time is initial_detection_time only.
+	EventAntimalwareHistory = "antimalware_history_observation"
 	// EventAntimalwareAction is the antimalware engine's record of an action
 	// it took, or failed to take, on a detection. The action status
 	// (including a zero error code) describes the engine's action, not

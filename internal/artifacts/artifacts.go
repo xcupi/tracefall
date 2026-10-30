@@ -437,10 +437,15 @@ var supportedTypeInfo = map[string]typeInfo{
 		why:  "Records each run of MpCmdRun.exe with its command line. MpCmdRun.exe -DownloadFile can fetch a file with a signed Microsoft binary.",
 		note: "Times are the machine's local time with no zone, so a run has no instant unless the collection's SYSTEM hive records the zone (then a UTC reading is derived with one fixed offset). Only English day and month names are read. MPLog and MPDetection are read by their own parser (Defender antimalware support log).",
 	},
+	model.ArtifactDefenderHistory: {
+		label: "Defender detection history", family: FamilyLog, priority: PriorityHigh,
+		why:  "Retained stateful Defender detection observations with byte-derived identity and original FILETIMEs.",
+		note: "Strict modern Magic.Version:1.2 subset only; unsupported or incomplete records fail atomically. One observation is not a sequence of executions. Sensitive literal resources and nested values remain in private raw evidence, not default event projections. Unknown status/action bits imply no execution or remediation success.",
+	},
 	model.ArtifactDefenderMPLog: {
 		label: "Defender antimalware support log (MPLog / MPDetection)", family: FamilyLog, priority: PriorityHigh,
 		why:  "The engine's own log of detections and blocked process creations, often retained when the Operational event log has rolled over. A 'Process creation blocked' line states that real-time protection stopped a process, which no other log records.",
-		note: "Selective reader: only 'Process creation blocked' lines and DETECTIONEVENT lines are read; every other line (the great majority) is skipped by design and counted. Line prefix times carry no zone and are kept as written, so these events are undated. A blocked creation is not a process start. DetectionHistory binary files and the other Defender text logs are not read.",
+		note: "Selective reader: only 'Process creation blocked' lines and DETECTIONEVENT lines are read; every other line (the great majority) is skipped by design and counted. Line prefix times carry no zone and are kept as written, so these events are undated. A blocked creation is not a process start. DetectionHistory binary files have their own strict parser; other Defender text logs are not read.",
 	},
 	model.ArtifactSRUM: {
 		label: "System Resource Usage Monitor (SRUM)", family: FamilyExecution, priority: PriorityHigh,

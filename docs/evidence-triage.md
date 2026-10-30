@@ -116,6 +116,7 @@ what the binary can actually parse:
 | `iis_w3c_log` | IIS web log (W3C) | Log | High | `iislog@1` |
 | `cryptnet_url_cache` | CryptoAPI URL cache (CryptnetUrlCache) | Execution | High | `cryptneturl@1` |
 | `defender_cmd_log` | Defender command-line log (MpCmdRun.log) | Execution | High | `defendercmd@1` |
+| `defender_detection_history` | Defender detection history | Log | High | `defenderhistory@1` |
 | `defender_mplog` | Defender antimalware support log (MPLog / MPDetection) | Log | High | `defendermplog@1` |
 | `srum_db` | System Resource Usage Monitor (SRUM) | Execution | High | `srum@1` |
 | `webcache_db` | IE / Edge Legacy web cache (WebCache) | Browser | Medium | `webcache@1` |
@@ -165,7 +166,7 @@ claim a file — see `parsers.ContentDetector`.)
 | SRUM database | High | Only a file named `SRUDB.dat` that is not an ESE database lands here; a real one is read (see SRUM below). |
 | PowerShell transcript | High | No transcript parser; console history *is* parsed. |
 | USB / device install log (SetupAPI) | High | No SetupAPI log parser. |
-| Antimalware detection log | High | Only `MPLog-*.log` and `MPDetection-*.log` are read, and only their detection and blocked-process lines (see below). Other Defender text logs and the binary `DetectionHistory` files are not read. |
+| Antimalware detection log | High | Only `MPLog-*.log` and `MPDetection-*.log` are read, and only their detection and blocked-process lines (see below). Other Defender text logs are not read. Binary `DetectionHistory` has a separate strict modern-subset parser. |
 | Web server log (IIS / W3C) | High | No web server log parser. |
 | Page / swap file | High | No memory analysis. |
 | Windows Search index (`Windows.edb`) | Medium | An ESE database. The ESE reader opens it; the Windows Search tables are not interpreted, and no real `Windows.edb` was available to validate an interpretation against. |
@@ -1739,7 +1740,7 @@ Limitations:
   5001 (protection disabled) are not mapped: no real record to ground their fields.
 - The EvtxECmd CSV path maps these IDs only when it carries the same field names;
   this was not verified. Use the raw EVTX.
-- `DetectionHistory` binary files are not decoded.
+- `DetectionHistory` binary files have a separate [strict modern-subset parser](defender-detection-history.md).
 - Verified on real Operational logs and support logs of two hosts: the per-ID
   record counts and the blocked-line counts equal an independent decode.
 
