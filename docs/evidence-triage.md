@@ -1927,8 +1927,12 @@ not become a sibling-file guess. Each member retains its own source ID and
 SHA-256 in authorized raw provenance. Missing, ambiguous, unsafe, incoherent
 or unsupported bundles fail explicitly and atomically, not as successful zero
 observations. Mapping/index companions are not independently parsed objects.
-Linux reads and bundle extraction open every component with `O_NOFOLLOW`;
-filesystem admission on other platforms currently fails closed.
+Linux reads and bundle extraction resolve the operator-admitted root boundary
+(including a symlinked data-directory prefix), then reopen its resolved path and
+all evidence-relative components with `O_NOFOLLOW`. Links beneath that boundary
+are never followed. Filesystem admission on other platforms currently fails
+closed. Directory discovery retains nonregular/link entries as explicit
+unsupported inventory rows without reading, sniffing or hashing their targets.
 
 The reader enumerates active indexed namespace hash IDs, not guessed namespace
 names, for `__EventFilter`, `__FilterToConsumerBinding`,
@@ -1939,6 +1943,12 @@ packed inherited layouts and supported scalar/array CIM values are decoded;
 unknown types/layouts and dynamic instances are explicit failures. Deleted
 object carving, XP/core instances and arbitrary classes are not implemented.
 Counts, tree cycles/depth, record extents and values have bounded guards.
+The full snapshot additionally permits at most 4,096 schema-record reads and
+32 MiB of schema-record bytes across all namespace/class layouts, including
+repeated inheritance reads. Exceeding either guard is an explicit unsupported
+source, not a partial success. No recognized namespace or no selected schema
+also fails explicitly; a recognized selected schema with no indexed instances
+may report a measured zero.
 
 Every object yields an undated `wmi_configuration_snapshot`. Repository
 FILETIME ticks are retained as raw metadata, never invented firing or process
@@ -1949,10 +1959,12 @@ state/slot/value/default spans. Bundle file hashes permit re-verification.
 Default events, reports and local LLM previews contain structural class/hash
 identities and fixed caveats, not arbitrary property names, queries, commands,
 scripts, SIDs, hosts or key values. Explicit authorized raw provenance retains
-native properties and bytes. References support tested quoted-string local,
-escaped, namespace-qualified, absolute-host and multi-key forms; unsupported,
-missing or ambiguous endpoints remain visible. Absolute hosts without recorded
-host identity are unresolved, not guessed. Persisted
+native properties and bytes. Quoted-string local, escaped, namespace-qualified
+and multi-key references have tested exact-literal resolution. The grammar also
+parses absolute-host forms, but production lacks recorded host identity for
+those references: even `\\.\` stays visibly unresolved rather than guessing a
+host. String key values currently require exact case; case variants can remain
+unresolved. Unsupported, missing or ambiguous endpoints remain visible. Persisted
 `wmi_configuration_context` correlations recheck case, collection, host,
 repository and exact native class targets. They are navigable same-producer
 configuration associations, never execution edges or independent corroboration,

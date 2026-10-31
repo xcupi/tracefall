@@ -98,6 +98,10 @@ func (s SemanticReader) ReadSelected() (Snapshot, error) {
 	sort.Strings(out.NamespaceIDs)
 	totalBytes := 0
 	valueBudget := byteBudget{limit: 64 << 20}
+	// Unlike the per-layout cache, these limits cover the entire snapshot,
+	// including repeated inherited/schema reads across namespaces/classes.
+	schemaBudget := byteBudget{limit: 32 << 20}
+	schemaReads := 0
 	for _, ns := range out.NamespaceIDs {
 		for _, cls := range selectedClasses() {
 			keys := instances[ns+"/"+nameID("CI_", cls)]
@@ -116,9 +120,16 @@ func (s SemanticReader) ReadSelected() (Snapshot, error) {
 				if len(candidates) != 1 {
 					return ClassDefinition{}, fmt.Errorf("%w: selected class schema missing or ambiguous", ErrUnsupported)
 				}
+				if schemaReads >= 4096 {
+					return ClassDefinition{}, fmt.Errorf("%w: aggregate schema read count cap", ErrUnsupported)
+				}
+				schemaReads++
 				r, err := s.ReadRecord(candidates[0])
 				if err != nil {
 					return ClassDefinition{}, err
+				}
+				if err := schemaBudget.charge(len(r.Bytes)); err != nil {
+					return ClassDefinition{}, fmt.Errorf("%w: aggregate schema read byte cap", err)
 				}
 				cacheBytes += len(r.Bytes)
 				if cacheBytes > 32<<20 || len(cache) >= 64 {
@@ -179,5 +190,13 @@ func (s SemanticReader) ReadSelected() (Snapshot, error) {
 			out.Coverage = append(out.Coverage, coverage)
 		}
 	}
-	return out, nil
+	if len(out.NamespaceIDs) == 0 {
+		return out, fmt.Errorf("%w: no recognized indexed namespace", ErrUnsupported)
+	}
+	for _, coverage := range out.Coverage {
+		if coverage.Status != "schema_unavailable" {
+			return out, nil
+		}
+	}
+	return out, fmt.Errorf("%w: no recognized selected class schema", ErrUnsupported)
 }

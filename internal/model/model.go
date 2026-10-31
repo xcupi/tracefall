@@ -286,9 +286,12 @@ const (
 // Artifact types recognized in Phase 1. New artifact types are added here
 // and in internal/ingest's detector table -- nothing else needs to change.
 const (
-	ArtifactWindowsEventLog = "windows_event_log" // EvtxECmd CSV output
-	ArtifactPrefetch        = "prefetch"          // PECmd CSV output
-	ArtifactRegistryRunKey  = "registry_run_key"  // RECmd batch CSV output
+	// ArtifactFilesystemNonregular is inventory only: links/devices/pipes are
+	// never opened, sniffed, hashed or admitted as regular source contents.
+	ArtifactFilesystemNonregular = "filesystem_nonregular_entry"
+	ArtifactWindowsEventLog      = "windows_event_log" // EvtxECmd CSV output
+	ArtifactPrefetch             = "prefetch"          // PECmd CSV output
+	ArtifactRegistryRunKey       = "registry_run_key"  // RECmd batch CSV output
 	// ArtifactRegistryHive is a raw REGF hive read natively
 	// (internal/parsers/registry). Deliberately distinct from
 	// ArtifactRegistryRunKey: artifact type is part of an event's

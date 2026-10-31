@@ -1309,6 +1309,9 @@ func (r *Registry) Unsupported() []Capability {
 // still gets a type, a priority and a reason instead of being an
 // anonymous row in a list of seven thousand.
 func (r *Registry) Classify(relPath, artifactType string) Capability {
+	if artifactType == model.ArtifactFilesystemNonregular {
+		return Capability{ArtifactType: artifactType, Label: "Nonregular filesystem entry", Family: FamilyOther, FamilyLabel: FamilyLabels[FamilyOther], Priority: PriorityUnknown, PriorityReason: "Target content was not examined; forensic value is not established.", Recognized: true, Reason: "Symbolic link or special entry retained in inventory, not followed, sniffed, hashed or parsed."}
+	}
 	if artifactType != "" {
 		if c, ok := r.byType[artifactType]; ok {
 			return c

@@ -15,7 +15,15 @@ func open(root, rel string, create bool) (*os.File, error) {
 	if !filepath.IsAbs(root) || rel == "" || strings.Contains(rel, `\`) || filepath.IsAbs(rel) || filepath.Clean(rel) != rel || rel == ".." || strings.HasPrefix(rel, "../") {
 		return nil, ErrUnsafe
 	}
-	cleanRoot := strings.TrimPrefix(filepath.Clean(root), "/")
+	// The operator-admitted root may live below a symlinked data directory.
+	// Resolve only that boundary, then reopen every resolved component with
+	// O_NOFOLLOW. Relative evidence-member links remain forbidden, even when
+	// they point back inside the root. A replacement symlink fails closed.
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return nil, ErrUnsafe
+	}
+	cleanRoot := strings.TrimPrefix(filepath.Clean(resolvedRoot), "/")
 	parts := strings.Split(cleanRoot+"/"+rel, "/")
 	rootParts := len(strings.Split(cleanRoot, "/"))
 	if cleanRoot == "" {

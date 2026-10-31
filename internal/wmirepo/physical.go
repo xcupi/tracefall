@@ -1,5 +1,9 @@
 // Package wmirepo reads the bounded, active Win7+ repository subset.
 // Repository snapshots describe configuration, not execution or event delivery.
+// Modified native Go adaptation of mandiant/flare-wmi python-cim/cim,
+// revision b0a5a094ff9ca7d7a1c4fc711dc00c74dec4b6b1 (Apache-2.0).
+// Changes include bounded readers, strict validation and physical provenance.
+// See NOTICE.txt and LICENSE.apache-2.0.txt in this directory.
 package wmirepo
 
 import (

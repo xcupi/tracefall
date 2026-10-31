@@ -230,10 +230,14 @@ func Discover(root string, registry []parsers.ArtifactParser) ([]DiscoveredFile,
 		if d.IsDir() {
 			return nil
 		}
-		// Never sniff or hash links/devices/pipes outside the admitted regular
-		// file set. WalkDir does not descend directory links, but file links also
-		// require this gate before readHeader and sha256File can follow them.
+		// Never sniff/hash nonregular entries. Retain an explicit unsupported
+		// catalog row instead of silently dropping evidence inventory.
 		if !d.Type().IsRegular() {
+			relPath, err := filepath.Rel(root, path)
+			if err != nil {
+				return err
+			}
+			out = append(out, DiscoveredFile{Path: filepath.ToSlash(relPath), OriginalName: filepath.Base(relPath), ArtifactType: model.ArtifactFilesystemNonregular})
 			return nil
 		}
 		relPath, relErr := filepath.Rel(root, path)
