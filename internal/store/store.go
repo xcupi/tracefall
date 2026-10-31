@@ -50,6 +50,10 @@ func isUniqueConstraintViolation(err error) bool {
 }
 
 type Store struct {
+	changeTokenMu         sync.Mutex
+	changeTokenConnection any // compared only inside Conn.Raw; never operated on
+	changeTokenGeneration uint64
+
 	sourceTx            *sql.Tx // private source-transaction view only
 	db                  *sql.DB
 	reviewFingerprintMu sync.Mutex

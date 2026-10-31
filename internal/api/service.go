@@ -158,6 +158,9 @@ func (e *DuplicateCaseError) Error() string {
 func (e *DuplicateCaseError) Unwrap() error { return ErrDuplicateCase }
 
 type Service struct {
+	// Shared across request-bound Service copies; stores derived models only.
+	investigationModels *investigationModelCache
+
 	parserStagingDir string
 	store            *store.Store
 	files            *casefiles.Store
@@ -268,6 +271,8 @@ func (s *Service) SetParserStagingDir(dir string) { s.parserStagingDir = dir }
 
 func NewService(s *store.Store, files *casefiles.Store) *Service {
 	return &Service{
+		investigationModels: &investigationModelCache{},
+
 		store: s, files: files, vt: &vtConfiguration{gate: make(chan struct{}, 1)},
 		extractLimits: archive.DefaultLimits, ad1Limits: ad1.DefaultLimits,
 		jobs: newImportJobs(), throttle: newLoginGuard(),
@@ -2955,6 +2960,13 @@ func (s *Service) EventProvenance(caseID, eventID string) (EventProvenance, erro
 // with a deterministic risk score, confidence, and narrative. See
 // internal/investigate for the grouping/scoring/narrative algorithms.
 func (s *Service) Investigations(caseID string) ([]model.Investigation, error) {
+	return s.investigationsCtx(context.Background(), caseID)
+}
+
+func (s *Service) investigationsCtx(ctx context.Context, caseID string) ([]model.Investigation, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	findings, err := s.store.ListFindings(caseID)
 	if err != nil {
 		return nil, fmt.Errorf("loading findings: %w", err)
@@ -2964,7 +2976,7 @@ func (s *Service) Investigations(caseID string) ([]model.Investigation, error) {
 		return nil, fmt.Errorf("loading correlations: %w", err)
 	}
 	// The case's events are streamed once; nothing holds the whole set.
-	return s.caseInvestigations(caseID, findings, correlations)
+	return s.caseInvestigationsCtx(ctx, caseID, findings, correlations)
 }
 
 // investigationsFromAllEvents is the pre-Phase-14 implementation, kept
@@ -3029,16 +3041,17 @@ type InvestigationDetail struct {
 	AttackBreakdown    []InvestigationTacticGroup `json:"attack_breakdown"`
 }
 
-// Investigation returns one investigation's full detail. Since
-// investigations aren't persisted and carry no independent identity
-// beyond their current finding membership, this recomputes the whole
-// case's investigation set and picks out the one matching
-// investigationID -- see internal/investigate's stableID, which is what
-// makes that ID still match between this call and an earlier
-// Investigations() call as long as the underlying findings haven't
-// changed.
+// Investigation resolves one investigation's detail from reusable derived
+// models. Only unchanged database revisions are reused; resolved evidence is
+// always loaded afresh. Public non-request callers keep background semantics.
 func (s *Service) Investigation(caseID, investigationID string) (InvestigationDetail, error) {
-	all, err := s.Investigations(caseID)
+	ctx := s.reqCtx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	all, err := s.investigationModels.get(ctx, caseID, s.store.ChangeToken, func() ([]model.Investigation, error) {
+		return s.investigationsCtx(ctx, caseID)
+	})
 	if err != nil {
 		return InvestigationDetail{}, err
 	}
@@ -3065,6 +3078,9 @@ func (s *Service) Investigation(caseID, investigationID string) (InvestigationDe
 	// that's not just a style nit, it crashes internal/web/static/app.js.
 	findings := make([]model.Finding, 0, len(inv.FindingIDs))
 	for _, id := range inv.FindingIDs {
+		if err := ctx.Err(); err != nil {
+			return InvestigationDetail{}, err
+		}
 		f, err := s.store.GetFinding(id)
 		if err != nil {
 			return InvestigationDetail{}, err
@@ -3105,6 +3121,9 @@ func (s *Service) Investigation(caseID, investigationID string) (InvestigationDe
 		}
 	}
 
+	if err := ctx.Err(); err != nil {
+		return InvestigationDetail{}, err
+	}
 	return InvestigationDetail{
 		Investigation:      inv,
 		EventDetails:       events,
