@@ -120,7 +120,7 @@ func buildGroups(findings []model.Finding, correlations []model.Correlation, idn
 func mergeworthy(correlationType string) bool {
 	// Task context remains available through the correlations API/cards only.
 	// Excluding it here closes all group-derived score/diversity/narrative paths.
-	return correlationType != model.CorrelationTemporal && correlationType != model.CorrelationTaskInstanceContext && correlationType != model.CorrelationTaskProcessContext
+	return correlationType != model.CorrelationTemporal && correlationType != model.CorrelationWMIConfigurationContext && correlationType != model.CorrelationTaskInstanceContext && correlationType != model.CorrelationTaskProcessContext
 }
 
 // unionFind is a minimal disjoint-set structure over event IDs, used

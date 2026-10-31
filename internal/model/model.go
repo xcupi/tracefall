@@ -345,6 +345,10 @@ const (
 	ArtifactDefenderMPLog = "defender_mplog"
 	// ArtifactDefenderHistory is a stateful Defender snapshot, not execution proof.
 	ArtifactDefenderHistory = "defender_detection_history"
+	// ArtifactWMIRepository is active selected-class configuration, not delivery,
+	// process execution, actor attribution, maliciousness or authorization.
+	ArtifactWMIRepository          = "wmi_repository"
+	ArtifactWMIRepositoryCompanion = "wmi_repository_companion"
 	// ArtifactSRUM is the System Resource Usage Monitor database (SRUDB.dat),
 	// an ESE database. Windows writes, about once an hour, what each
 	// application and service used in that interval: CPU, I/O, and bytes sent
@@ -990,6 +994,9 @@ const (
 	// EventAntimalwareHistory is one engine history observation, not a process
 	// start or a successful action. Its time is initial_detection_time only.
 	EventAntimalwareHistory = "antimalware_history_observation"
+	// EventWMISnapshot is an undated configured object; metadata FILETIMEs are
+	// retained raw and are never represented as event firing or execution times.
+	EventWMISnapshot = "wmi_configuration_snapshot"
 	// EventAntimalwareAction is the antimalware engine's record of an action
 	// it took, or failed to take, on a detection. The action status
 	// (including a zero error code) describes the engine's action, not
@@ -1180,11 +1187,14 @@ const (
 	// Task contexts are navigable evidence associations, never finding support,
 	// investigation grouping edges or independent corroboration.
 	CorrelationTaskInstanceContext = "task_instance_context"
-	CorrelationTaskProcessContext  = "task_process_context"
-	CorrelationTemporal            = "temporal"
-	CorrelationEntity              = "entity"
-	CorrelationProcessChain        = "process_chain"
-	CorrelationActivityChain       = "activity_chain"
+	// Same-repository snapshot association, never independent corroboration or
+	// an investigation grouping/scoring edge.
+	CorrelationWMIConfigurationContext = "wmi_configuration_context"
+	CorrelationTaskProcessContext      = "task_process_context"
+	CorrelationTemporal                = "temporal"
+	CorrelationEntity                  = "entity"
+	CorrelationProcessChain            = "process_chain"
+	CorrelationActivityChain           = "activity_chain"
 	// CorrelationCredentialChain (Phase 4) links a credential-related
 	// event sequence: repeated failed logons into a success, or explicit
 	// credential use into the privileged activity that followed it. See

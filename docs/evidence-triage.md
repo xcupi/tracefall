@@ -117,6 +117,7 @@ what the binary can actually parse:
 | `cryptnet_url_cache` | CryptoAPI URL cache (CryptnetUrlCache) | Execution | High | `cryptneturl@1` |
 | `defender_cmd_log` | Defender command-line log (MpCmdRun.log) | Execution | High | `defendercmd@1` |
 | `defender_detection_history` | Defender detection history | Log | High | `defenderhistory@1` |
+| `wmi_repository` | WMI repository configuration | Execution | Critical | `wmirepository@1` (admitted bundle) |
 | `defender_mplog` | Defender antimalware support log (MPLog / MPDetection) | Log | High | `defendermplog@1` |
 | `srum_db` | System Resource Usage Monitor (SRUM) | Execution | High | `srum@1` |
 | `webcache_db` | IE / Edge Legacy web cache (WebCache) | Browser | Medium | `webcache@1` |
@@ -160,7 +161,7 @@ claim a file — see `parsers.ContentDetector`.)
 | Class | Priority | Why it is not parsed |
 |---|---|---|
 | Process memory dump (LSASS or similar) | **Critical** | No memory analysis. Cataloged and hashed only. |
-| WMI repository (`OBJECTS.DATA`) | **Critical** | No WMI repository parser. |
+| WMI repository companions (`INDEX.BTR`, `MAPPING1/2/3.MAP`) | High | Not standalone parsers; admitted and hashed with their `OBJECTS.DATA` entry point. |
 | Memory image, full capture (`hiberfil.sys`, `memory.dmp`) | **Critical** | No memory analysis. |
 | Event Log, legacy `.evt` | **Critical** | Only the modern EVTX format is parsed. |
 | SRUM database | High | Only a file named `SRUDB.dat` that is not an ESE database lands here; a real one is read (see SRUM below). |
@@ -1915,11 +1916,58 @@ was copied after a dirty shutdown, and the notes say so; changes still in its
 transaction log are not in it. No rule reads these events beyond the existing
 browser ones.
 
+### WMI repository configuration (`wmirepository@1`)
+
+`OBJECTS.DATA` is the single entry point for a Win7+ repository bundle. Import
+admits `INDEX.BTR` and present `MAPPING1.MAP` / `MAPPING2.MAP` / `MAPPING3.MAP`
+from source-catalog rows in the exact same collection and evidence-relative
+parent directory. Original member names select roles; explicit stored paths
+are transported into the isolated Go parser worker, so renamed storage does
+not become a sibling-file guess. Each member retains its own source ID and
+SHA-256 in authorized raw provenance. Missing, ambiguous, unsafe, incoherent
+or unsupported bundles fail explicitly and atomically, not as successful zero
+observations. Mapping/index companions are not independently parsed objects.
+Linux reads and bundle extraction open every component with `O_NOFOLLOW`;
+filesystem admission on other platforms currently fails closed.
+
+The reader enumerates active indexed namespace hash IDs, not guessed namespace
+names, for `__EventFilter`, `__FilterToConsumerBinding`,
+`CommandLineEventConsumer`, `ActiveScriptEventConsumer`,
+`NTEventLogEventConsumer`, `LogFileEventConsumer` and `SMTPEventConsumer`.
+Namespace literals are not resolved in this version. Only validated dense,
+packed inherited layouts and supported scalar/array CIM values are decoded;
+unknown types/layouts and dynamic instances are explicit failures. Deleted
+object carving, XP/core instances and arbitrary classes are not implemented.
+Counts, tree cycles/depth, record extents and values have bounded guards.
+
+Every object yields an undated `wmi_configuration_snapshot`. Repository
+FILETIME ticks are retained as raw metadata, never invented firing or process
+execution times. Presence distinguishes explicit, supplying-class default and
+uninitialized properties, with exact native identities, raw slots and physical
+state/slot/value/default spans. Bundle file hashes permit re-verification.
+
+Default events, reports and local LLM previews contain structural class/hash
+identities and fixed caveats, not arbitrary property names, queries, commands,
+scripts, SIDs, hosts or key values. Explicit authorized raw provenance retains
+native properties and bytes. References support tested quoted-string local,
+escaped, namespace-qualified, absolute-host and multi-key forms; unsupported,
+missing or ambiguous endpoints remain visible. Absolute hosts without recorded
+host identity are unresolved, not guessed. Persisted
+`wmi_configuration_context` correlations recheck case, collection, host,
+repository and exact native class targets. They are navigable same-producer
+configuration associations, never execution edges or independent corroboration,
+and do not merge or score investigations. Configuration alone produces no
+malicious verdict, actor or authorization claim.
+
+Event dedup includes native object, complete repository content state and object
+record digest; identical recollection adds observations while changed bundle
+state remains distinct. Unlike a standalone artifact, equal `OBJECTS.DATA`
+bytes alone cannot establish a duplicate: different index/map state is retained.
+Source hashes remain literal per-file hashes, never relabeled bundle digests.
+Existing cases require a fresh import to acquire these new observations.
+
 ### Not read yet
 
-- **WMI repository** (`OBJECTS.DATA`, `INDEX.BTR`, `MAPPING*.MAP`). The sample
-  repository held only class definitions and the default bindings, with no
-  persistence instance to validate a reader against, so none was built.
 - **BITS** (`qmgr.db` and `qmgr*.dat`). The Windows 10 database is an ESE file and
   the ESE reader opens it, but there was no real `qmgr.db` to validate an
   interpretation of its tables against, so none was written.

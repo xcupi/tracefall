@@ -85,6 +85,9 @@ func (e Event) ComputeDedupHash() string {
 	// History identity is the recorded detection plus its complete stateful
 	// source content, not a filename or collection. Keep identifiers literal:
 	// parser GUIDs are canonical, while malformed synthetic IDs stay distinct.
+	if e.ArtifactType == ArtifactWMIRepository {
+		parts = append(parts, e.Extra["wmi_native_key"], e.Extra["wmi_repository_sha256"], e.Extra["wmi_record_sha256"])
+	}
 	if e.ArtifactType == ArtifactDefenderHistory {
 		parts = append(parts, e.Extra["detection_id"], e.Extra["source_sha256"])
 	}

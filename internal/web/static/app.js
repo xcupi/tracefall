@@ -892,6 +892,8 @@ const ARTIFACT_TYPE_LABELS = {
   defender_cmd_log: "Defender command-line log (MpCmdRun.log)",
   defender_mplog: "Defender antimalware support log (MPLog / MPDetection)",
   defender_detection_history: "Defender detection history",
+  wmi_repository: "WMI repository configuration",
+  wmi_repository_companion: "WMI repository companion",
   iis_w3c_log: "IIS web log (W3C)",
   container_json_log: "Container log (Docker json-file)",
   container_config: "Container configuration (Docker)",
@@ -982,6 +984,7 @@ const EVENT_CATEGORIES = {
   defender_command: "execution",
   antimalware_detection: "other",
   antimalware_history_observation: "other",
+  wmi_configuration_snapshot: "other",
   antimalware_action: "other",
   antimalware_process_blocked: "other",
   srum_app_usage: "execution",
@@ -10020,6 +10023,7 @@ function toggleAttackTechniqueDetail(card, t) {
 
 const CORR_LABELS = {
   task_instance_context: "Task instance context",
+  wmi_configuration_context: "WMI configuration context",
   task_process_context: "Task process context",
   activity_chain: "Activity chain",
   process_chain: "Process chain",
@@ -10078,7 +10082,7 @@ async function renderCorrelationsTab(content, caseId) {
 }
 
 function renderCorrelationCard(c, eventsById, eventFindingIdx, caseId) {
-  const contextOnly = c.correlation_type === "task_instance_context" || c.correlation_type === "task_process_context";
+  const contextOnly = c.correlation_type === "wmi_configuration_context" || c.correlation_type === "task_instance_context" || c.correlation_type === "task_process_context";
   const span = contextOnly
     ? `Recorded observation window: ${esc(fmtTime(c.first_seen))} — ${esc(fmtTime(c.last_seen))} (known times only; not causal order)`
     : `${esc(fmtTime(c.first_seen))} &rarr; ${esc(fmtTime(c.last_seen))}`;

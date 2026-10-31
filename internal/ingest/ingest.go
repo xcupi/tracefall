@@ -70,8 +70,10 @@ import (
 	"tracefall/internal/parsers/volatility"
 	"tracefall/internal/parsers/webaccess"
 	"tracefall/internal/parsers/webcache"
+	"tracefall/internal/parsers/wmirepository"
 	"tracefall/internal/parsers/wtmp"
 	"tracefall/internal/regf"
+	"tracefall/internal/wmirepo"
 )
 
 // Registry is the ordered list of known artifact parsers. Adding support
@@ -131,6 +133,9 @@ func Registry() []parsers.ArtifactParser {
 		defendermplog.New(),
 		// Evidence-relative DetectionHistory hint plus checked LTV header.
 		defenderhistory.New(),
+		// One named OBJECTS.DATA entry point; companions are explicitly admitted
+		// from the catalog at import, never parsed as independent repositories.
+		wmirepository.New(),
 		// Packet captures: claimed by extension and confirmed by their magic
 		// number, and also found by magic number under any name.
 		netcapture.New(),
@@ -223,6 +228,12 @@ func Discover(root string, registry []parsers.ArtifactParser) ([]DiscoveredFile,
 			return err
 		}
 		if d.IsDir() {
+			return nil
+		}
+		// Never sniff or hash links/devices/pipes outside the admitted regular
+		// file set. WalkDir does not descend directory links, but file links also
+		// require this gate before readHeader and sha256File can follow them.
+		if !d.Type().IsRegular() {
 			return nil
 		}
 		relPath, relErr := filepath.Rel(root, path)
@@ -330,6 +341,10 @@ func RecognizeUnparsed(relPath string, header []byte) string {
 }
 
 func recognizeUnparsed(relPath string, header []byte) string {
+	role := strings.ToUpper(path.Base(strings.ReplaceAll(relPath, `\`, "/")))
+	if wmirepo.BundleRole(role) && role != "OBJECTS.DATA" {
+		return model.ArtifactWMIRepositoryCompanion
+	}
 	// A registry TRANSACTION LOG is a REGF file with the hive signature
 	// and a different base-block file type. Recognized here so it is
 	// catalogued as what it is instead of being claimed as a hive and
@@ -503,6 +518,7 @@ func ParseFileWithContext(caseID, collectionID, sourceFileID, root, relPath stri
 	// Keep evidence-relative identity separate from the absolute server
 	// path used to open the artifact.
 	ctx.EvidencePath = filepath.ToSlash(relPath)
+	ctx.EvidenceRoot, _ = filepath.Abs(root)
 
 	// In-process by default; the server runs each parse in a child process.
 	parsed, err := runner.Run(p, root, abs, ctx)

@@ -1,0 +1,11 @@
+WMI repository format attribution
+
+The bounded Win7+ format structures and decoding logic in this package are
+adapted from mandiant/flare-wmi python-cim/cim/cim.py and objects.py at revision
+b0a5a094ff9ca7d7a1c4fc711dc00c74dec4b6b1, licensed under Apache License 2.0.
+No additional copyright notice appears in those upstream Python source files.
+
+Tracefall modifications: native Go ReaderAt implementation, explicit limits,
+strict error classification and physical provenance. No Python runtime is used.
+The upstream tree contains no NOTICE file. The upstream license is included in
+LICENSE.apache-2.0.txt. This attribution is not a completeness or validation claim.

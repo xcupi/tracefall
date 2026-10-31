@@ -310,7 +310,7 @@ func retireLegacySourceFileColumns(db *sql.DB) error {
 		`CREATE INDEX IF NOT EXISTS idx_source_files_case ON source_files(case_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_source_files_collection ON source_files(collection_id)`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_source_files_collection_sha256_active
-			ON source_files(collection_id, sha256) WHERE import_status = 'imported' AND deleted_at = ''`,
+			ON source_files(collection_id, sha256) WHERE import_status = 'imported' AND deleted_at = '' AND artifact_type != 'wmi_repository'`,
 	} {
 		if _, err := db.Exec(stmt); err != nil {
 			return fmt.Errorf("recreating source_files index: %w", err)
@@ -458,7 +458,7 @@ func enforceSourceFileUniquenessPerCollection(db *sql.DB) error {
 	rows, err := db.Query(`
 		SELECT collection_id, sha256, COUNT(*), GROUP_CONCAT(id, ', ')
 		FROM source_files
-		WHERE import_status = ? AND deleted_at = '' AND sha256 != ''
+		WHERE import_status = ? AND deleted_at = '' AND sha256 != '' AND artifact_type != 'wmi_repository'
 		GROUP BY collection_id, sha256
 		HAVING COUNT(*) > 1`, model.SourceFileImported)
 	if err != nil {
@@ -487,9 +487,32 @@ func enforceSourceFileUniquenessPerCollection(db *sql.DB) error {
 			len(conflicts), strings.Join(conflicts, "; "))
 	}
 
-	_, err = db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_source_files_collection_sha256_active
-		ON source_files(collection_id, sha256) WHERE import_status = 'imported' AND deleted_at = ''`)
-	return err
+	// A WMI primary is one member of a content-identified bundle. Equal
+	// OBJECTS.DATA bytes can belong to different maps/indexes. Rebuild only the
+	// historical single-file index, atomically, retaining every row and every
+	// ordinary artifact's uniqueness contract. Event identity handles bundle
+	// recollections; SourceFile.SHA256 stays the actual primary-file hash.
+	var indexSQL string
+	err = db.QueryRow(`SELECT sql FROM sqlite_master WHERE type='index' AND name='idx_source_files_collection_sha256_active'`).Scan(&indexSQL)
+	if err != nil && err != sql.ErrNoRows {
+		return err
+	}
+	if strings.Contains(indexSQL, "artifact_type != 'wmi_repository'") {
+		return nil
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err = tx.Exec(`DROP INDEX IF EXISTS idx_source_files_collection_sha256_active`); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(`CREATE UNIQUE INDEX idx_source_files_collection_sha256_active
+  ON source_files(collection_id,sha256) WHERE import_status='imported' AND deleted_at='' AND artifact_type != 'wmi_repository'`); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func columnExists(db *sql.DB, table, column string) (bool, error) {

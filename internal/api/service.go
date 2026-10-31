@@ -61,6 +61,7 @@ import (
 	"tracefall/internal/regf"
 	"tracefall/internal/store"
 	"tracefall/internal/version"
+	"tracefall/internal/wmirepo"
 )
 
 var (
@@ -934,7 +935,7 @@ func (s *Service) catalogEvidenceDirectory(caseID string, collection model.Colle
 		case !f.Supported:
 			sf.ImportStatus = model.SourceFileUnsupported
 			unsupported++
-		case f.SHA256 != "" && seenHashes[f.SHA256]:
+		case f.ArtifactType != model.ArtifactWMIRepository && f.SHA256 != "" && seenHashes[f.SHA256]:
 			// Identical content already discovered earlier in this same
 			// batch -- not blocked across collections (see
 			// docs/data-model.md's "Evidence file model" section), only
@@ -1475,8 +1476,19 @@ func (s *Service) importEvidence(caseID, collectionID string, sourceFileIDs []st
 			continue
 		}
 
+		fileCtx := parseCtx
+		if sf.ArtifactType == model.ArtifactWMIRepository {
+			fileCtx.BundleFiles, err = s.repositoryBundle(sf, extractor, diskExtractor)
+			if err != nil {
+				_ = s.store.MarkSourceFileFailed(id)
+				errs = append(errs, fmt.Sprintf("%s: %v", sf.Path, err))
+				failures = append(failures, parseFailure(sf, ParseStageParse, err))
+				prog.fileParsed(0, true)
+				continue
+			}
+		}
 		if _, streaming := p.(parsers.StreamingParser); streaming {
-			pf, err := s.stageStream(caseID, collectionID, sf, collection.EvidenceDirectory, p, parseCtx, prog, staging)
+			pf, err := s.stageStream(caseID, collectionID, sf, collection.EvidenceDirectory, p, fileCtx, prog, staging)
 			if err != nil {
 				if prog.cancelled() {
 					cancelled = true
@@ -1493,7 +1505,7 @@ func (s *Service) importEvidence(caseID, collectionID string, sourceFileIDs []st
 			prog.fileParsed(pf.eventCount(), false)
 			continue
 		}
-		parsed, err := ingest.ParseFileWithContext(caseID, collectionID, id, collection.EvidenceDirectory, sf.Path, p, parseCtx)
+		parsed, err := ingest.ParseFileWithContext(caseID, collectionID, id, collection.EvidenceDirectory, sf.Path, p, fileCtx)
 		if err != nil {
 			_ = s.store.MarkSourceFileFailed(id)
 			errs = append(errs, fmt.Sprintf("%s: %v", sf.Path, err))
@@ -3230,6 +3242,12 @@ func classifyParseError(err error) (category, message string) {
 		return ParseFailureLimit,
 			"The parser for this file was stopped before it finished (" + failed.Reason + "). " +
 				"The file may be unusually large or crafted to exhaust memory; it was not imported. The rest of the import was not affected."
+	case errors.Is(err, wmirepo.ErrMissingBundle):
+		return ParseFailureUnsupported, "The WMI repository bundle was not imported: OBJECTS.DATA requires admitted INDEX.BTR and coherent MAPPING files from the same collection and repository. Missing, ambiguous or unsafe companion paths are not successful empty evidence."
+	case errors.Is(err, wmirepo.ErrUnsupported):
+		return ParseFailureUnsupported, "The WMI repository uses a format, class/property layout or bounded structure outside the supported active Win7+ subset. It was not imported; this is not evidence of absent WMI configuration."
+	case errors.Is(err, wmirepo.ErrCorrupt):
+		return ParseFailureCorrupt, "The mapped WMI repository structures, record identity, spans or admitted file hashes are inconsistent. No partial snapshot was imported."
 	case errors.Is(err, prefetch.ErrUnsupportedCompression):
 		// Tracefall decompresses MAM/LZXPRESS-Huffman Prefetch natively,
 		// including the CRC-header variant, so reaching here means the

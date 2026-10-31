@@ -62,6 +62,11 @@ type ArtifactParser interface {
 // parser must handle -- a SAM parsed with no context still reports every
 // account, with its hashes marked encrypted and the reason stated.
 type ParseContext struct {
+	// EvidenceRoot and BundleFiles admit explicit collection-scoped companion
+	// sources. A parser must not infer filesystem siblings from EvidencePath.
+	EvidenceRoot string
+	BundleFiles  []BundleFile
+
 	// EvidencePath is the path relative to the collection evidence root,
 	// forward-slash (the same value as SourceFile.Path). User/profile
 	// attribution must use this rather than the server's absolute path.
@@ -91,6 +96,10 @@ type ParseContext struct {
 	// values (registry shell items) convert them only when it is set.
 	TimeBasis *TimeBasis
 }
+
+// BundleFile links a canonical repository role to its admitted stored path
+// and source catalog identity. Original names and stored names may differ.
+type BundleFile struct{ Role, Path, SourceFileID, SHA256 string }
 
 // TimeBasis is a host time zone as one fixed offset: UTC = local +
 // ActiveBiasMinutes. Source names the hive and value it came from, so a

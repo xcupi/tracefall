@@ -14,6 +14,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"tracefall/internal/evidencepath"
 	"tracefall/internal/ext4"
 	"tracefall/internal/fat"
 	"tracefall/internal/fsvol"
@@ -25,6 +26,7 @@ import (
 	"tracefall/internal/partition"
 	"tracefall/internal/regf"
 	"tracefall/internal/report"
+	"tracefall/internal/wmirepo"
 )
 
 // Disk images (roadmap item 3).
@@ -634,7 +636,7 @@ func (s *Service) newDiskExtractor(caseID, collectionID string) (*diskExtractor,
 				return nil
 			}
 			key := prefix + "/" + e.Rel
-			if e.Supported {
+			if e.Supported || (e.Stream == "" && wmirepo.BundleRole(strings.ToUpper(filepath.Base(key)))) {
 				if _, dup := x.byPath[key]; !dup {
 					x.byPath[key] = diskLocator{vol: ov.vol, record: f.Record, stream: e.Stream}
 				}
@@ -700,10 +702,15 @@ func (x *diskExtractor) writeFile(relPath string, loc diskLocator) (string, erro
 	if rel, relErr := filepath.Rel(root, dest); relErr != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return "", fmt.Errorf("%w: entry path %q would resolve outside the extraction directory", ntfsvol.ErrCorrupt, relPath)
 	}
-	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
-		return "", fmt.Errorf("creating destination directory: %w", err)
+	var out *os.File
+	if wmirepo.BundleRole(strings.ToUpper(filepath.Base(relPath))) {
+		out, err = evidencepath.Create(root, relPath)
+	} else {
+		if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+			return "", fmt.Errorf("creating destination directory: %w", err)
+		}
+		out, err = os.OpenFile(dest, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
 	}
-	out, err := os.OpenFile(dest, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
 	if err != nil {
 		return "", fmt.Errorf("creating extracted file: %w", err)
 	}

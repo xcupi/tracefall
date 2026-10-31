@@ -26,9 +26,11 @@ import (
 	"github.com/google/uuid"
 
 	"tracefall/internal/ad1"
+	"tracefall/internal/evidencepath"
 	"tracefall/internal/ingest"
 	"tracefall/internal/model"
 	"tracefall/internal/parsers"
+	"tracefall/internal/wmirepo"
 )
 
 // sniffStagedFile peeks at a file already written to disk (an uploaded
@@ -274,7 +276,7 @@ func (s *Service) catalogAD1(caseID string, collection model.Collection, segment
 		case !supportedFile:
 			sf.ImportStatus = model.SourceFileUnsupported
 			unsupported++
-		case embedded != "" && seenHashes[embedded]:
+		case artifactType != model.ArtifactWMIRepository && embedded != "" && seenHashes[embedded]:
 			// Best-effort intra-batch duplicate detection using AD1's own
 			// embedded hash, when it recorded one -- see this file's doc
 			// comment on why a true SHA-256 (what ingest.Discover uses
@@ -464,10 +466,15 @@ func (x *ad1Extractor) extract(sf model.SourceFile) error {
 	if rel, relErr := filepath.Rel(evidenceDirAbs, dest); relErr != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return fmt.Errorf("%w: entry path %q would resolve outside the extraction directory", ad1.ErrCorrupt, sf.Path)
 	}
-	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
-		return fmt.Errorf("creating destination directory for extracted AD1 entry: %w", err)
+	var out *os.File
+	if wmirepo.BundleRole(strings.ToUpper(sf.OriginalFilename)) {
+		out, err = evidencepath.Create(evidenceDirAbs, sf.Path)
+	} else {
+		if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+			return fmt.Errorf("creating destination directory for extracted AD1 entry: %w", err)
+		}
+		out, err = os.OpenFile(dest, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
 	}
-	out, err := os.OpenFile(dest, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
 	if err != nil {
 		return fmt.Errorf("creating extracted file: %w", err)
 	}

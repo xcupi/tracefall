@@ -178,7 +178,7 @@ func RunStreamed(caseID string, each EachEvent, findings []model.Finding, correl
 	for _, c := range correlations {
 		// Context-only cards must not retain process narrative payloads or
 		// task members in the assessment layer, even when no findings exist.
-		if c.Type == model.CorrelationTaskInstanceContext || c.Type == model.CorrelationTaskProcessContext {
+		if c.Type == model.CorrelationWMIConfigurationContext || c.Type == model.CorrelationTaskInstanceContext || c.Type == model.CorrelationTaskProcessContext {
 			continue
 		}
 		for _, id := range c.EventIDs {

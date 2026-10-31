@@ -59,6 +59,7 @@ func Run(caseID string, events []model.Event) []model.Correlation {
 // installs, network connections, explicit-credential logons), so loading this
 // set gives them exactly the events they would see from a full load.
 var typedInputTypes = []string{
+	model.EventWMISnapshot,
 	model.EventProcessCreate,
 	model.EventLogonSuccess,
 	model.EventLogonFailure,
@@ -125,6 +126,7 @@ func RunFrom(caseID string, src model.EventSource) ([]model.Correlation, error) 
 	}
 	var out []model.Correlation
 	out = append(out, BuildProcessChains(caseID, typed)...)
+	out = append(out, BuildWMIContexts(caseID, typed)...)
 	out = append(out, BuildEntityCorrelations(caseID, validatedRefs)...)
 	out = append(out, BuildTemporalClusters(caseID, validatedRefs)...)
 	out = append(out, BuildActivityChains(caseID, typed)...)

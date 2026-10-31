@@ -437,6 +437,11 @@ var supportedTypeInfo = map[string]typeInfo{
 		why:  "Records each run of MpCmdRun.exe with its command line. MpCmdRun.exe -DownloadFile can fetch a file with a signed Microsoft binary.",
 		note: "Times are the machine's local time with no zone, so a run has no instant unless the collection's SYSTEM hive records the zone (then a UTC reading is derived with one fixed offset). Only English day and month names are read. MPLog and MPDetection are read by their own parser (Defender antimalware support log).",
 	},
+	model.ArtifactWMIRepository: {
+		label: "WMI repository configuration", family: FamilyExecution, priority: PriorityCritical,
+		why:  "Active indexed filter, consumer and binding configuration with exact native identities and source spans.",
+		note: "Selected seven standard classes in Win7+ only. Requires admitted OBJECTS.DATA, INDEX.BTR and coherent MAPPING files. Namespace literals remain hash IDs. No deleted carving, delivery, execution, actor or authorization inference. Values are retained only in authorized raw evidence.",
+	},
 	model.ArtifactDefenderHistory: {
 		label: "Defender detection history", family: FamilyLog, priority: PriorityHigh,
 		why:  "Retained stateful Defender detection observations with byte-derived identity and original FILETIMEs.",
@@ -622,6 +627,7 @@ var supportedTypeInfo = map[string]typeInfo{
 // directory is LOW, and a recognized structure in an unsupported variant
 // is MEDIUM because it may still hold recoverable data.
 var recognizedTypeInfo = map[string]unsupportedRule{
+	model.ArtifactWMIRepositoryCompanion: {label: "WMI repository companion", family: FamilyExecution, priority: PriorityHigh, why: "Required mapped/indexed provenance for a WMI repository snapshot.", reason: "Bundle companion, not an independently parsed repository. Admitted and hashed with its OBJECTS.DATA entry point.", notParsed: []string{"Standalone WMI mapping/index files"}},
 	model.ArtifactBrowserCacheRankings: {
 		label:     "Chromium blockfile auxiliary file",
 		family:    FamilyBrowser,
@@ -912,12 +918,6 @@ var unsupportedRules = []unsupportedRule{
 		why:    "A process memory dump of LSASS carries credential material directly; of any process, its decrypted runtime state.",
 		reason: "Tracefall performs no memory analysis. The dump is cataloged and hashed, not read.",
 		match:  matchProcessDump,
-	},
-	{
-		label: "WMI repository", family: FamilyExecution, priority: PriorityCritical,
-		why:    "Holds WMI event subscriptions, a fileless persistence mechanism that survives reboot and leaves little else behind.",
-		reason: "Tracefall has no WMI repository parser. OBJECTS.DATA and its indexes are not decoded.",
-		match:  baseIs("objects.data", "index.btr", "mapping1.map", "mapping2.map", "mapping3.map"),
 	},
 
 	// ---- execution and user-activity artifacts ----

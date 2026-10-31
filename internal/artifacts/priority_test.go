@@ -51,7 +51,8 @@ func TestPriority_IsIndependentOfSupport(t *testing.T) {
 	}{
 		// CRITICAL, and none of them parseable.
 		{"Windows/System32/config/lsass.dmp", artifacts.PriorityCritical},
-		{"Windows/System32/wbem/Repository/OBJECTS.DATA", artifacts.PriorityCritical},
+		// OBJECTS.DATA now belongs in the supported-priority assertions below;
+		// the name-only parser admits the bundle explicitly at import.
 		{"C/hiberfil.sys", artifacts.PriorityCritical},
 		{"Windows/System32/winevt/Logs/AppEvent.evt", artifacts.PriorityCritical},
 		// HIGH, and none of them parseable.
@@ -108,8 +109,9 @@ func TestPriority_LowIsNeverAProxyForUnsupported(t *testing.T) {
 func TestPriority_NewlySupportedArtifactsKeepTheirPriority(t *testing.T) {
 	r := reg()
 	for artifactType, want := range map[string]artifacts.Priority{
-		model.ArtifactLNK:        artifacts.PriorityHigh,
-		model.ArtifactRecycleBin: artifacts.PriorityHigh,
+		model.ArtifactWMIRepository: artifacts.PriorityCritical,
+		model.ArtifactLNK:           artifacts.PriorityHigh,
+		model.ArtifactRecycleBin:    artifacts.PriorityHigh,
 		// $R gained a parser in phase 19 and kept the MEDIUM it had when
 		// it was unsupported. That is the rule this test exists for:
 		// support and forensic value are separate axes.
