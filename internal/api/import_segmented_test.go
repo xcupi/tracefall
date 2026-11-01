@@ -15,6 +15,7 @@ import (
 	"tracefall/internal/ingest"
 	"tracefall/internal/model"
 	"tracefall/internal/parsers"
+	"tracefall/internal/report"
 	"tracefall/internal/store"
 )
 
@@ -583,5 +584,63 @@ func TestAbortSegmentedReturnsDuplicateAndCancelledSourcesToDiscovered(t *testin
 				t.Errorf("status = %q, want %q", sf.ImportStatus, want)
 			}
 		})
+	}
+}
+
+// An importing source is disclosed to every reader of source status: the report
+// says it is not part of the analysis, and the evidence filter/triage name it.
+func TestImportingStatusIsDisclosedInReportAndEvidenceViews(t *testing.T) {
+	sf := model.SourceFile{ID: "x", ImportStatus: model.SourceFileImporting, Supported: true}
+	lim := reportLimitations(report.Data{}, reportInputs{sourceFiles: []model.SourceFile{sf}})
+	found := false
+	for _, l := range lim {
+		if strings.Contains(l, "still being imported in segments") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("report limitations do not mention the importing source: %v", lim)
+	}
+	if got := evidenceStatusValue(triage(sf)); got != "importing" {
+		t.Errorf("evidenceStatusValue = %q, want importing", got)
+	}
+}
+
+// The second pending check (after the imports gate) refuses an import that was
+// queued while a segmented import became pending, and frees the gate.
+func TestImportQueuedBehindThePendingCheckIsRefusedAndReleasesTheGate(t *testing.T) {
+	env := newSegEnv(t, 1, 400, [2]int{0, 10}, [2]int{1000, 1500})
+	svc := env.svc
+	release, err := svc.imports.Acquire(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, e := svc.ImportEvidence(env.caseID, env.coll, []string{env.ids["ERRORLOG.1"]})
+		done <- e
+	}()
+	time.Sleep(300 * time.Millisecond) // it passed the first check and waits at the gate
+	if err := svc.store.BeginSegmentedImport(env.ids["ERRORLOG"]); err != nil {
+		t.Fatal(err)
+	}
+	release()
+	select {
+	case e := <-done:
+		if !errors.Is(e, ErrImportInProgress) {
+			t.Fatalf("queued import = %v, want ErrImportInProgress", e)
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatal("queued import never returned: the gate was not released or it deadlocked")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	rel, err := svc.imports.Acquire(ctx)
+	if err != nil {
+		t.Fatalf("the gate stayed held after the refusal: %v", err)
+	}
+	rel()
+	if sf, _ := svc.store.GetSourceFile(env.ids["ERRORLOG.1"]); sf.ImportStatus != model.SourceFileDiscovered {
+		t.Errorf("refused source status = %q, want discovered", sf.ImportStatus)
 	}
 }

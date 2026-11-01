@@ -92,6 +92,8 @@ func evidenceStatusValue(f TriagedSourceFile) string {
 		return "duplicate"
 	case model.SourceFileFailed:
 		return "failed"
+	case model.SourceFileImporting:
+		return "importing"
 	}
 	if f.Supported {
 		return "supported"

@@ -6623,6 +6623,7 @@ const SOURCE_FILE_STATUS_LABELS = {
   unsupported: "unsupported",
   duplicate: "duplicate in this batch",
   imported: "imported",
+  importing: "importing (not evidence until verified)",
   failed: "failed to parse",
 };
 
@@ -7076,6 +7077,7 @@ const EVIDENCE_STATUS_LABELS = {
   supported: "Supported (not imported)",
   unsupported: "Unsupported",
   imported: "Imported",
+  importing: "Importing",
   duplicate: "Duplicate",
   failed: "Parse error",
 };
@@ -7086,6 +7088,7 @@ function evidenceStatusValue(f) {
   if (f.import_status === "imported") return "imported";
   if (f.import_status === "duplicate") return "duplicate";
   if (f.import_status === "failed") return "failed";
+  if (f.import_status === "importing") return "importing";
   return f.supported ? "supported" : "unsupported";
 }
 

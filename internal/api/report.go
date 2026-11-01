@@ -844,13 +844,20 @@ func reportLimitations(d report.Data, in reportInputs) []string {
 	if unmappedOnly > 0 {
 		lim = append(lim, fmt.Sprintf("%d source file(s) contain %d record(s) of event kinds Tracefall does not map; they remain in the original evidence and in each file's parser coverage census. Unmapped is not the same as benign.", unmappedOnly, unmappedRecords))
 	}
+	importing := 0
 	for _, sf := range in.sourceFiles {
 		if sf.ImportStatus == model.SourceFileDiscovered && sf.Supported {
 			pending++
 		}
+		if sf.ImportStatus == model.SourceFileImporting {
+			importing++
+		}
 	}
 	if pending > 0 {
 		lim = append(lim, fmt.Sprintf("%d supported file(s) were cataloged but not imported, so they are not part of this analysis.", pending))
+	}
+	if importing > 0 {
+		lim = append(lim, fmt.Sprintf("%d source file(s) are still being imported in segments; nothing from them is part of this analysis until the import finishes and is verified.", importing))
 	}
 	if d.Timeline.Undated > 0 {
 		lim = append(lim, fmt.Sprintf("%d event(s) record no timestamp and are not placed on the timeline.", d.Timeline.Undated))

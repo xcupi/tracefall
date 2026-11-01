@@ -184,7 +184,8 @@ func computeCoverage(files []TriagedSourceFile) Coverage {
 			cov.Duplicates++
 		case model.SourceFileFailed:
 			cov.ParseFailed++
-		case model.SourceFileDiscovered:
+		case model.SourceFileDiscovered, model.SourceFileImporting:
+			// Importing in segments is not evidence yet: counted as not imported.
 			cov.NotImported++
 		}
 		if f.Recommended {
@@ -292,6 +293,7 @@ func (s *Service) Capabilities() CapabilityReport {
 			{Value: "unsupported", Label: "Unsupported"},
 			{Value: model.SourceFileImported, Label: "Imported"},
 			{Value: model.SourceFileDiscovered, Label: "Not imported"},
+			{Value: model.SourceFileImporting, Label: "Importing"},
 			{Value: model.SourceFileDuplicate, Label: "Duplicate"},
 			{Value: model.SourceFileFailed, Label: "Parse error"},
 		},

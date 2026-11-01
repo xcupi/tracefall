@@ -63,7 +63,8 @@ func newSegmentedImport() *segmentedImport {
 }
 
 // SetSegmentedImport configures when a source is admitted in segments
-// (minBytes <= 0 disables it) and how many events one segment holds.
+// (minBytes <= 0 disables it) and how many events one segment holds. The fields
+// are not synchronized: call it before the Service serves requests.
 func (s *Service) SetSegmentedImport(minBytes int64, segmentEvents int) {
 	s.seg.minBytes = minBytes
 	if segmentEvents > 0 {
