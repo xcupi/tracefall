@@ -108,6 +108,9 @@ type Subprocess struct {
 	// NoNetwork asks, when there is no Sandbox, for a network namespace with
 	// no interfaces, where the kernel allows it.
 	NoNetwork bool
+	// SegmentedCeiling bounds a segmented streaming parse that keeps making
+	// progress. 0 means 72 hours.
+	SegmentedCeiling time.Duration
 }
 
 type workerRequest struct {

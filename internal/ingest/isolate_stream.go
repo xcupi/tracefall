@@ -11,6 +11,7 @@ import (
 	"io"
 	"os/exec"
 	"path/filepath"
+	"sync/atomic"
 	"time"
 
 	"tracefall/internal/model"
@@ -50,7 +51,26 @@ func (s Subprocess) RunStream(parent context.Context, p parsers.ArtifactParser, 
 		}
 		defer release()
 	}
-	ctx, cancel := context.WithTimeout(parent, s.timeout())
+	// Whole-source mode: one absolute deadline and one cumulative output cap.
+	// Segmented mode (WithSegmentedStream): the consumer persists every batch
+	// durably, so only lack of progress is a failure -- the deadline restarts
+	// after each consumed frame and the output cap bounds a single frame run,
+	// not the whole source. Cancellation, memory limit, sandbox and the
+	// 16 MiB frame bound are unchanged.
+	segmented := segmentedStream(parent)
+	var ctx context.Context
+	var cancel context.CancelFunc
+	var stall, ceiling *time.Timer
+	var stalled, exceeded atomic.Bool
+	if segmented {
+		ctx, cancel = context.WithCancel(parent)
+		stall = time.AfterFunc(s.timeout(), func() { stalled.Store(true); cancel() })
+		ceiling = time.AfterFunc(s.segmentedCeiling(), func() { exceeded.Store(true); cancel() })
+		defer stall.Stop()
+		defer ceiling.Stop()
+	} else {
+		ctx, cancel = context.WithTimeout(parent, s.timeout())
+	}
 	defer cancel()
 	req, err := json.Marshal(workerRequest{Parser: p.Name(), Path: abs, Context: pc, Stream: true})
 	if err != nil {
@@ -150,6 +170,11 @@ func (s Subprocess) RunStream(parent context.Context, p parsers.ArtifactParser, 
 					undated++
 				}
 			}
+			if segmented {
+				// Durable progress: restart the stall clock and the per-run cap.
+				stall.Reset(s.timeout())
+				lr.N = max + 1
+			}
 		} else if frame.Done && frame.Batch == nil {
 			done = true
 			cov = frame.Coverage
@@ -174,6 +199,12 @@ func (s Subprocess) RunStream(parent context.Context, p parsers.ArtifactParser, 
 	}
 	if ctx.Err() != nil && parent.Err() != nil {
 		return cov, parent.Err()
+	}
+	if stalled.Load() {
+		return cov, &ProcessFailure{Reason: fmt.Sprintf("it made no durable progress for %s and was stopped", s.timeout())}
+	}
+	if exceeded.Load() {
+		return cov, &ProcessFailure{Reason: fmt.Sprintf("it ran past the %s safety ceiling for a segmented import and was stopped", s.segmentedCeiling())}
 	}
 	if ctx.Err() == context.DeadlineExceeded {
 		return cov, &ProcessFailure{Reason: fmt.Sprintf("it ran past the %s time limit and was stopped", s.timeout())}
