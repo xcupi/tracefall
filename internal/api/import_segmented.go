@@ -15,6 +15,21 @@ import (
 	"tracefall/internal/store"
 )
 
+// Segmented import admits one very large streaming source in bounded segments
+// that stay hidden from every reader until the source is verified and published
+// with one status flip. Known, deliberate limits of this implementation:
+//
+//   - Only artifact types listed in segmentedArtifacts take this path (host
+//     resolution must equal the single-transaction path); others keep it.
+//   - Checkpoints are written but NOT used to resume: after a failure, cancel or
+//     process death the pending segments are removed and the source is imported
+//     again from the beginning.
+//   - There is no lock between two server processes on one database: starting a
+//     second process runs startup recovery and aborts the first one's live import.
+//   - Progress is reported per file, not per segment, while a segmented import
+//     runs.
+//   - It reduces neither the database size nor the total parse time.
+//
 // errSegmentedPending wraps ErrImportInProgress (so the existing HTTP mapping
 // applies): a segmented import is pending in the case, so evidence deletion and
 // other imports must wait -- they could not see its pending rows.
@@ -40,6 +55,7 @@ type segmentedImport struct {
 	noAbort  bool                     // simulate a process that died: no abort
 	abortErr error                    // simulate a failing abort
 	mutate   func(*model.Event)       // test seam: alter a parsed event
+	hostsErr error                    // simulate a failing host lookup
 }
 
 func newSegmentedImport() *segmentedImport {
@@ -161,6 +177,9 @@ func (s *Service) importSegmented(job segmentedJob, caseID, collectionID, root s
 	// here: a source cannot name its own host before it has been read.
 	collectionHost := ""
 	hosts, herr := s.store.CollectionHosts(caseID, collectionID)
+	if s.seg.hostsErr != nil {
+		herr = s.seg.hostsErr
+	}
 	if herr != nil {
 		return 0, 0, s.abortSegmented(sf.ID, fmt.Errorf("reading the collection's hosts: %w", herr), prog)
 	}
@@ -264,8 +283,9 @@ func (s *Service) abortSegmented(id string, cause error, prog *progressSink) err
 		return &segmentedAbortError{cause: cause, abort: aerr}
 	}
 	if errors.Is(cause, context.Canceled) || errors.Is(cause, store.ErrDuplicateSourceFile) {
-		if _, rerr := s.store.RetryFailedSource(id); rerr != nil {
-			return fmt.Errorf("%w (and returning the source to discovered failed: %v)", cause, rerr)
+		applied, rerr := s.store.RetryFailedSource(id)
+		if rerr != nil || !applied {
+			return fmt.Errorf("%w (and returning the source to discovered did not succeed: applied=%v err=%v)", cause, applied, rerr)
 		}
 	}
 	return cause

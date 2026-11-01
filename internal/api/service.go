@@ -1277,6 +1277,11 @@ func (s *Service) importEvidence(caseID, collectionID string, sourceFileIDs []st
 		return ImportResult{}, err
 	}
 	defer releaseImport()
+	// Checked again: another import may have left a segmented import pending
+	// while this one waited for its place.
+	if err := s.refuseIfSegmentedPending(caseID); err != nil {
+		return ImportResult{}, err
+	}
 	prog.phase(PhasePreparing)
 
 	// The selection is de-duplicated before anything is parsed.

@@ -514,3 +514,74 @@ func TestDeduplicateForImportSeesTheSourcesOwnEarlierSegments(t *testing.T) {
 		t.Fatalf("second segment: new=%d observations=%+v, want 0 new and an observation of event \"first\"", len(n2), o2)
 	}
 }
+
+// A failing host lookup stops the import (nothing is guessed) and is disclosed.
+func TestSegmentedImportStopsWhenTheCollectionHostsCannotBeRead(t *testing.T) {
+	env := newSegEnv(t, 1, 400, [2]int{0, 10}, [2]int{1000, 1500})
+	env.svc.seg.hostsErr = errors.New("simulated host lookup failure")
+	res := env.importAll(t)
+	env.svc.seg.hostsErr = nil
+	if len(res.ParseFailures) != 2 || !strings.Contains(strings.Join(res.Errors, " "), "reading the collection's hosts") {
+		t.Fatalf("not disclosed: failures=%d errors=%v", len(res.ParseFailures), res.Errors)
+	}
+	if n := env.rows(t, `SELECT COUNT(*) FROM events`); n != 0 {
+		t.Errorf("%d events imported despite the failure", n)
+	}
+	for _, id := range env.ids {
+		if sf, _ := env.svc.store.GetSourceFile(id); sf.ImportStatus != model.SourceFileFailed {
+			t.Errorf("source %s status = %q, want failed", id, sf.ImportStatus)
+		}
+	}
+}
+
+// After an abort that could not remove the pending rows, the sources queued
+// behind it must not start (they could not be admitted beside it anyway).
+func TestSegmentedImportStopsTheQueueAfterAnAbortFailure(t *testing.T) {
+	env := newSegEnv(t, 1, 400, [2]int{0, 10}, [2]int{1000, 2500})
+	env.svc.seg.hook = func(idx int) error {
+		if idx == 1 {
+			return errors.New("simulated failure")
+		}
+		return nil
+	}
+	env.svc.seg.abortErr = errors.New("simulated disk error")
+	// The big source first, the small one queued behind it.
+	res, err := env.svc.ImportEvidence(env.caseID, env.coll, []string{env.ids["ERRORLOG"], env.ids["ERRORLOG.1"]})
+	env.svc.seg.hook, env.svc.seg.abortErr = nil, nil
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.ParseFailures) != 1 || len(res.Errors) != 1 {
+		t.Fatalf("failures=%d errors=%v, want exactly the one stuck source reported", len(res.ParseFailures), res.Errors)
+	}
+	if res.Unprocessed != 1 {
+		t.Errorf("unprocessed = %d, want the 1 queued source", res.Unprocessed)
+	}
+	if sf, _ := env.svc.store.GetSourceFile(env.ids["ERRORLOG.1"]); sf.ImportStatus != model.SourceFileDiscovered {
+		t.Errorf("the queued source was started: status %q", sf.ImportStatus)
+	}
+}
+
+// A duplicate-content source and a cancelled one go back to discovered, and the
+// failure of that step is never silent.
+func TestAbortSegmentedReturnsDuplicateAndCancelledSourcesToDiscovered(t *testing.T) {
+	for name, cause := range map[string]error{"duplicate": store.ErrDuplicateSourceFile, "cancelled": context.Canceled, "other": errors.New("boom")} {
+		t.Run(name, func(t *testing.T) {
+			env := newSegEnv(t, 1, 400, [2]int{0, 10}, [2]int{1000, 1500})
+			src := env.ids["ERRORLOG"]
+			if err := env.svc.store.BeginSegmentedImport(src); err != nil {
+				t.Fatal(err)
+			}
+			if err := env.svc.abortSegmented(src, cause, nil); !errors.Is(err, cause) {
+				t.Fatalf("abortSegmented = %v, want the cause preserved", err)
+			}
+			want := model.SourceFileFailed
+			if name != "other" {
+				want = model.SourceFileDiscovered
+			}
+			if sf, _ := env.svc.store.GetSourceFile(src); sf.ImportStatus != want {
+				t.Errorf("status = %q, want %q", sf.ImportStatus, want)
+			}
+		})
+	}
+}
