@@ -644,3 +644,28 @@ func TestImportQueuedBehindThePendingCheckIsRefusedAndReleasesTheGate(t *testing
 		t.Errorf("refused source status = %q, want discovered", sf.ImportStatus)
 	}
 }
+
+// newSegEnvOn builds a second case on an existing Service (same database).
+func newSegEnvOn(t *testing.T, svc *Service, name string, small, big [2]int) segEnv {
+	t.Helper()
+	c, err := svc.CreateCase(name, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	writeLog(t, filepath.Join(root, "ERRORLOG.1"), small[0], small[1])
+	writeLog(t, filepath.Join(root, "ERRORLOG"), big[0], big[1])
+	disc, err := svc.DiscoverEvidenceFromPath(c.ID, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	files, err := svc.store.ListSourceFilesByCollection(disc.Collection.ID)
+	if err != nil || len(files) != 2 {
+		t.Fatalf("discover: %v %d", err, len(files))
+	}
+	env := segEnv{svc: svc, caseID: c.ID, coll: disc.Collection.ID, ids: map[string]string{}}
+	for _, f := range files {
+		env.ids[filepath.Base(f.Path)] = f.ID
+	}
+	return env
+}
