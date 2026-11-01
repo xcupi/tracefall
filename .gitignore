@@ -30,3 +30,6 @@
 *.pprof
 *.prof
 *.trace
+
+# Local agent state and plans (may hold local paths); never commit.
+/.hermes/
