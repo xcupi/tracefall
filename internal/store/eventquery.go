@@ -487,11 +487,11 @@ func (s *Store) SearchEvents(q EventQuery) ([]model.Event, int, error) {
 	where, args := eventWhere(q)
 
 	var total int
-	if err := s.db.QueryRow(`SELECT COUNT(*) FROM events WHERE `+where, args...).Scan(&total); err != nil {
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM events WHERE `+srcVisible("source_file_id")+` AND (`+where+`)`, args...).Scan(&total); err != nil {
 		return nil, 0, fmt.Errorf("store: counting events: %w", err)
 	}
 
-	sql := `SELECT ` + eventCols + ` FROM events WHERE ` + where + ` ` + q.Sort.orderClause()
+	sql := `SELECT ` + eventCols + ` FROM events WHERE ` + srcVisible("source_file_id") + ` AND (` + where + `) ` + q.Sort.orderClause()
 	pageArgs := args
 	if q.Limit > 0 {
 		sql += ` LIMIT ? OFFSET ?`
@@ -579,7 +579,7 @@ func (s *Store) EventFacets(caseID string) (EventFacets, error) {
 
 	// facetColumns is a package constant, never request input.
 	rows, err := s.db.Query(
-		`SELECT DISTINCT `+strings.Join(facetColumns, ", ")+` FROM events WHERE case_id = ?`, caseID)
+		`SELECT DISTINCT `+strings.Join(facetColumns, ", ")+` FROM events WHERE case_id = ? AND `+srcVisible("source_file_id"), caseID)
 	if err != nil {
 		return out, fmt.Errorf("store: event facets: %w", err)
 	}
@@ -636,7 +636,7 @@ func (s *Store) EventFacets(caseID string) (EventFacets, error) {
 	// model.Event.Timestamp) and is not a point on any calendar. Letting
 	// it through would tell the analyst their evidence starts in year 1.
 	row := s.db.QueryRow(
-		`SELECT MIN(timestamp), MAX(timestamp) FROM events WHERE case_id = ? AND timestamp > ?`,
+		`SELECT MIN(timestamp), MAX(timestamp) FROM events WHERE case_id = ? AND timestamp > ? AND `+srcVisible("source_file_id"),
 		caseID, fmtTime(time.Time{}))
 	var lo, hi *string
 	if err := row.Scan(&lo, &hi); err != nil {
@@ -656,7 +656,7 @@ func (s *Store) EventFacets(caseID string) (EventFacets, error) {
 // scale warnings) and loading rows to call len() would be waste.
 func (s *Store) CountEvents(caseID string) (int, error) {
 	var n int
-	err := s.db.QueryRow(`SELECT COUNT(*) FROM events WHERE case_id = ?`, caseID).Scan(&n)
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM events WHERE case_id = ? AND `+srcVisible("source_file_id"), caseID).Scan(&n)
 	return n, err
 }
 
@@ -780,7 +780,7 @@ func (s *Store) EventsByIDs(ids []string) ([]model.Event, error) {
 			args = append(args, id)
 		}
 		rows, err := s.db.Query(
-			`SELECT `+eventCols+` FROM events WHERE id IN (`+placeholders(len(batch))+`)`, args...)
+			`SELECT `+eventCols+` FROM events WHERE id IN (`+placeholders(len(batch))+`) AND `+srcVisible("source_file_id"), args...)
 		if err != nil {
 			return nil, fmt.Errorf("store: loading events by id: %w", err)
 		}

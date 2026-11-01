@@ -554,4 +554,51 @@ CREATE TABLE IF NOT EXISTS upload_sessions (
 );
 CREATE INDEX IF NOT EXISTS idx_upload_sessions_case ON upload_sessions(case_id);
 CREATE INDEX IF NOT EXISTS idx_upload_sessions_status ON upload_sessions(status, updated_at);
+
+-- Segmented source admission (see segmented_import.go). Rows of a source whose
+-- import_status is 'importing' are committed in bounded segments but are
+-- hidden from every reader until the source is finalized. A checkpoint row is
+-- written in the SAME transaction as its segment, so after a crash the
+-- checkpoints always equal the committed rows. The rowid intervals record
+-- exactly which rows the segment's exclusive transaction appended (the three
+-- evidence tables have no source_file_id index, deliberately). Only case_id has a foreign key:
+-- case deletion removes these rows explicitly; case_id carries a foreign key like every case-owned table.
+CREATE TABLE IF NOT EXISTS source_import_segments (
+	source_file_id TEXT NOT NULL,
+	seg_index      INTEGER NOT NULL,
+	case_id        TEXT NOT NULL REFERENCES cases(id),
+	collection_id  TEXT NOT NULL,
+	byte_offset    INTEGER NOT NULL DEFAULT 0,
+	position       TEXT NOT NULL DEFAULT '',
+	records        INTEGER NOT NULL DEFAULT 0,
+	raw_n          INTEGER NOT NULL DEFAULT 0,
+	events_n       INTEGER NOT NULL DEFAULT 0,
+	obs_n          INTEGER NOT NULL DEFAULT 0,
+	raw_lo         INTEGER NOT NULL DEFAULT 0,
+	raw_hi         INTEGER NOT NULL DEFAULT 0,
+	ev_lo          INTEGER NOT NULL DEFAULT 0,
+	ev_hi          INTEGER NOT NULL DEFAULT 0,
+	obs_lo         INTEGER NOT NULL DEFAULT 0,
+	obs_hi         INTEGER NOT NULL DEFAULT 0,
+	committed_at   TEXT NOT NULL,
+	PRIMARY KEY (source_file_id, seg_index)
+);
+CREATE INDEX IF NOT EXISTS idx_source_import_segments_case ON source_import_segments(case_id);
+
+-- Disclosed terminal result of a segmented import (finalized or aborted), kept
+-- after the checkpoint rows are gone so a failure reason is never lost.
+CREATE TABLE IF NOT EXISTS source_import_outcomes (
+	source_file_id TEXT PRIMARY KEY,
+	case_id        TEXT NOT NULL REFERENCES cases(id),
+	collection_id  TEXT NOT NULL,
+	outcome        TEXT NOT NULL,
+	reason         TEXT NOT NULL DEFAULT '',
+	segments       INTEGER NOT NULL DEFAULT 0,
+	records        INTEGER NOT NULL DEFAULT 0,
+	raw_n          INTEGER NOT NULL DEFAULT 0,
+	events_n       INTEGER NOT NULL DEFAULT 0,
+	obs_n          INTEGER NOT NULL DEFAULT 0,
+	at             TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_source_import_outcomes_case ON source_import_outcomes(case_id);
 `

@@ -188,6 +188,16 @@ func populate(t *testing.T, s *store.Store, caseID, name string, events int) {
 	}}); err != nil {
 		t.Fatal(err)
 	}
+
+	// Segmented-admission bookkeeping is case-owned too (segmented_import.go).
+	if _, err := s.DB().Exec(`INSERT INTO source_import_segments (source_file_id, seg_index, case_id, collection_id, committed_at) VALUES (?, 0, ?, ?, ?)`,
+		files[0].ID, caseID, collID, now.Format(time.RFC3339)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB().Exec(`INSERT INTO source_import_outcomes (source_file_id, case_id, collection_id, outcome, at) VALUES (?, ?, ?, 'imported', ?)`,
+		files[1].ID, caseID, collID, now.Format(time.RFC3339)); err != nil {
+		t.Fatal(err)
+	}
 	if err := s.CreateNote(model.Note{
 		ID: caseID + "-n1", CaseID: caseID, TargetType: "finding", TargetID: caseID + "-f1",
 		Text: "a note", CreatedAt: now, UpdatedAt: now,

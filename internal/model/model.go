@@ -281,6 +281,7 @@ const (
 	SourceFileUnsupported = "unsupported" // cataloged, but no parser recognizes it -- cannot be imported
 	SourceFileDuplicate   = "duplicate"   // cataloged, but its content (by SHA-256) already exists elsewhere in this same collection -- cannot be imported (a different collection may legitimately re-observe the same file; see docs/data-model.md)
 	SourceFileFailed      = "failed"      // selected for import, but its parser returned an error
+	SourceFileImporting   = "importing"   // segmented admission in progress: bounded segments are committed but are NOT evidence until finalized (store.srcVisible hides them from every reader)
 )
 
 // Artifact types recognized in Phase 1. New artifact types are added here

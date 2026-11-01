@@ -158,6 +158,11 @@ func migrate(db *sql.DB) error {
 	if err := migrateSourceFilesToEvidenceModel(db); err != nil {
 		return fmt.Errorf("migrating source_files to the evidence file model: %w", err)
 	}
+	// Tiny partial index: every evidence reader hides the rows of sources whose
+	// import is in progress through a subquery over exactly these rows.
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_source_files_importing ON source_files(id) WHERE import_status = 'importing'`); err != nil {
+		return fmt.Errorf("creating importing-source index: %w", err)
+	}
 	if err := addColumnIfMissing(db, "collections", "imported_file_count", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return fmt.Errorf("migrating collections (imported_file_count): %w", err)
 	}

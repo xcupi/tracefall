@@ -78,7 +78,7 @@ func (c caseEvents) Load(f model.EventFilter) ([]model.Event, error) {
 	}
 	// Ordered as ListEvents orders, so a filtered consumer sees its events in
 	// the same relative order a full load would give it.
-	q := `SELECT ` + eventCols + ` FROM events WHERE case_id = ? AND ` + where + ` ORDER BY timestamp ASC, id ASC`
+	q := `SELECT ` + eventCols + ` FROM events WHERE case_id = ? AND ` + srcVisible("source_file_id") + ` AND ` + where + ` ORDER BY timestamp ASC, id ASC`
 	rows, err := c.s.db.Query(q, args...)
 	if err != nil {
 		return nil, fmt.Errorf("loading filtered events: %w", err)
@@ -98,7 +98,7 @@ func (c caseEvents) Load(f model.EventFilter) ([]model.Event, error) {
 // Refs reads every event as an EventRef. It never builds the parsed Extra
 // maps, which is where most of a full event's memory goes.
 func (c caseEvents) Refs() ([]model.EventRef, error) {
-	rows, err := c.s.db.Query(`SELECT id, collection_id, host, process_name, artifact_type, timestamp FROM events WHERE case_id = ? ORDER BY timestamp ASC, id ASC`, c.caseID)
+	rows, err := c.s.db.Query(`SELECT id, collection_id, host, process_name, artifact_type, timestamp FROM events WHERE case_id = ? AND `+srcVisible("source_file_id")+` ORDER BY timestamp ASC, id ASC`, c.caseID)
 	if err != nil {
 		return nil, fmt.Errorf("loading event references: %w", err)
 	}
@@ -153,7 +153,7 @@ func (s *Store) pageEvents(scopeCol, scope string, scan func(row interface{ Scan
 	var afterTS, afterID string
 	started := false
 	for {
-		q := `SELECT ` + eventCols + ` FROM events WHERE ` + scopeCol + ` = ?`
+		q := `SELECT ` + eventCols + ` FROM events WHERE ` + scopeCol + ` = ? AND ` + srcVisible("source_file_id")
 		args := []any{scope}
 		if started {
 			q += ` AND (timestamp, id) > (?, ?)`

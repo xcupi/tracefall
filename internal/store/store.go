@@ -712,7 +712,7 @@ func (s *Store) SaveRawEvidence(items []model.RawEvidence) error {
 }
 
 func (s *Store) GetRawEvidence(id string) (model.RawEvidence, error) {
-	row := s.db.QueryRow(`SELECT id, case_id, source_file_id, source_reference, raw FROM raw_evidence WHERE id = ?`, id)
+	row := s.db.QueryRow(`SELECT id, case_id, source_file_id, source_reference, raw FROM raw_evidence WHERE id = ? AND `+srcVisible("source_file_id"), id)
 	var r model.RawEvidence
 	if err := row.Scan(&r.ID, &r.CaseID, &r.SourceFileID, &r.SourceReference, &r.Raw); err != nil {
 		return model.RawEvidence{}, err
@@ -798,7 +798,7 @@ func (s *Store) FindEventByDedupHash(caseID, hash string) (model.Event, bool, er
 	if hash == "" {
 		return model.Event{}, false, nil
 	}
-	row := s.sourceExecutor().QueryRow(`SELECT `+eventCols+` FROM events WHERE case_id = ? AND dedup_hash = ? LIMIT 1`, caseID, hash)
+	row := s.sourceExecutor().QueryRow(`SELECT `+eventCols+` FROM events WHERE case_id = ? AND dedup_hash = ? AND `+srcVisible("source_file_id")+` LIMIT 1`, caseID, hash)
 	e, err := scanEvent(row)
 	if err == sql.ErrNoRows {
 		return model.Event{}, false, nil
@@ -812,7 +812,7 @@ func (s *Store) FindEventByDedupHash(caseID, hash string) (model.Event, bool, er
 // ListEvents returns every event for a case ordered chronologically --
 // the basis of the unified timeline.
 func (s *Store) ListEvents(caseID string) ([]model.Event, error) {
-	rows, err := s.db.Query(`SELECT `+eventCols+` FROM events WHERE case_id = ? ORDER BY timestamp ASC`, caseID)
+	rows, err := s.db.Query(`SELECT `+eventCols+` FROM events WHERE case_id = ? AND `+srcVisible("source_file_id")+` ORDER BY timestamp ASC`, caseID)
 	if err != nil {
 		return nil, err
 	}
@@ -830,7 +830,7 @@ func (s *Store) ListEvents(caseID string) ([]model.Event, error) {
 }
 
 func (s *Store) GetEvent(id string) (model.Event, error) {
-	row := s.db.QueryRow(`SELECT `+eventCols+` FROM events WHERE id = ?`, id)
+	row := s.db.QueryRow(`SELECT `+eventCols+` FROM events WHERE id = ? AND `+srcVisible("source_file_id"), id)
 	return scanEvent(row)
 }
 
@@ -853,7 +853,7 @@ func (s *Store) GetEvents(ids []string) ([]model.Event, error) {
 // this collection via deduplication but first seen in an earlier one is
 // not included here -- see ListEventObservationsByCollection for that.
 func (s *Store) ListEventsByCollection(collectionID string) ([]model.Event, error) {
-	rows, err := s.db.Query(`SELECT `+eventCols+` FROM events WHERE collection_id = ? ORDER BY timestamp ASC`, collectionID)
+	rows, err := s.db.Query(`SELECT `+eventCols+` FROM events WHERE collection_id = ? AND `+srcVisible("source_file_id")+` ORDER BY timestamp ASC`, collectionID)
 	if err != nil {
 		return nil, err
 	}
@@ -895,7 +895,7 @@ func (s *Store) SummarizeCollectionEvents(collectionID string) (CollectionEventS
 		`SELECT COUNT(CASE WHEN timestamp = ? THEN 1 END),
 		        MIN(CASE WHEN timestamp <> ? THEN timestamp END),
 		        MAX(CASE WHEN timestamp <> ? THEN timestamp END)
-		   FROM events WHERE collection_id = ?`,
+		   FROM events WHERE collection_id = ? AND `+srcVisible("source_file_id"),
 		zero, zero, zero, collectionID,
 	).Scan(&undated, &lo, &hi); err != nil {
 		return out, fmt.Errorf("store: collection event bounds: %w", err)
@@ -911,7 +911,7 @@ func (s *Store) SummarizeCollectionEvents(collectionID string) (CollectionEventS
 	}
 
 	rows, err := s.db.Query(
-		`SELECT DISTINCT host FROM events WHERE collection_id = ? AND host <> '' ORDER BY host`,
+		`SELECT DISTINCT host FROM events WHERE collection_id = ? AND host <> '' AND `+srcVisible("source_file_id")+` ORDER BY host`,
 		collectionID)
 	if err != nil {
 		return out, fmt.Errorf("store: collection hosts: %w", err)
@@ -970,7 +970,7 @@ func (s *Store) ListRawEvidenceBySourceFile(sourceFileID string, limit int) ([]m
 	}
 	rows, err := s.db.Query(
 		`SELECT id, case_id, source_file_id, source_reference, raw
-		 FROM raw_evidence WHERE source_file_id = ? ORDER BY rowid LIMIT ?`, sourceFileID, limit)
+		 FROM raw_evidence WHERE source_file_id = ? AND `+srcVisible("source_file_id")+` ORDER BY rowid LIMIT ?`, sourceFileID, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -1032,7 +1032,7 @@ const observationCols = `id, event_id, case_id, collection_id, source_file_id, r
 // of whether a match was found), so this is always non-empty for a
 // valid event ID.
 func (s *Store) ListEventObservations(eventID string) ([]model.EventObservation, error) {
-	rows, err := s.db.Query(`SELECT `+observationCols+` FROM event_observations WHERE event_id = ? ORDER BY id`, eventID)
+	rows, err := s.db.Query(`SELECT `+observationCols+` FROM event_observations WHERE event_id = ? AND `+srcVisible("source_file_id")+` ORDER BY id`, eventID)
 	if err != nil {
 		return nil, err
 	}
@@ -1056,7 +1056,7 @@ func (s *Store) ListEventObservations(eventID string) ([]model.EventObservation,
 // is the starting point for deleting a source file's evidence: see
 // Service.deleteSourceFileEvidence.
 func (s *Store) ListEventObservationsBySourceFile(sourceFileID string) ([]model.EventObservation, error) {
-	rows, err := s.db.Query(`SELECT `+observationCols+` FROM event_observations WHERE source_file_id = ? ORDER BY id`, sourceFileID)
+	rows, err := s.db.Query(`SELECT `+observationCols+` FROM event_observations WHERE source_file_id = ? AND `+srcVisible("source_file_id")+` ORDER BY id`, sourceFileID)
 	if err != nil {
 		return nil, err
 	}
@@ -1545,6 +1545,9 @@ func (s *Store) DeleteCaseWithCounts(caseID string) (DeletedCaseCounts, error) {
 		`DELETE FROM events WHERE case_id = ?`,
 		`DELETE FROM findings WHERE case_id = ?`,
 		`DELETE FROM correlations WHERE case_id = ?`,
+		// Segmented-admission bookkeeping (no foreign keys; see schema.go).
+		`DELETE FROM source_import_segments WHERE case_id = ?`,
+		`DELETE FROM source_import_outcomes WHERE case_id = ?`,
 		`DELETE FROM source_files WHERE case_id = ?`,
 		`DELETE FROM collections WHERE case_id = ?`,
 		// Phase 6: analyst workflow state is scoped to exactly one case
@@ -1776,13 +1779,13 @@ func (s *Store) CollectionEventsAreSelfContained(collectionID string) (bool, err
 	err := s.db.QueryRow(`
 		SELECT
 			(SELECT COUNT(*) FROM events e
-			   WHERE e.collection_id = ?
+			   WHERE e.collection_id = ? AND `+srcVisible("e.source_file_id")+`
 			     AND EXISTS (SELECT 1 FROM event_observations o
-			                   WHERE o.event_id = e.id AND o.collection_id <> ?)),
+			                   WHERE o.event_id = e.id AND o.collection_id <> ? AND `+srcVisible("o.source_file_id")+`)),
 			(SELECT COUNT(*) FROM event_observations o
-			   WHERE o.collection_id = ?
+			   WHERE o.collection_id = ? AND `+srcVisible("o.source_file_id")+`
 			     AND EXISTS (SELECT 1 FROM events e
-			                   WHERE e.id = o.event_id AND e.collection_id <> ?))`,
+			                   WHERE e.id = o.event_id AND e.collection_id <> ? AND `+srcVisible("e.source_file_id")+`))`,
 		collectionID, collectionID, collectionID, collectionID).Scan(&sharedOut, &sharedIn)
 	if err != nil {
 		return false, fmt.Errorf("store: checking whether collection %s shares events: %w", collectionID, err)
@@ -1794,7 +1797,7 @@ func (s *Store) CollectionEventsAreSelfContained(collectionID string) (bool, err
 // collection, without loading them.
 func (s *Store) CountEventsByCollection(collectionID string) (int, error) {
 	var n int
-	err := s.db.QueryRow(`SELECT COUNT(*) FROM events WHERE collection_id = ?`, collectionID).Scan(&n)
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM events WHERE collection_id = ? AND `+srcVisible("source_file_id"), collectionID).Scan(&n)
 	if err != nil {
 		return 0, fmt.Errorf("store: counting events for collection %s: %w", collectionID, err)
 	}
@@ -1866,6 +1869,8 @@ func (s *Store) DeleteCollection(collectionID string) error {
 		// must not be removed.
 		`DELETE FROM events WHERE collection_id = ?`,
 		`DELETE FROM raw_evidence WHERE source_file_id IN (SELECT id FROM source_files WHERE collection_id = ?)`,
+		`DELETE FROM source_import_segments WHERE collection_id = ?`,
+		`DELETE FROM source_import_outcomes WHERE collection_id = ?`,
 		`DELETE FROM source_files WHERE collection_id = ?`,
 		`DELETE FROM collections WHERE id = ?`,
 	}

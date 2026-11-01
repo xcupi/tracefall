@@ -101,7 +101,7 @@ func (s *Store) CaseNames(caseID string) (CaseNames, error) {
 	for _, f := range nameFields {
 		cols = append(cols, "json_extract(extra_json, '$."+f.key+"')")
 	}
-	rows, err := s.db.Query(`SELECT DISTINCT `+strings.Join(cols, ", ")+` FROM events WHERE case_id = ? LIMIT ?`, caseID, maxCaseNames+1)
+	rows, err := s.db.Query(`SELECT DISTINCT `+strings.Join(cols, ", ")+` FROM events WHERE case_id = ? AND `+srcVisible("source_file_id")+` LIMIT ?`, caseID, maxCaseNames+1)
 	if err != nil {
 		return CaseNames{}, err
 	}

@@ -115,7 +115,7 @@ func (s *Store) ReviewVTContext(ctx context.Context, caseID, runID string, event
 			for _, id := range e.SourceEventIDs {
 				var ev model.Event
 				if runID == "" {
-					v, err := scanEvent(tx.QueryRowContext(ctx, `SELECT `+eventCols+` FROM events WHERE case_id=? AND id=?`, caseID, id))
+					v, err := scanEvent(tx.QueryRowContext(ctx, `SELECT `+eventCols+` FROM events WHERE case_id=? AND id=? AND `+srcVisible("source_file_id"), caseID, id))
 					if err == sql.ErrNoRows {
 						continue
 					}
@@ -197,7 +197,7 @@ func reviewVTLinksTx(ctx context.Context, tx *sql.Tx, e model.Enrichment) ([]str
 	}
 	var events []model.Event
 	for _, id := range e.SourceEventIDs {
-		ev, err := scanEvent(tx.QueryRowContext(ctx, `SELECT `+eventCols+` FROM events WHERE case_id=? AND id=?`, e.CaseID, id))
+		ev, err := scanEvent(tx.QueryRowContext(ctx, `SELECT `+eventCols+` FROM events WHERE case_id=? AND id=? AND `+srcVisible("source_file_id"), e.CaseID, id))
 		if err == sql.ErrNoRows {
 			continue
 		}

@@ -88,7 +88,7 @@ func (s *Store) EventFieldsByKey(caseID string, keys []string) ([]HashField, err
 		conds = append(conds, `extra_json LIKE ?`)
 		args = append(args, `%"`+k+`":%`)
 	}
-	rows, err := s.db.Query(`SELECT id, extra_json FROM events WHERE case_id = ? AND (`+strings.Join(conds, " OR ")+`) ORDER BY id`, args...)
+	rows, err := s.db.Query(`SELECT id, extra_json FROM events WHERE case_id = ? AND `+srcVisible("source_file_id")+` AND (`+strings.Join(conds, " OR ")+`) ORDER BY id`, args...)
 	if err != nil {
 		return nil, err
 	}
