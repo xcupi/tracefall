@@ -324,3 +324,21 @@ func TestParse_EveryEventStatesItsTimeBasisAndThatItIsNotCalibrated(t *testing.T
 		}
 	}
 }
+
+func TestParse_SDPNetworkSaysBytesTotalIsNotTheSumOfTheOtherTwo(t *testing.T) {
+	// 1000 in + 250 out stored with a total of 900: the three counters are shown
+	// as stored and the event never adds them or claims the total is their sum.
+	ev, _, _ := parse(t, write(t, []esegen.Table{sdpIDs(), sdpNetTable(sdpNetRow(1, ole(t0), 1, 5, 1000, 250, 900))}, esegen.Options{}))
+	if len(ev) != 1 || ev[0].Extra["bytes_total"] != "900" {
+		t.Fatalf("events=%d extra=%+v", len(ev), ev)
+	}
+	l := ev[0].Extra["limitations"]
+	if !strings.Contains(l, "BytesTotal") || !strings.Contains(l, "not the sum") {
+		t.Errorf("the total's status is not said: %q", l)
+	}
+	for k := range ev[0].Extra {
+		if k == "bytes_sum" || k == "bytes_combined" {
+			t.Errorf("a derived total %q was invented", k)
+		}
+	}
+}

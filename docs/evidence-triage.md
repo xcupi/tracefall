@@ -1821,7 +1821,10 @@ service used since the last write. A row shows that an application was running
 and what it used in the interval ending at the row's time; it does not show what
 the application did, and the interval is not the moment of any action.
 
-Four tables are interpreted, by the provider GUIDs that name them:
+Five tables are interpreted, by the provider GUIDs that name them. Every table the
+database holds is listed in a census with the parse, and each one is described in
+[srum-coverage.md](srum-coverage.md) (schema, units, time basis, what a row does
+and does not show, what was verified, what was not):
 
 | Table | Event | Fields |
 |---|---|---|
@@ -1829,6 +1832,15 @@ Four tables are interpreted, by the provider GUIDs that name them:
 | `{973F5D5C-1D90-4944-BE8E-24B94231A174}` | `srum_network_usage` | bytes sent and received, interface (type, LUID), L2 profile |
 | `{DD6636C4-8929-4683-974E-22C046A43763}` | `srum_network_connection` | connect start (FILETIME), seconds connected, interface, L2 profile |
 | `{D10CA2FE-6FCF-4F6D-848E-B2E99266FA86}` | `srum_push_notification` | notification type, payload size, network type |
+| `{EEE2F477-0659-5C47-EF03-6D6BEFD441B3}` (SDP Network Provider) | `srum_sdp_network` | inbound, outbound and total byte counters for an object named by a type-4 id-map entry; read only when the table has the documented columns and types |
+
+**SRUM carries no transfer, destination or outcome.** Network columns are
+interval counters by application, interface or object, not flows. No rule,
+correlation, score, narrative or report sentence uses them to say that data was
+uploaded, exfiltrated or sent anywhere, or that anything happened as a result; a
+destination or outcome comes from network evidence only. The network events say so
+themselves in `evidence_meaning` and `limitations`, and tests fail if decision
+code names SRUM or if wording claims a transfer. See [srum-coverage.md](srum-coverage.md).
 
 Applications and users appear in the rows as numbers. `SruDbIdMapTable` names
 them: a path, a service, a package or a SID. A number the map does not hold, or
@@ -1838,13 +1850,23 @@ not tie to a file; only the name is taken from it and the text is kept as
 written. A user is a SID only when its map entry is of the SID type and the bytes
 form a well-formed SID.
 
-The timestamp is the JET date-time in the record (UTC). A value outside
-1995..2100 is not used: the event is undated and the stored bytes are kept in
-`timestamp_raw`.
+The timestamp is the JET date-time in the record (an OLE Automation date with no
+zone, read as UTC). It is the end of an aggregation interval written by the SRUM
+service, not the moment of any action, and it has **not been calibrated** against
+the host's real clock or any other artifact; every event says so in `time_basis`.
+A value outside 1995..2100 is not used: the event is undated and the stored bytes
+are kept in `timestamp_raw`.
+
+The parse stores a table census (per provider table: GUID, live rows, interpreted
+or not, deleted records, and whether the database was cleanly shut down). Source
+details and the report read `N tables, M interpreted, K rows not interpreted`;
+an uninterpreted table is not evidence of nothing.
 
 Limitations:
 
-- The other tables are counted and named in the parse notes, not interpreted. In
+- The other tables are counted, listed in the census and named in the parse notes,
+  not interpreted (on the Server-family databases examined: the SDP volume,
+  physical-disk and CPU tables, see srum-coverage.md). In
   the validation sample these are the two timeline tables (`{5C8CF1C7-7257-4F13-B223-970EF5939312}`,
   1,484 records, and `{7ACBBAA3-D029-4BE4-9A7A-0885927F1D8F}`, 42) and the energy
   tables, which were empty.
@@ -1866,6 +1888,16 @@ connected seconds all equal a separate pass with dissect and Python. In the same
 file 1,526 records in two uninterpreted tables and 23 deleted records were
 counted in the notes. There is no rule over SRUM yet; the sample came from an
 ordinary system and holds no case a rule could be checked against.
+
+Second validation (two real Server-family databases, `TestParse_RealSRUDBAgainstSecondDecoder`,
+`TRACEFALL_SRUM_DB` and `TRACEFALL_SRUM_ORACLE`): the table list and every row
+count equal dissect.esedb's (6 provider tables each, 0 differences). Per
+interpreted table the column sums, minimum and maximum time and undated count are
+equal, and 500 sampled rows per table per database match with 0 mismatches
+(application usage 241,649 and 206,750 events, connectivity 2,864 and 4,290, SDP
+network 17,998 and 54,006). The rows of the three SDP tables that stay
+uninterpreted are counted (for the first database 161,546 of 424,057). Details
+and the list of what was not verified: [srum-coverage.md](srum-coverage.md).
 
 ### IE / Edge Legacy WebCache (`webcache@1`)
 

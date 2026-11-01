@@ -143,6 +143,7 @@ const (
 	meaningNetConn = "SRUM recorded that a network interface profile was connected, for the stated seconds, in an interval ending at the row time. An interval record of connectivity, not a flow."
 	meaningSDPNet  = "Inbound, outbound and total byte counters the SRUM SDP network provider wrote for one object (public tools describe it as, for example, a network adapter) during an interval ending at the row time. An interval total by object, not a flow."
 	limitsNet      = "Not a flow: carries no destination, remote address, protocol, port or content, and no direction beyond sent/received (in/out). It does not show that data left the host, that any remote party received it, or what happened to it. A destination or an outcome must come from network evidence, never from SRUM."
+	limitsSDPTotal = "BytesTotal is shown as stored: it is not the sum of the inbound and outbound counters in the databases examined, and no cited source explains it, so it is neither added to nor compared with them."
 	timeBasis      = "End of the aggregation interval, written by the SRUM service as a JET date-time (OLE Automation date: an 8-byte float of days since 1899-12-30; no zone is stored and the value is read as UTC). Not the moment of any action. The time has not been calibrated against the host's real clock or any other artifact."
 )
 
@@ -526,7 +527,7 @@ func build(r ese.Row, k kind, table string, ids map[int64]idEntry, state string)
 		num("BytesInBound", "bytes_in_bound")
 		num("BytesOutBound", "bytes_out_bound")
 		num("BytesTotal", "bytes_total")
-		extra["evidence_meaning"], extra["limitations"] = meaningSDPNet, limitsNet
+		extra["evidence_meaning"], extra["limitations"] = meaningSDPNet, limitsNet+" "+limitsSDPTotal
 	case kindPush:
 		ev.EventType = model.EventSRUMPushNotification
 		num("NotificationType", "notification_type")
