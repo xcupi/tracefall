@@ -8324,7 +8324,7 @@ function renderTimelineRows(caseId, events, eventFindingIdx, eventCorrIdx, filte
   // slices an already-ordered array, so a page boundary never changes
   // which event comes before which.
   const page = paginate("tl", filtered);
-  body.innerHTML = scopeNote + `
+  body.innerHTML = `
     <div class="table-wrap"><table class="data-table wide">
       <thead><tr>
         <th>Time (${esc(tzLabel())})</th><th>Category</th><th>Type</th><th>Host</th><th>User</th>
