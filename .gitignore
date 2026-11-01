@@ -33,3 +33,6 @@
 
 # Local agent state and plans (may hold local paths); never commit.
 /.hermes/
+
+# Editor/agent run configuration; local only.
+/.claude/

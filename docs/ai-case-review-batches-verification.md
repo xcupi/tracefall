@@ -83,7 +83,7 @@ fingerprint determinism, tied/undated records and atomic oversized-row refusal.
 All commands used:
 
 ```
-GOCACHE=/home/udalah/.hermes/cache/scratch/gocache
+GOCACHE=$SCRATCH/gocache
 ```
 
 The final run after the UTF-8 and combined-packet-size checks was:
@@ -235,7 +235,7 @@ Actual cancellation, retained history selection, packet coverage/event citations
 external-policy/no-ack UI controls, focus/details/payload scroll, changed consent,
 untrusted raw-answer escaping, and late-response isolation passed. Desktop and
 390px screenshots were inspected; no horizontal overflow was observed.
-Artifacts: `/home/udalah/.hermes/cache/scratch/batch-parent-integrated-final-2/`.
+Artifacts: `$SCRATCH/batch-parent-integrated-final-2/`.
 
 The parent also ran the rebuilt integrated binary through the independent
 synthetic HTTP probe: 181 events, four initial plus one synthesis; an additional
@@ -244,7 +244,7 @@ run/packet became interrupted and provider calls stayed six before/after, with
 no automatic resend. Prior exact payload remained readable, case deletion
 removed readbacks, foreign Origin/Host were refused, and ports 34023/33843 were
 verified closed. Probe record:
-`/home/udalah/.hermes/cache/scratch/batch-parent-integrated-probe/probe-results.json`.
+`$SCRATCH/batch-parent-integrated-probe/probe-results.json`.
 
 Legacy `tests/external-ux.browser.cjs`, `tests/case-review.browser.cjs` and
 `tests/case-review-ui.browser.cjs` also passed against the freshly integrated

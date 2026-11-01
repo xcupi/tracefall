@@ -61,10 +61,10 @@ All routes below inherit centralized roles, forced-password-change restrictions,
 No new npm dependencies are needed in the repository. The browser test requires the preinstalled external Playwright module and Chrome. **Never run it against a real CLI/server.** The test refuses writes unless a synthetic marker and fresh local stand-in status log confirm the disposable server actually used the fake CLI.
 
 ```bash
-export GOCACHE=/home/udalah/.hermes/cache/scratch/gocache
-export PLAYWRIGHT_MODULE=/home/udalah/.hermes/cache/scratch/tracefall-ux-tools/node_modules/playwright
+export GOCACHE=$SCRATCH/gocache
+export PLAYWRIGHT_MODULE=$SCRATCH/tracefall-ux-tools/node_modules/playwright
 # Choose a new empty scratch directory for each initial run.
-export TF_BROWSER=/home/udalah/.hermes/cache/scratch/tf-chatgpt-browser-new
+export TF_BROWSER=$SCRATCH/tf-chatgpt-browser-new
 python3 -c 'import os,pathlib,re; d=pathlib.Path(os.environ["TF_BROWSER"]); d.mkdir(); s=pathlib.Path("internal/api/chatgpt_test.go").read_text(); (d/"codex").write_text(re.search(r"const settingsCodex = `(.+?)`",s,re.S).group(1)); (d/"codex").chmod(0o700); (d/"synthetic-only").write_text("tracefall-browser-synthetic-codex")'
 go build -o "$TF_BROWSER/tracefall" ./cmd/tracefall
 # Start this foreground command in a separate managed terminal; stop it by PID/session.

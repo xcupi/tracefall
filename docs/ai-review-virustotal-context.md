@@ -204,17 +204,17 @@ CAS, startup interruption and no-resend behavior remain in force.
 ## Synthetic fixture and verification boundary
 
 Separate scratch helper (not a production endpoint or committed binary):
-`/home/udalah/.hermes/cache/scratch/tf-review-vt-fixture/main.go`.
+`$SCRATCH/tf-review-vt-fixture/main.go`.
 Its sibling go.mod uses module `tracefall/reviewvtfixture` and a local replace to
 this worktree, so internal store packages are imported normally. It refuses
 existing DB/evidence roots and non-absolute/outside-scratch paths. It creates only
 synthetic records/files and calls no VT/model endpoint or real evidence reader.
 
 ```sh
-cd /home/udalah/.hermes/cache/scratch/tf-review-vt-fixture
-GOCACHE=/home/udalah/.hermes/cache/scratch/gocache go run -mod=mod . \
- /home/udalah/.hermes/cache/scratch/NEW-disposable-vt/fixture.db \
- /home/udalah/.hermes/cache/scratch/NEW-disposable-vt/evidence
+cd $SCRATCH/tf-review-vt-fixture
+GOCACHE=$SCRATCH/gocache go run -mod=mod . \
+ $SCRATCH/NEW-disposable-vt/fixture.db \
+ $SCRATCH/NEW-disposable-vt/evidence
 ```
 
 The executed helper verified 6 events, 6 stored opinions and one complete
@@ -245,7 +245,7 @@ All commands used the explicit scratch GOCACHE and `-count=1`.
 Final scoped race verification (not a full suite):
 
 ```sh
-GOCACHE=/home/udalah/.hermes/cache/scratch/gocache TRACEFALL_VT_API_KEY= \
+GOCACHE=$SCRATCH/gocache TRACEFALL_VT_API_KEY= \
  go test -race -p 1 ./internal/narrative ./internal/store ./internal/api \
  -run 'Review|Narrative|VirusTotalCandidates' -count=1 -timeout 15m
 ```
@@ -296,7 +296,7 @@ provider/evidence analytical quality.
   claim that that earlier run exercised later code.
 
 Reproducible scratch probes (ephemeral, not production endpoints):
-`/home/udalah/.hermes/cache/scratch/vt-parent-probe.py`,
+`$SCRATCH/vt-parent-probe.py`,
 `vt-parent-actual-ui.cjs`, and `tf-review-vt-mutate/main.go` in that scratch root.
 Final artifacts: `vt-parent-integrated-5/{verified.json,requests.jsonl,preview.json,
 single-status.json,packets.json,browser/}`; legacy regression artifacts:
