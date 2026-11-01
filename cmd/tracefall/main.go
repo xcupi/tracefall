@@ -80,6 +80,16 @@ func main() {
 	svc.SetParserStagingDir(stagingDir)
 	capacity.apply(svc, logger)
 
+	// A segmented import left importing by a stopped process holds hidden,
+	// unfinished rows. Remove them now so the source can be imported again.
+	if recovered, err := svc.RecoverSegmentedImports(context.Background()); err != nil {
+		logger.Error("recovering interrupted segmented imports", "error", err)
+	} else {
+		for _, rc := range recovered {
+			logger.Warn("removed an interrupted segmented import; the source can be imported again", "source_file_id", rc.SourceFileID, "segments_removed", rc.Segments)
+		}
+	}
+
 	// Server-path ingest reads folders that already sit on this machine. The
 	// policy decides which ones; see internal/api/evidence_policy.go.
 	roots := splitList(os.Getenv("TRACEFALL_EVIDENCE_ROOTS"))

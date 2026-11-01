@@ -673,7 +673,8 @@ func (s *Store) RetryFailedSource(id string) (bool, error) {
 
 // MarkSourceFileFailed records that a selected file failed, keeping it visible.
 func (s *Store) MarkSourceFileFailed(id string) error {
-	_, err := s.db.Exec(`UPDATE source_files SET import_status = ? WHERE id = ?`, model.SourceFileFailed, id)
+	// Never from importing: flipping it would publish its pending rows.
+	_, err := s.db.Exec(`UPDATE source_files SET import_status = ? WHERE id = ? AND import_status <> `+importingSQL, model.SourceFileFailed, id)
 	return err
 }
 

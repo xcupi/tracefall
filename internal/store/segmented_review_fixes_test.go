@@ -169,3 +169,30 @@ func TestOrdinaryEventWritesAreRefusedWhileTheCaseHasAnImportingSource(t *testin
 		t.Errorf("ordinary write after abort: %v", err)
 	}
 }
+
+// MarkSourceFileFailed must never take a source out of importing: that would
+// publish its pending rows without verification.
+func TestMarkSourceFileFailedCannotPublishAnImportingSource(t *testing.T) {
+	s := openTest(t)
+	seedSegSources(t, s)
+	if err := s.BeginSegmentedImport(segSrcA); err != nil {
+		t.Fatal(err)
+	}
+	commitSeg(t, s, segSrcA, 0, 2)
+	if err := s.MarkSourceFileFailed(segSrcA); err != nil {
+		t.Fatal(err)
+	}
+	sf, _ := s.GetSourceFile(segSrcA)
+	if sf.ImportStatus != model.SourceFileImporting {
+		t.Errorf("status = %q, want importing", sf.ImportStatus)
+	}
+	if n, _ := s.CountEvents(segCase); n != 1 {
+		t.Errorf("pending rows became visible: %d events", n)
+	}
+	if err := s.MarkSourceFileFailed(segSrcB); err != nil {
+		t.Fatal(err)
+	}
+	if sf, _ = s.GetSourceFile(segSrcB); sf.ImportStatus != model.SourceFileFailed {
+		t.Errorf("ordinary source status = %q, want failed", sf.ImportStatus)
+	}
+}

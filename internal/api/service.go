@@ -162,8 +162,11 @@ type Service struct {
 	investigationModels *investigationModelCache
 
 	parserStagingDir string
-	store            *store.Store
-	files            *casefiles.Store
+	// seg holds the segmented-import policy and its in-memory live set. A
+	// pointer, so request-bound copies of the Service share it.
+	seg   *segmentedImport
+	store *store.Store
+	files *casefiles.Store
 	// extractLimits bounds ZIP extraction (file count, per-file/total
 	// size, compression ratio) -- see internal/archive. Defaults to
 	// archive.DefaultLimits; overridable for tests.
@@ -272,6 +275,7 @@ func (s *Service) SetParserStagingDir(dir string) { s.parserStagingDir = dir }
 func NewService(s *store.Store, files *casefiles.Store) *Service {
 	return &Service{
 		investigationModels: &investigationModelCache{},
+		seg:                 newSegmentedImport(),
 
 		store: s, files: files, vt: &vtConfiguration{gate: make(chan struct{}, 1)},
 		extractLimits: archive.DefaultLimits, ad1Limits: ad1.DefaultLimits,
@@ -1245,6 +1249,9 @@ func (s *Service) importEvidence(caseID, collectionID string, sourceFileIDs []st
 	if _, err := s.requireEvidenceMutable(caseID); err != nil {
 		return ImportResult{}, err
 	}
+	if err := s.refuseIfSegmentedPending(caseID); err != nil {
+		return ImportResult{}, err
+	}
 	collection, err := s.store.GetCollection(collectionID)
 	if err != nil || collection.CaseID != caseID {
 		return ImportResult{}, ErrCollectionNotFound
@@ -1307,6 +1314,7 @@ func (s *Service) importEvidence(caseID, collectionID string, sourceFileIDs []st
 	// be saved under the wrong dedup identity. Per-file skips and parse
 	// failures are recorded exactly as before and don't abort the batch.
 	pending := make([]pendingImport, 0, len(sourceFileIDs))
+	var segQueue []segmentedJob
 	staging := &stagingBudget{limit: 1 << 30}
 	defer func() {
 		for _, pf := range pending {
@@ -1492,6 +1500,13 @@ func (s *Service) importEvidence(caseID, collectionID string, sourceFileIDs []st
 				continue
 			}
 		}
+		if info, statErr := os.Stat(filepath.Join(collection.EvidenceDirectory, filepath.FromSlash(sf.Path))); statErr == nil && s.wantsSegmented(info.Size(), p) {
+			// Too large for one transaction: admitted in bounded segments
+			// after the ordinary sources, once the collection's persisted
+			// hosts are known. See import_segmented.go.
+			segQueue = append(segQueue, segmentedJob{sf: sf, p: p, pc: fileCtx})
+			continue
+		}
 		if _, streaming := p.(parsers.StreamingParser); streaming {
 			pf, err := s.stageStream(caseID, collectionID, sf, collection.EvidenceDirectory, p, fileCtx, prog, staging)
 			if err != nil {
@@ -1613,6 +1628,45 @@ func (s *Service) importEvidence(caseID, collectionID string, sourceFileIDs []st
 		totalNew += newCount
 		totalDup += pf.eventCount() - newCount
 		prog.filePersisted(newCount, pf.eventCount()-newCount)
+	}
+
+	// Phase 3b: sources admitted in bounded segments, one at a time, after the
+	// ordinary sources are durable (their hosts are then known).
+	for i, job := range segQueue {
+		if cancelled || prog.cancelled() {
+			cancelled = true
+			unprocessed += len(segQueue) - i
+			break
+		}
+		prog.startFile(job.sf.Path)
+		newCount, records, err := s.importSegmented(job, caseID, collectionID, collection.EvidenceDirectory, prog)
+		switch {
+		case errors.Is(err, context.Canceled) && prog.cancelled():
+			cancelled = true
+			unprocessed += len(segQueue) - i
+		case errors.Is(err, store.ErrDuplicateSourceFile):
+			skipped = append(skipped, ImportSkip{SourceFileID: job.sf.ID, Reason: "duplicate content already imported in this collection"})
+			prog.filePersisted(0, records)
+		case err != nil:
+			// No MarkSourceFileFailed: Abort already made the source failed, and
+			// a source whose abort did not complete must STAY importing (hidden).
+			errs = append(errs, fmt.Sprintf("%s: %v", job.sf.Path, err))
+			failures = append(failures, parseFailure(job.sf, ParseStageParse, err))
+			prog.fileParsed(0, true)
+		default:
+			refreshed, gerr := s.store.GetSourceFile(job.sf.ID)
+			if gerr != nil {
+				return ImportResult{}, fmt.Errorf("reloading imported file: %w", gerr)
+			}
+			imported = append(imported, refreshed)
+			totalNew += newCount
+			totalDup += records - newCount
+			prog.fileParsed(records, false)
+			prog.filePersisted(newCount, records-newCount)
+		}
+		if cancelled {
+			break
+		}
 	}
 
 	prog.phase(PhaseFinalizing)
@@ -2235,6 +2289,9 @@ func (s *Service) DeleteSourceFiles(caseID string, sourceFileIDs []string) (Dele
 	// Deleting evidence from a contained or closed case is the mutation
 	// this lock most exists to prevent.
 	if _, err := s.requireEvidenceMutable(caseID); err != nil {
+		return DeletedEvidenceResult{}, err
+	}
+	if err := s.refuseIfSegmentedPending(caseID); err != nil {
 		return DeletedEvidenceResult{}, err
 	}
 
