@@ -81,13 +81,21 @@ func main() {
 	capacity.apply(svc, logger)
 
 	// A segmented import left importing by a stopped process holds hidden,
-	// unfinished rows. Remove them now so the source can be imported again.
-	recovered, err := svc.RecoverSegmentedImports(context.Background())
-	for _, rc := range recovered {
-		logger.Warn("removed an interrupted segmented import; the source can be imported again", "source_file_id", rc.SourceFileID, "segments_removed", rc.Segments)
-	}
+	// unfinished rows. They are removed in the background: removing millions of
+	// them takes many minutes and must not keep the server from listening. Until
+	// then those sources stay hidden and their cases refuse imports and deletes.
+	orphans, _, err := svc.StartSegmentedRecovery(context.Background(), func(recovered []store.RecoveredImport, rerr error) {
+		for _, rc := range recovered {
+			logger.Warn("removed an interrupted segmented import; the source can be imported again", "source_file_id", rc.SourceFileID, "segments_removed", rc.Segments)
+		}
+		if rerr != nil {
+			logger.Error("recovering interrupted segmented imports", "error", rerr)
+		}
+	})
 	if err != nil {
-		logger.Error("recovering interrupted segmented imports", "error", err)
+		logger.Error("could not start recovery of interrupted segmented imports", "error", err)
+	} else if orphans > 0 {
+		logger.Warn("cleaning up interrupted segmented imports in the background; their cases refuse imports until done", "sources", orphans)
 	}
 
 	// Server-path ingest reads folders that already sit on this machine. The

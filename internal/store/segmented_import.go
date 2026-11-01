@@ -182,6 +182,24 @@ func (s *Store) CaseHasImportingSource(caseID string) (bool, error) {
 	return n != 0, err
 }
 
+// CaseImportingSourceIDs lists the importing sources of a case.
+func (s *Store) CaseImportingSourceIDs(caseID string) ([]string, error) {
+	rows, err := s.db.Query(`SELECT id FROM source_files WHERE case_id = ? AND import_status = `+importingSQL+` ORDER BY id`, caseID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
 // BeginSegmentedImport moves a discovered source to importing.
 func (s *Store) BeginSegmentedImport(id string) error {
 	tx, err := s.db.Begin()
@@ -494,29 +512,44 @@ func (s *Store) AbortSegmentedImport(ctx context.Context, id, reason string) err
 // and the source becomes failed with a disclosed reason, so it can be retried
 // from the beginning; resuming from a checkpoint is a separate, later feature.
 func (s *Store) RecoverOrphanedImports(ctx context.Context, live func(string) bool) ([]RecoveredImport, error) {
+	ids, err := s.ImportingSourceIDs()
+	if err != nil {
+		return nil, err
+	}
+	return s.RecoverImportingSources(ctx, ids, live, nil)
+}
+
+// ImportingSourceIDs lists the sources that are importing right now. Taken once
+// at startup it is exactly the set of orphans: nothing in a new process can be
+// importing yet.
+func (s *Store) ImportingSourceIDs() ([]string, error) {
 	rows, err := s.db.Query(`SELECT id FROM source_files WHERE import_status = ` + importingSQL + ` ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}
+	defer rows.Close()
 	var ids []string
 	for rows.Next() {
 		var id string
 		if err := rows.Scan(&id); err != nil {
-			rows.Close()
 			return nil, err
 		}
 		ids = append(ids, id)
 	}
-	if err := rows.Err(); err != nil {
-		rows.Close()
-		return nil, err
-	}
-	rows.Close()
+	return ids, rows.Err()
+}
+
+// RecoverImportingSources aborts the given importing sources one by one. before
+// (optional) is called ahead of each. One stuck orphan does not block the rest.
+func (s *Store) RecoverImportingSources(ctx context.Context, ids []string, live func(string) bool, before func(string)) ([]RecoveredImport, error) {
 	var out []RecoveredImport
 	var errs []error
 	for _, id := range ids {
 		if live != nil && live(id) {
 			continue
+		}
+		if before != nil {
+			before(id)
 		}
 		t, err := segmentTotals(s.db, id)
 		if err == nil {

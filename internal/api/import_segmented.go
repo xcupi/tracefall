@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -35,6 +36,9 @@ import (
 // other imports must wait -- they could not see its pending rows.
 var errSegmentedPending = fmt.Errorf("%w: a segmented import is pending in this case; wait for it to finish or restart the server to recover it", ErrImportInProgress)
 
+// errSegmentedRecovering: the pending import was interrupted and is being cleaned up.
+var errSegmentedRecovering = fmt.Errorf("%w: an interrupted segmented import in this case is being cleaned up after a restart; try again when the cleanup has finished", ErrImportInProgress)
+
 const (
 	// DefaultSegmentedMinBytes is the source size from which a streaming source
 	// is admitted in bounded segments instead of one transaction.
@@ -56,6 +60,11 @@ type segmentedImport struct {
 	abortErr error                    // simulate a failing abort
 	mutate   func(*model.Event)       // test seam: alter a parsed event
 	hostsErr error                    // simulate a failing host lookup
+	// recovering is how many interrupted imports a background recovery has yet
+	// to clean up; while it is above zero the case guards say so.
+	recovering atomic.Int64
+	// recoverHook is a test seam, called before each orphan is cleaned up.
+	recoverHook func(sourceFileID string)
 }
 
 func newSegmentedImport() *segmentedImport {
@@ -94,14 +103,24 @@ func (s *Service) wantsSegmented(size int64, p parsers.ArtifactParser) bool {
 
 // refuseIfSegmentedPending fails when a segmented import is pending in the case.
 func (s *Service) refuseIfSegmentedPending(caseID string) error {
-	has, err := s.store.CaseHasImportingSource(caseID)
+	ids, err := s.store.CaseImportingSourceIDs(caseID)
 	if err != nil {
 		return err
 	}
-	if has {
-		return errSegmentedPending
+	if len(ids) == 0 {
+		return nil
 	}
-	return nil
+	// A source this process is importing right now is "pending"; otherwise it is
+	// an orphan, being cleaned up while a recovery runs, stuck after that.
+	for _, id := range ids {
+		if _, running := s.seg.live.Load(id); running {
+			return errSegmentedPending
+		}
+	}
+	if s.seg.recovering.Load() > 0 {
+		return errSegmentedRecovering
+	}
+	return errSegmentedPending
 }
 
 // RecoverSegmentedImports aborts segmented imports left importing by a stopped
@@ -326,4 +345,44 @@ func deduplicateForImport(st *store.Store, caseID, collectionID, sourceFileID st
 		})
 	}
 	return newEvents, observations, nil
+}
+
+// StartSegmentedRecovery cleans up, in the background, the segmented imports a
+// stopped process left importing, so the server can listen at once instead of
+// waiting minutes (about 44 for 4.6 million pending rows). The orphans are the
+// sources importing at this moment -- nothing in a new process can be importing
+// yet -- so an import started later is never touched. Until an orphan is
+// cleaned its rows stay hidden and its case refuses imports and deletions with
+// a message that says why; other cases are unaffected. It returns the number of
+// orphans and a channel closed when the cleanup is over (nil when there is
+// nothing to do). report, when given, receives what was removed and any error.
+// Cancelling ctx stops between segments: the cleanup is idempotent and resumes
+// at the next start.
+func (s *Service) StartSegmentedRecovery(ctx context.Context, report func([]store.RecoveredImport, error)) (int, <-chan struct{}, error) {
+	ids, err := s.store.ImportingSourceIDs()
+	if err != nil {
+		return 0, nil, err
+	}
+	if len(ids) == 0 {
+		return 0, nil, nil
+	}
+	s.seg.recovering.Add(int64(len(ids)))
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		var all []store.RecoveredImport
+		var errs []error
+		for _, id := range ids {
+			rec, rerr := s.store.RecoverImportingSources(ctx, []string{id}, nil, s.seg.recoverHook)
+			all = append(all, rec...)
+			if rerr != nil {
+				errs = append(errs, rerr)
+			}
+			s.seg.recovering.Add(-1)
+		}
+		if report != nil {
+			report(all, errors.Join(errs...))
+		}
+	}()
+	return len(ids), done, nil
 }
