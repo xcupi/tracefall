@@ -103,6 +103,57 @@ func normalizeTaskPSEvent(ev *model.Event, in Input) (handled, mapped bool) {
 		ev.Extra["outcome"] = "observed"
 		ev.Extra["evidence_meaning"] = "Task Scheduler recorded a task configuration change: " + ev.Extra["action"] + "."
 		ev.Extra["limitations"] = "Configuration only; does not establish that the task ran or what its actions did. The user shown is as recorded by the scheduler."
+	case 107, 108, 110, 119, 322:
+		if !is(taskSchedulerChannel, taskSchedulerProvider) {
+			return true, false
+		}
+		if strings.TrimSpace(p["TaskName"]) == "" {
+			return true, false // no task named: under-specified.
+		}
+		// Microsoft's message templates: 107 "launched the %2 instance of task
+		// %1 due to a time trigger", 108 "...triggered by an event trigger", 110
+		// "...for user %3", 119 "launched the %3 instance of task %1 due to user
+		// %2 logon", 322 "did not launch task %1 because instance %2 of the same
+		// task is already running". These are scheduler launch/trigger records
+		// with their own type: only 100/102/129/200/201/202 are run records.
+		ev.EventType = model.EventScheduledTaskLaunch
+		ev.User = ""
+		setExtra(ev, "task_name", p["TaskName"])
+		ev.Extra["outcome"] = "observed"
+		var meaning string
+		switch in.EventID {
+		case 107:
+			ev.Extra["action"] = "task_launched_time_trigger"
+			meaning = "Task Scheduler recorded that it launched an instance of the task due to a time trigger."
+		case 108:
+			ev.Extra["action"] = "task_launched_event_trigger"
+			meaning = "Task Scheduler recorded that it launched an instance of the task because an event trigger fired."
+		case 110:
+			ev.Extra["action"] = "task_launched_for_user"
+			ev.User = strings.TrimSpace(dashToEmpty(p["UserContext"]))
+			setRecorded(ev, "user_context", p, "UserContext")
+			meaning = "Task Scheduler recorded that it launched an instance of the task for user (the user shown)."
+		case 119:
+			ev.Extra["action"] = "task_launched_logon_trigger"
+			ev.User = strings.TrimSpace(dashToEmpty(p["UserName"]))
+			setRecorded(ev, "logon_user", p, "UserName")
+			meaning = "Task Scheduler recorded that it launched an instance of the task due to a logon trigger (the user shown logged on)."
+		case 322:
+			ev.Extra["action"] = "task_launch_ignored_instance_running"
+			ev.Extra["outcome"] = "ignored"
+			meaning = "Task Scheduler recorded that it did NOT launch the task because an instance of the same task was already running (launch request ignored)."
+		}
+		if in.EventID == 322 {
+			// %2 here is the instance that was already running, not a new run.
+			setRecorded(ev, "existing_instance_id", p, "TaskInstanceId")
+		} else {
+			setRecorded(ev, "task_instance_id", p, "InstanceId")
+		}
+		ev.Extra["evidence_meaning"] = meaning
+		ev.Extra["limitations"] = "A scheduler-side launch or trigger record. It does not establish that the task's action ran, what it did, or that it succeeded: see the run records (100, 129, 200, 201, 202) for those, and a missing one is not proof they did not occur. Instance ids correlate records only by that value; nothing is merged. The user shown, if any, is as recorded by the scheduler and is not an actor finding."
+		if in.EventID == 322 {
+			ev.Extra["limitations"] = "The scheduler did not launch the task for this request (the launch was ignored), so this record is not a task run and does not establish that any action ran. The instance id is the instance already running at that time, not a new instance. It does not establish why the earlier instance was still running, and missing run records are not proof of anything."
+		}
 	case 400, 403, 600:
 		if !is(classicPowerShellChannel, classicPowerShellProvider) {
 			return true, false

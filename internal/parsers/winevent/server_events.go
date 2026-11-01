@@ -10,6 +10,9 @@ const securityProvider = "Microsoft-Windows-Security-Auditing"
 const remoteConnectionProvider = "Microsoft-Windows-TerminalServices-RemoteConnectionManager"
 const localSessionProvider = "Microsoft-Windows-TerminalServices-LocalSessionManager"
 
+// privilegeListBytes bounds a stored privilege list; the full list is in the raw evidence.
+const privilegeListBytes = 1024
+
 // handled reserves these IDs even on a wrong provider/channel: falling through
 // to an ID-only mapping would silently reinterpret unrelated application data.
 func normalizeServerEvent(ev *model.Event, in Input) (handled, mapped bool) {
@@ -96,19 +99,23 @@ func normalizeServerEvent(ev *model.Event, in Input) (handled, mapped bool) {
 		ev.Extra["outcome"] = "success"
 		ev.Extra["evidence_meaning"] = "Security auditing recorded installation of a service by the subject account."
 		ev.Extra["limitations"] = "Installation/configuration does not prove the service started or its binary executed. Service account is not the installing actor."
-	case 7036, 7040:
+	case 7036, 7040, 7031, 7024:
 		if !is("System", "Service Control Manager") {
 			return true, false
 		}
+		if (in.EventID == 7031 || in.EventID == 7024) && strings.TrimSpace(p["param1"]) == "" {
+			return true, false // no service named: under-specified.
+		}
 		ev.EventType = model.EventServiceMessage
 		ev.User = "" // SCM does not record an actor in these payloads.
-		if in.EventID == 7036 {
+		switch in.EventID {
+		case 7036:
 			setExtra(ev, "service_name", p["param1"])
 			setExtra(ev, "service_state", p["param2"])
 			ev.Extra["action"] = "service_state_changed"
 			ev.Extra["outcome"] = "observed"
 			ev.Extra["evidence_meaning"] = "Service Control Manager recorded the reported service state."
-		} else {
+		case 7040:
 			setExtra(ev, "service_name", firstNonEmpty(p["param4"], p["param1"]))
 			setExtra(ev, "service_display_name", p["param1"])
 			setExtra(ev, "old_start_type", p["param2"])
@@ -116,8 +123,34 @@ func normalizeServerEvent(ev *model.Event, in Input) (handled, mapped bool) {
 			ev.Extra["action"] = "service_start_type_changed"
 			ev.Extra["outcome"] = "success"
 			ev.Extra["evidence_meaning"] = "Service Control Manager recorded a service start-type configuration change."
+		case 7031:
+			// Positional layout (provider message template: "The %1 service
+			// terminated unexpectedly. It has done this %2 time(s). The following
+			// corrective action will be taken in %3 milliseconds: %5."). param4 is
+			// not in the message text; real records carry the recovery action
+			// code there, alongside its text in param5.
+			ev.Extra["service_name"] = strings.TrimSpace(p["param1"])
+			setRecorded(ev, "termination_count", p, "param2")
+			setRecorded(ev, "corrective_action_delay_ms", p, "param3")
+			setRecorded(ev, "recovery_action_code", p, "param4")
+			setRecorded(ev, "recovery_action", p, "param5")
+			ev.Extra["action"] = "service_terminated_unexpectedly"
+			ev.Extra["outcome"] = "observed"
+			ev.Extra["evidence_meaning"] = "Service Control Manager recorded that the named service terminated unexpectedly, how many times it had done so, and the corrective action it would take."
+		case 7024:
+			// "The %1 service terminated with service-specific error %2." Real
+			// records carry %2 as a message-table reference (%%NNNN) naming the
+			// error text, which is retained as recorded, not decoded.
+			ev.Extra["service_name"] = strings.TrimSpace(p["param1"])
+			setRecorded(ev, "service_error_ref", p, "param2")
+			ev.Extra["action"] = "service_terminated_with_error"
+			ev.Extra["outcome"] = "observed"
+			ev.Extra["evidence_meaning"] = "Service Control Manager recorded that the named service terminated with the error reference shown."
 		}
 		ev.Extra["limitations"] = "Does not identify the requesting actor or prove payload execution or successful task execution. State and start-type strings are retained as recorded, including localized values."
+		if in.EventID == 7031 || in.EventID == 7024 {
+			ev.Extra["limitations"] = "A service termination record does not establish an attack, an actor, a cause, or that any recovery action succeeded; services stop for many ordinary reasons. The service is named as the Service Control Manager displayed it. Parameter values are retained as recorded, including localized text and message-table references."
+		}
 	case 4698, 4699, 4700, 4701, 4702:
 		if !is("Security", securityProvider) {
 			return true, false
@@ -175,6 +208,62 @@ func normalizeServerEvent(ev *model.Event, in Input) (handled, mapped bool) {
 		ev.Extra["outcome"] = "success"
 		ev.Extra["evidence_meaning"] = "Security auditing recorded a Window Station session transition: " + ev.Extra["action"] + "."
 		ev.Extra["limitations"] = "Reconnection is not a new unrestricted login; disconnection is not logoff. A session name alone does not establish RDP transport."
+	case 4689:
+		if !is("Security", securityProvider) {
+			return true, false
+		}
+		if strings.TrimSpace(p["ProcessId"]) == "" && strings.TrimSpace(p["ProcessName"]) == "" {
+			return true, false // no process identified: under-specified.
+		}
+		ev.EventType = model.EventProcessExit
+		ev.User = dashToEmpty(strings.TrimSpace(p["SubjectUserName"]))
+		// Same keys a 4688 carries (PID as decimal, executable path, logon id) so
+		// a reader can match an exit to a creation; no join is performed here.
+		ev.ProcessPath = p["ProcessName"]
+		ev.ProcessName = normalize.ProcessName(p["ProcessName"])
+		ev.PID = normalize.Int64(hexOrDec(p["ProcessId"]))
+		setExtra(ev, "process_path", p["ProcessName"])
+		setExtra(ev, "logon_id", p["SubjectLogonId"])
+		setExtra(ev, "subject_domain", p["SubjectDomainName"])
+		setExtra(ev, "actor_sid", p["SubjectUserSid"])
+		setRecorded(ev, "exit_status", p, "Status")
+		ev.Extra["action"] = "process_exited"
+		ev.Extra["outcome"] = "observed"
+		ev.Extra["evidence_meaning"] = "Security auditing recorded that the process with this ID and image path exited, with the exit status shown."
+		ev.Extra["limitations"] = "This record does not establish when the process started, which creation record it belongs to, or why it exited. Process IDs are reused: match to a process_create only by the same PID within one host where no other creation or exit of that PID intervenes. The logon id is the session recorded on this exit record and may differ from the session shown on the creation record. The exit status is retained as recorded, without interpretation."
+	case 4703:
+		if !is("Security", securityProvider) {
+			return true, false
+		}
+		_, hasEnabled := p["EnabledPrivilegeList"]
+		_, hasDisabled := p["DisabledPrivilegeList"]
+		if !hasEnabled && !hasDisabled {
+			return true, false // nothing adjusted is recorded: under-specified.
+		}
+		ev.EventType = model.EventTokenRightAdjusted
+		ev.User = dashToEmpty(strings.TrimSpace(p["SubjectUserName"]))
+		ev.ProcessPath = p["ProcessName"]
+		ev.ProcessName = normalize.ProcessName(p["ProcessName"])
+		ev.PID = normalize.Int64(hexOrDec(p["ProcessId"]))
+		setExtra(ev, "process_path", p["ProcessName"])
+		for k, v := range map[string]string{"logon_id": p["SubjectLogonId"], "actor_domain": p["SubjectDomainName"], "actor_sid": p["SubjectUserSid"],
+			"target_user_name": p["TargetUserName"], "target_domain": p["TargetDomainName"], "target_user_sid": p["TargetUserSid"], "target_logon_id": p["TargetLogonId"]} {
+			setExtra(ev, k, v)
+		}
+		for src, dst := range map[string]string{"EnabledPrivilegeList": "enabled_privileges", "DisabledPrivilegeList": "disabled_privileges"} {
+			if v, recorded := p[src]; recorded {
+				list := strings.Join(strings.Fields(v), ",")
+				if len(list) > privilegeListBytes {
+					list = list[:privilegeListBytes]
+					ev.Extra[dst+"_truncated"] = "true"
+				}
+				ev.Extra[dst] = list
+			}
+		}
+		ev.Extra["action"] = "token_privileges_adjusted"
+		ev.Extra["outcome"] = "success"
+		ev.Extra["evidence_meaning"] = "Security auditing recorded that privileges in the target account's token were enabled or disabled by the process shown."
+		ev.Extra["limitations"] = "This record does not establish privilege escalation, misuse of a privilege, or malicious intent: services and applications adjust token privileges routinely, and the record does not say which privilege was used. Privilege names are retained as recorded (a dash means none was recorded in that list)."
 	default:
 		return false, false
 	}

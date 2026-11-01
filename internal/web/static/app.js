@@ -1076,6 +1076,16 @@ const EVENT_CATEGORIES = {
   powershell_engine_lifecycle: "other",
   event_log_cleared: "other",
   audit_policy_change: "other",
+  // EVTX coverage additions: configuration, attempt and lifecycle records.
+  // None of them is execution evidence, so none is filed under "execution".
+  antimalware_configuration_change: "other",
+  antimalware_history_deleted: "other",
+  wmi_activity: "other",
+  scheduled_task_launch: "other",
+  smb_security_event: "authentication",
+  token_right_adjusted: "other",
+  process_exit: "other",
+  powershell_pipeline_error: "other",
   session_end: "authentication",
   system_boot: "other",
   // An su attempt is a change of account, so it is an authentication event.

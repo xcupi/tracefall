@@ -81,6 +81,11 @@ func (e Event) ComputeDedupHash() string {
 		} {
 			parts = append(parts, e.Extra[key])
 		}
+		// Record-kind specific identity for event types added after the
+		// historical hash was fixed (see windowsIdentityExtras).
+		for _, key := range windowsIdentityExtras(e) {
+			parts = append(parts, e.Extra[key])
+		}
 	}
 	// History identity is the recorded detection plus its complete stateful
 	// source content, not a filename or collection. Keep identifiers literal:

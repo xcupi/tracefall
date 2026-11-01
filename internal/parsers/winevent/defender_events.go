@@ -39,6 +39,8 @@ const (
 func normalizeDefenderEvent(ev *model.Event, in Input) (handled, mapped bool) {
 	switch in.EventID {
 	case 1116, 1117, 1118, 1119:
+	case 1013, 5004, 5007:
+		return normalizeDefenderConfigEvent(ev, in)
 	default:
 		return false, false
 	}

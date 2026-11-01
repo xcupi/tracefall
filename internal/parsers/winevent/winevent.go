@@ -73,6 +73,15 @@ func Normalize(ev *model.Event, in Input) bool {
 	if handled, mapped := normalizeDefenderEvent(ev, in); handled {
 		return mapped
 	}
+	if handled, mapped := normalizeWMIActivityEvent(ev, in); handled {
+		return mapped
+	}
+	if handled, mapped := normalizeSMBServerEvent(ev, in); handled {
+		return mapped
+	}
+	if handled, mapped := normalizePowerShellErrorEvent(ev, in); handled {
+		return mapped
+	}
 	payload := in.Data
 	channel := strings.ToLower(in.Channel)
 	eventID := strconv.Itoa(in.EventID)
