@@ -39,7 +39,7 @@ can be exercised without a real forensic image.
 
 ## Requirements
 
-- Go 1.24+ (developed and tested on Go 1.26). No other runtime
+- Go 1.26.7 or newer (the version in go.mod). No other runtime
   dependencies — Tracefall uses a pure-Go SQLite driver, so no cgo, no
   system SQLite, no Node, no Docker.
 

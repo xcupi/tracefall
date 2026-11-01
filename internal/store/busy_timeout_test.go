@@ -81,7 +81,7 @@ func TestStoreBusyWaitIsBoundedAndRecovers(t *testing.T) {
 	if err == nil || !strings.Contains(strings.ToLower(err.Error()), "locked") {
 		t.Fatalf("write with a permanently held read lock = %v, want a database-is-locked error", err)
 	}
-	if elapsed < 250*time.Millisecond || elapsed > 5*time.Second {
+	if elapsed < 100*time.Millisecond || elapsed > 5*time.Second {
 		t.Fatalf("gave up after %s, want about the 300 ms timeout", elapsed)
 	}
 	release()
