@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -60,10 +61,25 @@ type Store struct {
 	reviewFingerprints  map[string]reviewFingerprintCache
 }
 
+// busyTimeoutMS is how long a statement waits for a lock held by ANOTHER process
+// (for example a `sqlite3` shell or a backup reading the file) before failing
+// with SQLITE_BUSY. A variable only so a test can shorten it before Open.
+var busyTimeoutMS = 30000
+
+// withBusyTimeout appends the busy timeout to a database path or DSN. The driver
+// applies it to every connection it opens, not only the first.
+func withBusyTimeout(path string) string {
+	sep := "?"
+	if strings.Contains(path, "?") {
+		sep = "&"
+	}
+	return path + sep + "_busy_timeout=" + strconv.Itoa(busyTimeoutMS)
+}
+
 // Open opens (creating if necessary) the SQLite database at path and
 // ensures the schema exists.
 func Open(path string) (*Store, error) {
-	db, err := sql.Open("sqlite", path)
+	db, err := sql.Open("sqlite", withBusyTimeout(path))
 	if err != nil {
 		return nil, fmt.Errorf("store: open: %w", err)
 	}
