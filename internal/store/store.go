@@ -684,8 +684,19 @@ func (s *Store) MarkSourceFileFailed(id string) error {
 // caller's responsibility (internal/casefiles), since this package has
 // no filesystem knowledge.
 func (s *Store) SoftDeleteSourceFile(id string, deletedAt time.Time) error {
-	_, err := s.db.Exec(`UPDATE source_files SET deleted_at = ? WHERE id = ?`, fmtTime(deletedAt), id)
-	return err
+	// An importing source is cleaned by Abort/Recover, never hidden: its rows
+	// would stay invisible and unreachable forever.
+	res, err := s.db.Exec(`UPDATE source_files SET deleted_at = ? WHERE id = ? AND import_status <> `+importingSQL, fmtTime(deletedAt), id)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		var st string
+		if e := s.db.QueryRow(`SELECT import_status FROM source_files WHERE id = ?`, id).Scan(&st); e == nil && st == model.SourceFileImporting {
+			return fmt.Errorf("%w: source %s is importing; abort it first", ErrSourceNotAdmissible, id)
+		}
+	}
+	return nil
 }
 
 // ---------- Raw evidence ----------
@@ -728,6 +739,19 @@ func (s *Store) SaveEvents(events []model.Event) error {
 		return err
 	}
 	defer tx.Rollback()
+	{
+		seen := map[[2]string]bool{}
+		for _, e := range events {
+			k := [2]string{e.CaseID, e.SourceFileID}
+			if seen[k] {
+				continue
+			}
+			seen[k] = true
+			if err := refuseForeignImporting(tx, e.CaseID, e.SourceFileID); err != nil {
+				return err
+			}
+		}
+	}
 
 	stmt, err := tx.Prepare(`INSERT INTO events (
 		id, case_id, collection_id, timestamp, host, user, event_type, provider, event_id,
@@ -1000,6 +1024,19 @@ func (s *Store) SaveEventObservations(observations []model.EventObservation) err
 		return err
 	}
 	defer tx.Rollback()
+	{
+		seen := map[[2]string]bool{}
+		for _, ob := range observations {
+			k := [2]string{ob.CaseID, ob.SourceFileID}
+			if seen[k] {
+				continue
+			}
+			seen[k] = true
+			if err := refuseForeignImporting(tx, ob.CaseID, ob.SourceFileID); err != nil {
+				return err
+			}
+		}
+	}
 
 	stmt, err := tx.Prepare(`INSERT INTO event_observations
 		(id, event_id, case_id, collection_id, source_file_id, raw_evidence_id, source_reference)

@@ -113,6 +113,10 @@ var (
 	ErrSourceNotAdmissible = errors.New("source is not in a state that allows segmented admission")
 	ErrSegmentOutOfOrder   = errors.New("segment checkpoint is out of order")
 	ErrFinalizeMismatch    = errors.New("segmented import does not match its checkpoint or expected totals")
+	// ErrCaseImportInProgress: another source of the case is importing in
+	// segments, so this source may not commit events (it could not see the
+	// pending rows when deduplicating).
+	ErrCaseImportInProgress = errors.New("another source of this case is importing in segments")
 )
 
 type segSource struct{ caseID, collectionID, status string }
@@ -122,8 +126,32 @@ type rowQuerier interface {
 }
 
 func loadSegSource(q rowQuerier, id string) (segSource, error) {
+	return loadSegSourceWhere(q, id, " AND deleted_at = ''")
+}
+
+// loadSegSourceAny also loads a source marked deleted; Abort/Recover must be
+// able to clean it so its hidden rows do not linger.
+func loadSegSourceAny(q rowQuerier, id string) (segSource, error) {
+	return loadSegSourceWhere(q, id, "")
+}
+
+// refuseForeignImporting fails when the case has an importing source other
+// than sourceFileID: a writer that cannot see the pending rows must not commit
+// events beside it. (The importing source's own segments pass.)
+func refuseForeignImporting(q rowQuerier, caseID, sourceFileID string) error {
+	var n int
+	if err := q.QueryRow(`SELECT EXISTS (SELECT 1 FROM source_files WHERE case_id = ? AND import_status = `+importingSQL+` AND id <> ?)`, caseID, sourceFileID).Scan(&n); err != nil {
+		return err
+	}
+	if n != 0 {
+		return fmt.Errorf("%w: case %s", ErrCaseImportInProgress, caseID)
+	}
+	return nil
+}
+
+func loadSegSourceWhere(q rowQuerier, id, extra string) (segSource, error) {
 	var src segSource
-	err := q.QueryRow(`SELECT case_id, collection_id, import_status FROM source_files WHERE id = ? AND deleted_at = ''`, id).
+	err := q.QueryRow(`SELECT case_id, collection_id, import_status FROM source_files WHERE id = ?`+extra, id).
 		Scan(&src.caseID, &src.collectionID, &src.status)
 	if errors.Is(err, sql.ErrNoRows) {
 		return segSource{}, fmt.Errorf("%w: unknown or deleted source %s", ErrSourceNotAdmissible, id)
@@ -414,7 +442,7 @@ func upsertOutcome(tx execer, id string, src segSource, outcome, reason string, 
 // reason. It is idempotent: an interrupted abort leaves a shorter, still
 // consistent importing source that can be aborted again.
 func (s *Store) AbortSegmentedImport(ctx context.Context, id, reason string) error {
-	src, err := loadSegSource(s.db, id)
+	src, err := loadSegSourceAny(s.db, id)
 	if err != nil {
 		return err
 	}
@@ -485,20 +513,23 @@ func (s *Store) RecoverOrphanedImports(ctx context.Context, live func(string) bo
 	}
 	rows.Close()
 	var out []RecoveredImport
+	var errs []error
 	for _, id := range ids {
 		if live != nil && live(id) {
 			continue
 		}
 		t, err := segmentTotals(s.db, id)
-		if err != nil {
-			return out, err
+		if err == nil {
+			err = s.AbortSegmentedImport(ctx, id, "interrupted before finalization (process stopped or job lost); pending segments removed; retry from the beginning")
 		}
-		if err = s.AbortSegmentedImport(ctx, id, "interrupted before finalization (process stopped or job lost); pending segments removed; retry from the beginning"); err != nil {
-			return out, err
+		if err != nil {
+			// One stuck orphan must not block cleanup of the others.
+			errs = append(errs, fmt.Errorf("source %s: %w", id, err))
+			continue
 		}
 		out = append(out, RecoveredImport{SourceFileID: id, Segments: t.Segments})
 	}
-	return out, nil
+	return out, errors.Join(errs...)
 }
 
 // SegmentedImportOutcome returns the disclosed terminal result of the most

@@ -46,7 +46,7 @@ type BatchRecord struct {
 // transaction. Ordering selects chunks only; it never establishes evidence time.
 func walkReviewTx(ctx context.Context, tx *sql.Tx, caseID string, fn func(BatchRecord) error) error {
 	for _, kind := range []string{"event", "finding", "correlation", "source"} {
-		table, cols, filter := "events", eventCols, ""
+		table, cols, filter := "events", eventCols, " AND "+srcVisible("source_file_id")
 		argsBase := []any{caseID}
 		switch kind {
 		case "finding":
@@ -168,13 +168,13 @@ func (s *Store) reviewSnapshot(ctx context.Context, caseID, runID string) (out R
 	}
 	// Refuse oversized raw rows in SQLite before a Go scanner/JSON decoder
 	// receives their values. This cap is independent of outbound truncation.
-	for _, spec := range []struct{ table, cols string }{{"events", eventCols}, {"findings", findingCols}, {"correlations", correlationCols}, {"source_files", sourceFileCols}} {
+	for _, spec := range []struct{ table, cols, filter string }{{"events", eventCols, " AND " + srcVisible("source_file_id")}, {"findings", findingCols, ""}, {"correlations", correlationCols, ""}, {"source_files", sourceFileCols, ""}} {
 		var terms []string
 		for _, col := range strings.Split(spec.cols, ",") {
 			terms = append(terms, "coalesce(length(CAST("+strings.TrimSpace(col)+" AS BLOB)),0)")
 		}
 		var one int
-		e := tx.QueryRowContext(ctx, `SELECT 1 FROM `+spec.table+` WHERE case_id=? AND (`+strings.Join(terms, "+")+`)>131072 LIMIT 1`, caseID).Scan(&one)
+		e := tx.QueryRowContext(ctx, `SELECT 1 FROM `+spec.table+` WHERE case_id=?`+spec.filter+` AND (`+strings.Join(terms, "+")+`)>131072 LIMIT 1`, caseID).Scan(&one)
 		if e == nil {
 			return out, fmt.Errorf("%w: raw normalized record exceeds 128 KiB", ErrReviewSnapshotLimit)
 		}
