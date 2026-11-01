@@ -6425,7 +6425,7 @@ async function renderAuditTab(content, caseId) {
   content.innerHTML = `
     <h2>Audit History (${events.length})</h2>
     <p class="muted small">Actor is always "local-user" -- Tracefall has no authentication yet, so this is not an authoritative identity. See docs/analyst-workflow.md.</p>
-    <div class="table-wrap"><table class="data-table">
+    <div class="table-wrap"><table class="data-table audit-table">
       <thead><tr><th>Time (${esc(tzLabel())})</th><th>Action</th><th>Actor</th><th>Target</th><th>Summary</th></tr></thead>
       <tbody>
         ${events

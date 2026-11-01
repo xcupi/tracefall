@@ -1,28 +1,27 @@
 :root {
-  --bg: #0f1420;
-  --bg-panel: #161d2e;
-  --bg-panel-2: #1c2438;
-  --border: #2a3350;
-  --text: #dde3f0;
-  --text-dim: #8892ab;
-  --accent: #5b9dff;
-  --accent-dim: #2f4a7a;
-  --mono: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
-  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  /* Modern theme: near-black canvas, translucent surfaces lit by white
+     opacity steps, one indigo accent. Colour tokens only -- layout tokens
+     below are unchanged. */
+  --bg: #08090a;
+  --bg-panel: #0e0f11;
+  --bg-panel-2: #16171a;
+  --border: rgba(255,255,255,0.08);
+  --border-strong: rgba(255,255,255,0.14);
+  --text: #f1f2f4;
+  --text-dim: #8d929c;
+  --muted: #8d929c;
+  --accent: #8b8dff;
+  --accent-dim: #3b3d7a;
+  --accent-solid: #6366f1;
+  --mono: ui-monospace, "JetBrains Mono", "SFMono-Regular", Menlo, Consolas, "Liberation Mono", monospace;
+  --sans: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
 
-  --critical: #ff5c7a;
-  --high: #ff9a4d;
-  --medium: #ffd24d;
-  --low: #6fb3ff;
-  --ok: #4ddb9b;
+  --critical: #ff6b81;
+  --high: #ff9f5a;
+  --medium: #f5c451;
+  --low: #7cb7ff;
+  --ok: #4ade9f;
 
-  /* ---- Layout system (Phase 8) ----
-     One spacing scale, one radius scale, one control height. Every
-     margin/padding/gap below is expressed in these rather than ad-hoc
-     pixel values, which is what keeps cards, headings, controls and
-     tables sharing a single left/right edge and a predictable vertical
-     rhythm. Change a token here rather than nudging an individual
-     element. */
   --space-1: 4px;
   --space-2: 8px;
   --space-3: 12px;
@@ -2736,4 +2735,182 @@ body.deletion-open { overflow: hidden; }
 @media (min-width: 1280px) {
   .external-grid { grid-template-columns: minmax(0, .8fr) minmax(0, 1.2fr); align-items: start; }
   #external-llm, #external-review { grid-column: 1 / -1; }
+}
+
+/* =====================================================================
+   Modern theme layer. Appended last so it refines the rules above without
+   changing any markup or behaviour. No web fonts are fetched: Tracefall
+   is often run offline on evidence machines, so it uses Inter only when
+   installed and the system UI font otherwise.
+   ===================================================================== */
+
+html { color-scheme: dark; -webkit-text-size-adjust: 100%; }
+body {
+  font-feature-settings: "cv01", "ss03", "tnum";
+  -webkit-font-smoothing: antialiased;
+  background:
+    radial-gradient(1200px 500px at 15% -10%, rgba(99,102,241,0.10), transparent 60%),
+    var(--bg);
+  background-attachment: fixed;
+  letter-spacing: -0.005em;
+}
+::selection { background: rgba(139,141,255,0.35); }
+a { color: var(--accent); }
+a:hover { text-decoration: none; color: #b4b6ff; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+
+/* Scrollbars */
+* { scrollbar-width: thin; scrollbar-color: rgba(255,255,255,0.16) transparent; }
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.14); border-radius: 8px; border: 2px solid transparent; background-clip: content-box; }
+::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.25); background-clip: content-box; border: 2px solid transparent; }
+
+::-webkit-scrollbar-button { display: none; width: 0; height: 0; }
+.sidebar { scrollbar-width: none; }
+.sidebar::-webkit-scrollbar { display: none; }
+
+/* Top bar: sticky, translucent, quiet */
+.topbar {
+  position: sticky; top: 0; z-index: 40;
+  background: rgba(8,9,10,0.72);
+  backdrop-filter: saturate(160%) blur(14px);
+  -webkit-backdrop-filter: saturate(160%) blur(14px);
+  padding-top: 10px; padding-bottom: 10px;
+  border-bottom: 1px solid var(--border);
+}
+.brand { display: inline-flex; align-items: center; gap: 10px; font-size: 15px; font-weight: 600; letter-spacing: -0.01em; }
+.brand::before {
+  content: ""; width: 18px; height: 18px; border-radius: 5px;
+  background: linear-gradient(135deg, #8b8dff, #6366f1 55%, #4338ca);
+  box-shadow: 0 0 0 1px rgba(255,255,255,0.18) inset, 0 4px 14px rgba(99,102,241,0.45);
+}
+.brand:hover { color: var(--text); }
+.brand-sub { font-size: 12px; margin-left: 2px; color: var(--text-dim); font-weight: 400; }
+.topbar-right { gap: var(--space-4); font-size: 12px; }
+.tz-label { font-size: 11px; letter-spacing: 0.06em; }
+.tz-select { padding: 4px 8px; min-height: 26px; font-size: 12px; }
+.conn-status { position: relative; padding-left: 14px; }
+.conn-status::before {
+  content: ""; position: absolute; left: 0; top: 50%; width: 7px; height: 7px; margin-top: -3.5px;
+  border-radius: 50%; background: var(--ok); box-shadow: 0 0 0 3px rgba(74,222,159,0.15);
+}
+
+/* Surfaces */
+.panel, .case-header, .stat {
+  background: rgba(255,255,255,0.025);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: 0 1px 0 rgba(255,255,255,0.03) inset;
+}
+.panel { padding: var(--space-6); }
+.stat { padding: 14px 16px; transition: background .15s, border-color .15s; }
+.stat:hover { background: rgba(255,255,255,0.045); border-color: var(--border-strong); }
+.stat .n { font-size: 24px; font-weight: 600; letter-spacing: -0.02em; line-height: 1.15; }
+.stat .l { font-size: 11px; letter-spacing: 0.06em; margin-top: 2px; }
+.summary-grid { grid-template-columns: repeat(auto-fit, minmax(126px, 1fr)); }
+h1 { font-size: 24px; font-weight: 600; letter-spacing: -0.02em; }
+h2 { font-size: 15px; font-weight: 600; letter-spacing: -0.01em; }
+h3 { font-weight: 600; }
+
+/* Sidebar: no second brand, no box, soft active pill */
+.sidebar-brand { display: none; }
+.sidebar {
+  background: transparent; border: none; padding: 0 var(--space-2) 0 0;
+  top: 64px; max-height: calc(100vh - 80px);
+}
+.sidenav-group + .sidenav-group { border-top: 1px solid var(--border); }
+.sidenav-heading { font-size: 10px; letter-spacing: 0.1em; font-weight: 600; }
+.sidenav-case { font-size: 13px; font-weight: 600; }
+.sidenav-item {
+  border-left: none; border-radius: 8px; padding: 7px 10px; margin-bottom: 1px;
+  color: var(--text-dim); font-weight: 500; transition: background .12s, color .12s;
+}
+.sidenav-item:hover { background: rgba(255,255,255,0.05); color: var(--text); }
+.sidenav-item.active {
+  background: rgba(139,141,255,0.14); color: #c7c8ff; font-weight: 600;
+  box-shadow: inset 0 0 0 1px rgba(139,141,255,0.22);
+}
+
+/* Case header: tighter, quieter metadata */
+.case-header { padding: var(--space-5); }
+.case-meta { margin-top: var(--space-3); padding-top: var(--space-3); gap: var(--space-2) var(--space-8); }
+
+/* Buttons: indigo primary, ghost secondary */
+button, .btn {
+  background: var(--accent-solid); color: #fff; font-weight: 500; border-radius: 8px;
+  box-shadow: 0 1px 0 rgba(255,255,255,0.18) inset, 0 1px 2px rgba(0,0,0,0.4);
+  transition: background .12s, border-color .12s, transform .05s;
+}
+button:hover { filter: none; background: #7578f5; }
+button:active { transform: translateY(1px); }
+button.secondary, .case-header-actions button:not(.danger) {
+  background: rgba(255,255,255,0.04); color: var(--text);
+  border: 1px solid var(--border); box-shadow: none;
+}
+button.secondary:hover, .case-header-actions button:not(.danger):hover { background: rgba(255,255,255,0.09); border-color: var(--border-strong); }
+button.danger { background: rgba(255,107,129,0.08); border-color: rgba(255,107,129,0.35); box-shadow: none; }
+button.danger:hover { background: rgba(255,107,129,0.18); }
+
+/* Inputs */
+input:not([type="checkbox"]):not([type="radio"]), textarea, select {
+  background: rgba(255,255,255,0.03); border: 1px solid var(--border); border-radius: 8px;
+  color: var(--text); transition: border-color .12s, background .12s, box-shadow .12s;
+}
+input:not([type="checkbox"]):not([type="radio"]):hover, textarea:hover, select:hover { border-color: var(--border-strong); }
+input:not([type="checkbox"]):not([type="radio"]):focus, textarea:focus, select:focus {
+  outline: none; border-color: var(--accent); background: rgba(255,255,255,0.05);
+  box-shadow: 0 0 0 3px rgba(139,141,255,0.18);
+}
+input::placeholder, textarea::placeholder { color: #5f646d; }
+select option { background: #16171a; color: var(--text); }
+input[type="checkbox"], input[type="radio"] { accent-color: var(--accent-solid); }
+
+/* Tables */
+table { font-size: 13px; }
+th {
+  font-size: 11px; letter-spacing: 0.06em; font-weight: 600; color: var(--text-dim);
+  border-bottom: 1px solid var(--border-strong); padding-top: 10px; padding-bottom: 10px;
+}
+td { border-bottom: 1px solid rgba(255,255,255,0.05); padding-top: 10px; padding-bottom: 10px; }
+tr:hover td { background: rgba(255,255,255,0.03); }
+.table-wrap { border-radius: 10px; }
+
+/* Badges and tabs */
+.badge { padding: 2px 9px; border-radius: 999px; font-size: 10.5px; font-weight: 600; letter-spacing: 0.04em; border: 1px solid transparent; }
+.badge.critical { background: rgba(255,107,129,0.14); border-color: rgba(255,107,129,0.3); }
+.badge.high     { background: rgba(255,159,90,0.14);  border-color: rgba(255,159,90,0.3); }
+.badge.medium   { background: rgba(245,196,81,0.13);  border-color: rgba(245,196,81,0.28); }
+.badge.low      { background: rgba(124,183,255,0.13); border-color: rgba(124,183,255,0.28); }
+.tab { transition: color .12s; }
+.tab.active { color: var(--text); border-bottom-color: var(--accent); }
+
+
+/* Case header: one compact row instead of a tall card repeated on every
+   screen. Nothing is removed -- status, priority and both timestamps stay
+   visible; only the stacking and the redundant "Edit case state" caption go. */
+.case-header { padding: var(--space-4) var(--space-5); }
+.case-meta { flex-wrap: wrap; align-items: center; gap: var(--space-2) var(--space-6); margin-top: var(--space-3); padding-top: var(--space-3); }
+.case-meta-edit-label { display: none; }
+.case-meta-fields { gap: var(--space-4); }
+.case-meta-item { flex-direction: row; align-items: center; gap: var(--space-2); }
+.case-meta-item select { min-height: 28px; padding: 2px 8px; font-size: 12px; }
+.case-meta-facts { flex-direction: row; align-items: center; gap: var(--space-5); }
+.case-fact { flex-direction: row; align-items: baseline; gap: var(--space-2); }
+.case-fact dd { color: var(--text); font-variant-numeric: tabular-nums; }
+.case-id { font-size: 11px; opacity: 0.8; }
+
+/* Timeline and other row tables: denser rows. */
+.timeline-row td { padding-top: 7px; padding-bottom: 7px; vertical-align: middle; }
+.timeline-row td, .timeline-row td * { line-height: 1.4; }
+
+.audit-table td:nth-child(-n+4) { white-space: nowrap; overflow-wrap: normal; }
+
+details > summary { cursor: pointer; }
+.lan-warning { background: rgba(255,107,129,0.10); }
+
+@media (max-width: 900px) {
+  .sidebar { top: 0; max-height: none; padding-right: 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  * { transition: none !important; animation: none !important; }
 }
