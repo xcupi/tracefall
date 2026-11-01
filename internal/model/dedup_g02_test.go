@@ -69,6 +69,7 @@ func TestDedupHash_G02NewTypesKeepDistinguishingFields(t *testing.T) {
 		{EventScheduledTaskLaunch, 107, "task_instance_id"}, {EventScheduledTaskLaunch, 322, "existing_instance_id"}, {EventScheduledTaskLaunch, 107, "task_name"},
 		{EventSMBSecurity, 551, "session_id"}, {EventSMBSecurity, 551, "status"}, {EventSMBSecurity, 551, "client_name"},
 		{EventTokenRightAdjusted, 4703, "enabled_privileges"}, {EventTokenRightAdjusted, 4703, "disabled_privileges"},
+		{EventTokenRightAdjusted, 4703, "target_logon_id"}, {EventSMBSecurity, 551, "session_guid"}, {EventAntimalwareHistoryDeleted, 1013, "user_sid"},
 		{EventProcessExit, 4689, "exit_status"},
 		{EventPowerShellPipelineError, 4100, "error_message"}, {EventPowerShellPipelineError, 4100, "pipeline_id"},
 		{EventServiceMessage, 7031, "service_name"}, {EventServiceMessage, 7031, "termination_count"}, {EventServiceMessage, 7024, "service_error_ref"},

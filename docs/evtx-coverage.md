@@ -144,7 +144,7 @@ chunks):
   record, absent versus recorded empty/dash/zero), native/CSV parity of fields and dedup hash, dedup
   distinctness and recollection collapse, and pinned historical hashes of existing Windows events computed
   with the base commit's code. Mutation checks (provider gate removed, 5007 rule inverted or widened,
-  positional index shifted, dedup field dropped, redaction removed, ...) are each caught by a test.
+  positional index shifted, dedup field dropped, redaction removed, ...) are caught by a test. An independent reviewer ran 55 further mutations: 47 were killed, 1 was an invalid build, and 7 survivors exposed 6 missing tests (three dedup-identity fields, WMI 5858 operation redaction, and the 1013 and 5860 limitation wording); those tests were added afterwards.
 - Real-record test: `TestRealG02Coverage` in `internal/parsers/evtx` is skipped unless
   `TRACEFALL_REAL_EVTX_DIR` is set; with `TRACEFALL_REAL_PY_CENSUS` and `TRACEFALL_REAL_PY_SAMPLES` it prints
   counts and field names only.
