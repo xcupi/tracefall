@@ -16,7 +16,7 @@ changed during this validation. The tested binary was built from HEAD
 
 ## Evidence and method
 
-User-authorised evidence is under `../tracefall_lab/cyberdefenders/easy/`:
+User-authorised evidence is under an external lab directory (`cyberdefenders/easy/`, not included in this repository):
 
 | Dataset | Actual input | Bytes | SHA-256 |
 |---|---|---:|---|
@@ -233,7 +233,7 @@ Supplementary public comparisons (not treated as authoritative over source data)
 
 ## Saved artifacts
 
-Durable output: `../tracefall_lab/validation-results/2026-10-18-baseline/`.
+Durable output: an external results directory (not included in this repository).
 Contains source/build hashes, direct plugin JSON/stderr, per-case timeline/findings,
 combined analyses, integrity/manifest verification, generated HTML/PDF/ZIP reports,
 comparison scripts and check results. Original multi-GB dumps are not copied into
