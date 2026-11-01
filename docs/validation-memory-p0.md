@@ -117,7 +117,7 @@ identities. This fresh-case workflow was the one actually validated above.
 
 ## Saved artifacts
 
-`../tracefall_lab/validation-results/2026-10-18-p0/` preserves the new cases'
+an external results directory (not included in this repository) preserves the new cases'
 outputs, combined plugin JSON, timeline, findings, correlations, HTML/PDF/ZIP,
 checks, integrity results, build/source hashes and test log. Original multi-GB
 memory files are not copied into the output or committed. The baseline directory

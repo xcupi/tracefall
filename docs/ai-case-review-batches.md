@@ -2,8 +2,7 @@
 
 This is separate from the existing single-packet `enrich/case-review` and legacy
 `enrich/narrative` Summary. It never promotes a finding, changes severity, or
-writes a report appendix. The browser workflow is available inside the existing AI Case Review card: open **Parsed-case batch review**, configure a bounded budget, build and inspect a local plan, then explicitly start it. Actual tests, RED evidence and
-limitations are in [the backend verification record](ai-case-review-batches-verification.md).
+writes a report appendix. The browser workflow is available inside the existing AI Case Review card: open **Parsed-case batch review**, configure a bounded budget, build and inspect a local plan, then explicitly start it. Limitations are listed below.
 
 **Reviewed means that a bounded model request succeeded and returned commentary
 passing the existing structural validator. It does not mean semantic accuracy,

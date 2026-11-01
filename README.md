@@ -1,36 +1,37 @@
 # Tracefall
 
-Tracefall is an automated forensic triage and investigation platform. It
-takes a KAPE-style Windows triage evidence package and turns it into a
-normalized timeline, deterministic findings backed by concrete evidence,
-correlated activity chains, and MITRE ATT&CK technique mappings — exposed
-through an API and a minimal investigation dashboard.
+Tracefall is a forensic triage and investigation platform. It ingests collected
+evidence, normalizes it into a common event schema, builds one chronological
+timeline, runs deterministic detections and correlation, maps findings to MITRE
+ATT&CK, and presents everything through a JSON API and a web dashboard. Every
+finding is traceable down to the original raw evidence record it came from.
 
-**This is Phase 1 + 1.5**: a real, working, but intentionally small
-vertical slice, now reachable from a browser upload and from other
-machines on your LAN. It is not a full-disk forensics platform, not a
-memory forensics tool, and it has no AI/LLM in its detection or
-correlation path — see [ARCHITECTURE.md](ARCHITECTURE.md) for the full
-scope and reasoning.
+Detection and correlation are deterministic and use no LLM. Optional, clearly
+separated LLM review and VirusTotal enrichment exist; they are off unless you
+configure them (see [docs/ai-case-review.md](docs/ai-case-review.md) and
+[docs/security.md](docs/security.md)). Anything that leaves the machine is
+explicit, never implicit.
+
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the design and its reasoning.
 
 ## What it does
 
 1. Create a case.
-2. Upload a KAPE triage package as a ZIP archive straight from the
-   browser (or, for local/dev use, point Tracefall at an evidence
-   directory already on disk) — Windows Event Logs, Prefetch, Registry
-   Run keys, Scheduled Tasks.
-3. Safely extract the archive, discover which files are supported
-   artifacts, and parse and normalize them into a common event schema.
-4. Build a unified, chronologically sorted timeline.
-5. Run seven deterministic detection rules over the timeline.
-6. Correlate events into process chains, entity linkages, temporal
-   bursts, and full evidenced activity-chain narratives.
-7. Map findings to MITRE ATT&CK techniques.
-8. Serve everything through a JSON API, reachable from other machines on
-   your LAN if you choose to configure it that way.
-9. Display it in a minimal web dashboard, with every finding traceable
-   down to the original raw evidence record it came from.
+2. Add evidence: a KAPE-style triage package (ZIP upload or a local folder), an
+   AD1 container, a disk image (raw / E01, NTFS volumes), or a memory image
+   (through an external Volatility 3, optional).
+3. Safely extract and catalog the evidence, discover which files are supported
+   artifacts, and parse them into events. Parsers are in `internal/parsers`
+   (for example Windows event logs, registry hives, Prefetch, scheduled tasks,
+   NTFS `$MFT` / `$UsnJrnl`, SRUM, Defender, WMI, browser history and cache,
+   LNK / jump lists, SQL Server and IIS logs, and Linux auth / syslog).
+   A parser existing does not mean coverage is complete: each document in
+   [docs/](docs) states what is and is not covered.
+4. Build a unified timeline, run deterministic detection rules, correlate
+   events into process chains, entity linkages, temporal bursts and evidenced
+   activity chains, and map findings to ATT&CK techniques.
+5. Review it in the dashboard or through the API, produce HTML / PDF / ZIP
+   reports, and re-verify evidence integrity.
 
 A synthetic (clearly-marked, not real) evidence package is bundled at
 [testdata/synthetic_case](testdata/synthetic_case) so the whole pipeline
@@ -256,12 +257,6 @@ See also: [ARCHITECTURE.md](ARCHITECTURE.md),
 
 ## Known limitations
 
-- Single-host cases only: the ingestion pipeline assumes one evidence
-  package corresponds to one machine.
-- Parsers consume EZ Tools (EvtxECmd/PECmd/RECmd) CSV output and raw
-  Task Scheduler XML, not raw binary EVTX/Prefetch/registry hive
-  formats directly — see ARCHITECTURE.md for why, and
-  docs/adding-parsers.md for how to add a raw-format parser later.
 - **No TLS.** Tracefall speaks plain HTTP and does not terminate TLS;
   put a reverse proxy in front of it on any shared network.
 - **No per-case access control.** Any authenticated analyst can read and
@@ -270,8 +265,6 @@ See also: [ARCHITECTURE.md](ARCHITECTURE.md),
   administration*, not case from case. See docs/security.md.
 - Deleting a case still removes that case's audit log with it; the
   system-wide security log survives.
-- Detection rules are a representative starter set (7 rules), not
-  comprehensive coverage.
 - **No password cracking, ever.** Tracefall extracts Windows local
   account records and their stored NTLM hashes from a SAM hive
   ([docs/windows-artifacts.md](docs/windows-artifacts.md#windows-sam)),
@@ -285,10 +278,22 @@ See also: [ARCHITECTURE.md](ARCHITECTURE.md),
   stated.
 - **SECURITY hive secrets** (LSA secrets, cached domain credentials) are
   not extracted.
-- No LLM/AI anywhere in this phase, by design.
+- **Very large sources.** Sources are admitted atomically, with bounded
+  staging ([docs/source-atomic-parser-import.md](docs/source-atomic-parser-import.md)).
+  A SQL Server error log of 512 MiB or more is admitted in hidden, verified
+  segments instead ([docs/segmented-source-import.md](docs/segmented-source-import.md)).
+  The database grows with the number of records (about 3.7 KB per record in
+  the synthetic scale test), so plan disk space for it.
+- LLM and VirusTotal features are optional and never part of detection.
 
-See ARCHITECTURE.md's "Recommended Phase 2" section for what's next.
+See ARCHITECTURE.md for the design and its reasoning.
 
 ## Memory images
 
 Set `TRACEFALL_VOLATILITY` to a Volatility 3 `vol` executable and upload a memory image (`.vmem`, `.mem`, `.dmp`, `.lime`, `.raw`, or a known format). It runs sandboxed and feeds the same timeline, findings and report. See `docs/memory-analysis.md` for what is and is not validated.
+
+## License
+
+MIT — free to use, copy, modify and distribute, including commercially, as long
+as the copyright notice and license text are kept (that is how you credit the
+source). See [LICENSE](LICENSE).
