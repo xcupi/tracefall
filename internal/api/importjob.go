@@ -312,6 +312,9 @@ func (s *Service) StartImport(caseID, collectionID string, sourceFileIDs []strin
 	if _, err := s.requireEvidenceMutable(caseID); err != nil {
 		return "", err
 	}
+	if err := s.refuseIfSegmentedPending(caseID); err != nil {
+		return "", err
+	}
 	collection, err := s.store.GetCollection(collectionID)
 	if err != nil || collection.CaseID != caseID {
 		return "", ErrCollectionNotFound

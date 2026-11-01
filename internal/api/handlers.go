@@ -931,7 +931,7 @@ func (h *handlers) fail(w http.ResponseWriter, err error) bool {
 	var offErr *UploadOffsetError
 	var dupCaseErr *DuplicateCaseError
 	switch {
-	case errors.Is(err, ErrEvidenceLocked), errors.Is(err, ErrPriorityLocked):
+	case errors.Is(err, ErrEvidenceLocked), errors.Is(err, ErrPriorityLocked), errors.Is(err, ErrImportInProgress):
 		// 409 Conflict, not 403: the caller is permitted to act on this
 		// case, but the case's own STATE forbids this change. A 403 would
 		// suggest a permissions problem and send an analyst looking at

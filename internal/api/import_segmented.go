@@ -36,8 +36,10 @@ type segmentedImport struct {
 	events   int
 	live     sync.Map // source id -> struct{}: imports running in this process
 	// test seams
-	hook    func(segIndex int) error // called after a segment commits
-	noAbort bool                     // simulate a process that died: no abort
+	hook     func(segIndex int) error // called after a segment commits
+	noAbort  bool                     // simulate a process that died: no abort
+	abortErr error                    // simulate a failing abort
+	mutate   func(*model.Event)       // test seam: alter a parsed event
 }
 
 func newSegmentedImport() *segmentedImport {
@@ -53,10 +55,20 @@ func (s *Service) SetSegmentedImport(minBytes int64, segmentEvents int) {
 	}
 }
 
-// wantsSegmented: only a streaming parser can be admitted in segments, and only
-// when the source is large enough that one transaction is the wrong shape.
+// segmentedArtifacts are the artifact types verified to be admitted in segments
+// with exactly the single-transaction result. Host resolution is the reason for
+// the allowlist: the ordinary path resolves a blank host from the source's OWN
+// named host first and only then from the collection, which needs the whole
+// source read beforehand. These parsers never name a host, so only the
+// collection scope applies and it is known before the first segment.
+// A source of another type keeps the single-transaction path.
+var segmentedArtifacts = map[string]bool{model.ArtifactMSSQLLog: true}
+
+// wantsSegmented: only a streaming parser of a verified artifact type can be
+// admitted in segments, and only when the source is large enough that one
+// transaction is the wrong shape.
 func (s *Service) wantsSegmented(size int64, p parsers.ArtifactParser) bool {
-	if s.seg.minBytes <= 0 || size < s.seg.minBytes {
+	if s.seg.minBytes <= 0 || size < s.seg.minBytes || !segmentedArtifacts[p.ArtifactType()] {
 		return false
 	}
 	_, ok := p.(parsers.StreamingParser)
@@ -85,6 +97,20 @@ func (s *Service) RecoverSegmentedImports(ctx context.Context) ([]store.Recovere
 		return running
 	})
 }
+
+// segmentedAbortError: the import failed AND its pending segments could not be
+// removed. The source stays importing (hidden) until startup recovery.
+type segmentedAbortError struct{ cause, abort error }
+
+func (e *segmentedAbortError) Error() string {
+	return fmt.Sprintf("%v (and removing its pending segments failed: %v; the case stays blocked and the rows stay hidden until the server restarts and recovers them)", e.cause, e.abort)
+}
+func (e *segmentedAbortError) Unwrap() error { return e.cause }
+
+// errSegmentedHostNamed: a source of a verified-hostless type named a host. The
+// segmented path cannot reproduce the ordinary source-then-collection host
+// resolution without reading the source twice, so it stops rather than guess.
+var errSegmentedHostNamed = errors.New("segmented import stopped: the source names its own host, which the segmented path cannot resolve identically to a normal import")
 
 // segmentedJob is one source selected for segmented admission.
 type segmentedJob struct {
@@ -134,7 +160,11 @@ func (s *Service) importSegmented(job segmentedJob, caseID, collectionID, root s
 	// ordinary path does. Only the persisted collection scope is available
 	// here: a source cannot name its own host before it has been read.
 	collectionHost := ""
-	if hosts, herr := s.store.CollectionHosts(caseID, collectionID); herr == nil {
+	hosts, herr := s.store.CollectionHosts(caseID, collectionID)
+	if herr != nil {
+		return 0, 0, s.abortSegmented(sf.ID, fmt.Errorf("reading the collection's hosts: %w", herr), prog)
+	}
+	{
 		persisted := make([]model.Event, 0, len(hosts))
 		for _, h := range hosts {
 			persisted = append(persisted, model.Event{Host: h})
@@ -176,7 +206,13 @@ func (s *Service) importSegmented(job segmentedJob, caseID, collectionID, root s
 
 	cov, perr := ingest.ParseFileStream(ctx, caseID, collectionID, sf.ID, root, sf.Path, job.p, job.pc, func(b ingest.ParsedFile) error {
 		for i := range b.Events {
-			if collectionHost != "" && normalizeHost(b.Events[i].Host) == "" {
+			if s.seg.mutate != nil {
+				s.seg.mutate(&b.Events[i])
+			}
+			if normalizeHost(b.Events[i].Host) != "" {
+				return errSegmentedHostNamed
+			}
+			if collectionHost != "" {
 				markInheritedHost(&b.Events[i], collectionHost, "collection")
 			}
 		}
@@ -207,13 +243,32 @@ func (s *Service) importSegmented(job segmentedJob, caseID, collectionID, root s
 	if cancelledByAnalyst := prog.cancelled(); cancelledByAnalyst && !errors.Is(perr, context.Canceled) {
 		perr = fmt.Errorf("%w: %v", context.Canceled, perr)
 	}
-	if !s.seg.noAbort {
-		// A fresh context: ctx is usually already cancelled here.
-		if aerr := s.store.AbortSegmentedImport(context.Background(), sf.ID, "import stopped before finalization: "+perr.Error()); aerr != nil {
-			return 0, 0, fmt.Errorf("%w (and removing its pending segments failed: %v; startup recovery will remove them)", perr, aerr)
+	return 0, 0, s.abortSegmented(sf.ID, perr, prog)
+}
+
+// abortSegmented removes every pending segment of the source. A cancelled
+// import or a duplicate-content source goes back to discovered, exactly as the
+// single-transaction path leaves it (nothing was imported, nothing failed);
+// any other failure leaves it failed with the disclosed outcome.
+func (s *Service) abortSegmented(id string, cause error, prog *progressSink) error {
+	if s.seg.noAbort {
+		return cause
+	}
+	var aerr error
+	if s.seg.abortErr != nil {
+		aerr = s.seg.abortErr
+	} else {
+		aerr = s.store.AbortSegmentedImport(context.Background(), id, "import stopped before finalization: "+cause.Error())
+	}
+	if aerr != nil {
+		return &segmentedAbortError{cause: cause, abort: aerr}
+	}
+	if errors.Is(cause, context.Canceled) || errors.Is(cause, store.ErrDuplicateSourceFile) {
+		if _, rerr := s.store.RetryFailedSource(id); rerr != nil {
+			return fmt.Errorf("%w (and returning the source to discovered failed: %v)", cause, rerr)
 		}
 	}
-	return 0, 0, perr
+	return cause
 }
 
 // deduplicateForImport is deduplicateIn for one segment of an importing

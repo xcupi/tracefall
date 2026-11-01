@@ -1632,6 +1632,7 @@ func (s *Service) importEvidence(caseID, collectionID string, sourceFileIDs []st
 
 	// Phase 3b: sources admitted in bounded segments, one at a time, after the
 	// ordinary sources are durable (their hosts are then known).
+	stopQueue := false
 	for i, job := range segQueue {
 		if cancelled || prog.cancelled() {
 			cancelled = true
@@ -1640,7 +1641,17 @@ func (s *Service) importEvidence(caseID, collectionID string, sourceFileIDs []st
 		}
 		prog.startFile(job.sf.Path)
 		newCount, records, err := s.importSegmented(job, caseID, collectionID, collection.EvidenceDirectory, prog)
+		var stuck *segmentedAbortError
 		switch {
+		case errors.As(err, &stuck):
+			// The pending rows could not be removed: the source stays
+			// importing (hidden) and the case stays blocked until the server
+			// restarts. Say so, and do not start the remaining sources.
+			errs = append(errs, fmt.Sprintf("%s: %v", job.sf.Path, err))
+			failures = append(failures, parseFailure(job.sf, ParseStageParse, err))
+			prog.fileParsed(0, true)
+			unprocessed += len(segQueue) - i - 1
+			stopQueue = true
 		case errors.Is(err, context.Canceled) && prog.cancelled():
 			cancelled = true
 			unprocessed += len(segQueue) - i
@@ -1664,7 +1675,7 @@ func (s *Service) importEvidence(caseID, collectionID string, sourceFileIDs []st
 			prog.fileParsed(records, false)
 			prog.filePersisted(newCount, records-newCount)
 		}
-		if cancelled {
+		if cancelled || stopQueue {
 			break
 		}
 	}
@@ -2066,6 +2077,9 @@ func (s *Service) DeleteCollection(caseID, collectionID string) (DeletedCollecti
 	// the collection holds no live files, where the delegated call below
 	// would have nothing to check on.
 	if _, err := s.requireEvidenceMutable(caseID); err != nil {
+		return DeletedCollectionResult{}, err
+	}
+	if err := s.refuseIfSegmentedPending(caseID); err != nil {
 		return DeletedCollectionResult{}, err
 	}
 
@@ -2488,6 +2502,9 @@ func (s *Service) deleteSourceFileEvidence(sf model.SourceFile) (removedEvents, 
 // cleanup. Irreversible; the API/UI layer is responsible for requiring
 // explicit confirmation before calling this.
 func (s *Service) DeleteCase(caseID string) error {
+	if err := s.refuseIfSegmentedPending(caseID); err != nil {
+		return err
+	}
 	c, err := s.GetCase(caseID)
 	switch {
 	case err == nil:

@@ -4,13 +4,18 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
+	"tracefall/internal/ingest"
 	"tracefall/internal/model"
+	"tracefall/internal/parsers"
+	"tracefall/internal/store"
 )
 
 // ---- helpers -------------------------------------------------------------
@@ -81,8 +86,23 @@ func (e segEnv) snapshot(t *testing.T) []string {
 	}
 	var out []string
 	for _, ev := range evs {
-		out = append(out, fmt.Sprintf("event|%s|%s|%s|%s|%s", ev.Timestamp.UTC().Format("15:04:05"), ev.Host, ev.EventType, ev.DedupHash, ev.SourceReference))
+		out = append(out, fmt.Sprintf("event|%s|%s|%s|%s|%s|%s", ev.Timestamp.UTC().Format("15:04:05"), ev.Host, ev.Extra["host_inherited_from"], ev.EventType, ev.DedupHash, ev.SourceReference))
 	}
+	// Observation -> event -> raw text, per source: the evidence chain itself.
+	rows, err := e.svc.store.DB().Query(`SELECT sf.original_filename, ev.dedup_hash, o.source_reference, COALESCE(r.raw, '<no raw>')
+ FROM event_observations o JOIN events ev ON ev.id = o.event_id JOIN source_files sf ON sf.id = o.source_file_id
+ LEFT JOIN raw_evidence r ON r.id = o.raw_evidence_id`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for rows.Next() {
+		var a, b, c, d string
+		if err := rows.Scan(&a, &b, &c, &d); err != nil {
+			t.Fatal(err)
+		}
+		out = append(out, fmt.Sprintf("chain|%s|%s|%s|%x", a, b, c, d))
+	}
+	rows.Close()
 	for name, id := range e.ids {
 		sf, err := e.svc.store.GetSourceFile(id)
 		if err != nil {
@@ -117,10 +137,19 @@ func (e segEnv) rows(t *testing.T, q string, args ...any) int {
 // produces: same events, dedup identities, observations, counts, coverage,
 // including duplicates across files and repeated lines inside the big file.
 func TestSegmentedImportMatchesSingleTransactionImport(t *testing.T) {
-	dup := "2025-01-02 03:00:10.00 Server Microsoft SQL Server record 10 " + strings.Repeat("p", 40)
+	// dup repeats a record of the SMALL file; dupIn repeats record 1000 of the big
+	// file itself, whose first occurrence sits in an earlier segment.
+	line := func(i int) string {
+		return fmt.Sprintf("2025-01-02 03:%02d:%02d.00 Server Microsoft SQL Server record %d %s", (i/60)%60, i%60, i, strings.Repeat("p", 40))
+	}
+	dup, dupIn := line(10), line(1000)
 	small, big := [2]int{0, 400}, [2]int{300, 2600}
-	whole := newSegEnv(t, 0, 0, small, big, dup, dup) // minBytes 0: segmented disabled
-	seg := newSegEnv(t, 1, 500, small, big, dup, dup) // every streaming source segmented
+	whole := newSegEnv(t, 0, 0, small, big, dup, dup, dupIn, dupIn) // minBytes 0: segmented disabled
+	seg := newSegEnv(t, 1, 500, small, big, dup, dup, dupIn, dupIn) // every streaming source segmented
+	// A host already persisted in the collection is inherited identically.
+	for _, e := range []segEnv{whole, seg} {
+		e.seedHost(t, "SRV-A")
+	}
 	rw, rs := whole.importAll(t), seg.importAll(t)
 	if len(rw.ParseFailures) != 0 || len(rs.ParseFailures) != 0 {
 		t.Fatalf("failures: whole=%+v seg=%+v", rw.ParseFailures, rs.ParseFailures)
@@ -287,5 +316,201 @@ func TestSmallSourcesKeepTheSingleTransactionPath(t *testing.T) {
 	}
 	if n := env.rows(t, `SELECT COUNT(*) FROM source_import_outcomes`); n != 0 {
 		t.Errorf("%d segmented outcomes recorded for small sources", n)
+	}
+}
+
+// seedHost persists one event with a named host, from a separate imported
+// source, so the collection already has exactly one host.
+func (e segEnv) seedHost(t *testing.T, host string) {
+	t.Helper()
+	now := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC) // fixed: both runs must seed the same instant
+	sf := model.SourceFile{ID: "seed-source", CaseID: e.caseID, CollectionID: e.coll, OriginalFilename: "seed.log", Path: "seed.log",
+		ArtifactType: model.ArtifactMSSQLLog, Parser: "mssql@1", Supported: true, SHA256: "seed-hash", ImportStatus: model.SourceFileImported, DiscoveredAt: now}
+	if err := e.svc.store.SaveSourceFiles([]model.SourceFile{sf}); err != nil {
+		t.Fatal(err)
+	}
+	ev := model.Event{ID: "seed-event", CaseID: e.caseID, CollectionID: e.coll, Timestamp: now, Host: host, EventType: "seed",
+		ArtifactType: model.ArtifactMSSQLLog, SourceFileID: sf.ID, DedupHash: "seed-dedup"}
+	if err := e.svc.store.SaveEvents([]model.Event{ev}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// F3: only verified hostless artifact types are admitted in segments, so the
+// host a source gets never depends on the path taken.
+func TestSegmentedPathIsLimitedToVerifiedArtifacts(t *testing.T) {
+	svc := newTestService(t)
+	svc.SetSegmentedImport(1, 100)
+	for _, p := range ingest.Registry() {
+		_, streaming := p.(parsers.StreamingParser)
+		want := streaming && p.ArtifactType() == model.ArtifactMSSQLLog
+		if got := svc.wantsSegmented(1<<40, p); got != want {
+			t.Errorf("wantsSegmented(%s/%s) = %v, want %v", p.Name(), p.ArtifactType(), got, want)
+		}
+	}
+}
+
+// A source that names its own host stops instead of inheriting a wrong one.
+func TestSegmentedImportStopsWhenTheSourceNamesAHost(t *testing.T) {
+	env := newSegEnv(t, 1, 400, [2]int{0, 10}, [2]int{1000, 1500})
+	env.svc.seg.hook = nil
+	// Force a named host by replacing the parser output path: persisted events
+	// cannot do that, so inject through the sink seam.
+	env.svc.seg.mutate = func(e *model.Event) { e.Host = "NAMED-BY-SOURCE" }
+	res := env.importAll(t)
+	env.svc.seg.mutate = nil
+	if len(res.ParseFailures) == 0 || !strings.Contains(strings.Join(res.Errors, " "), "names its own host") {
+		t.Fatalf("host conflict not disclosed: failures=%+v errors=%v", res.ParseFailures, res.Errors)
+	}
+	if n := env.rows(t, `SELECT COUNT(*) FROM events WHERE source_file_id = ?`, env.ids["ERRORLOG"]); n != 0 {
+		t.Errorf("%d rows left", n)
+	}
+}
+
+// Analyst cancel: nothing remains, the source goes back to discovered (as in
+// the single-transaction path) and imports normally afterwards.
+func TestSegmentedImportCancelReturnsTheSourceToDiscovered(t *testing.T) {
+	env := newSegEnv(t, 1, 400, [2]int{0, 10}, [2]int{1000, 3500})
+	var jobID string
+	cancelled := make(chan struct{})
+	env.svc.seg.hook = func(idx int) error {
+		if idx == 1 {
+			if _, err := env.svc.CancelImport(env.caseID, jobID); err != nil {
+				t.Errorf("CancelImport: %v", err)
+			}
+			close(cancelled)
+			time.Sleep(500 * time.Millisecond) // let the 100 ms cancel watcher see it
+		}
+		return nil
+	}
+	var err error
+	jobID, err = env.svc.StartImport(env.caseID, env.coll, []string{env.ids["ERRORLOG.1"], env.ids["ERRORLOG"]})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var prog ImportProgress
+	for i := 0; i < 600; i++ {
+		prog, _ = env.svc.ImportJob(env.caseID, jobID)
+		if prog.Done {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if !prog.Done || prog.Result == nil || !prog.Result.Cancelled {
+		t.Fatalf("job = %+v, want done and cancelled", prog)
+	}
+	env.svc.seg.hook = nil
+	for _, q := range []string{`SELECT COUNT(*) FROM events WHERE source_file_id = ?`, `SELECT COUNT(*) FROM source_import_segments WHERE source_file_id = ?`} {
+		if n := env.rows(t, q, env.ids["ERRORLOG"]); n != 0 {
+			t.Errorf("%s = %d after cancel", q, n)
+		}
+	}
+	sf, _ := env.svc.store.GetSourceFile(env.ids["ERRORLOG"])
+	if sf.ImportStatus != model.SourceFileDiscovered {
+		t.Errorf("status = %q, want discovered", sf.ImportStatus)
+	}
+	res, err := env.svc.ImportEvidence(env.caseID, env.coll, []string{env.ids["ERRORLOG"]})
+	if err != nil || res.EventCount != 2500 {
+		t.Fatalf("import after cancel: err=%v count=%d", err, res.EventCount)
+	}
+}
+
+// If the pending rows cannot be removed the analyst is told, the rows stay
+// hidden, the source stays importing, and the remaining queue is not started.
+func TestSegmentedImportAbortFailureIsDisclosedAndStaysHidden(t *testing.T) {
+	env := newSegEnv(t, 1, 400, [2]int{0, 10}, [2]int{1000, 2500})
+	env.svc.seg.hook = func(idx int) error {
+		if idx == 1 {
+			return errors.New("simulated failure")
+		}
+		return nil
+	}
+	env.svc.seg.abortErr = errors.New("simulated disk error")
+	res := env.importAll(t)
+	env.svc.seg.hook, env.svc.seg.abortErr = nil, nil
+	if len(res.ParseFailures) != 1 || !strings.Contains(strings.Join(res.Errors, " "), "removing its pending segments failed") {
+		t.Fatalf("abort failure not disclosed: failures=%+v errors=%v", res.ParseFailures, res.Errors)
+	}
+	sf, _ := env.svc.store.GetSourceFile(env.ids["ERRORLOG"])
+	if sf.ImportStatus != model.SourceFileImporting {
+		t.Fatalf("status = %q, want importing (hidden)", sf.ImportStatus)
+	}
+	if n, _ := env.svc.store.CountEvents(env.caseID); n != 10 {
+		t.Errorf("pending rows visible: %d", n)
+	}
+	if rec, err := env.svc.RecoverSegmentedImports(context.Background()); err != nil || len(rec) != 1 {
+		t.Errorf("recovery = %+v err=%v", rec, err)
+	}
+}
+
+// The guards answer 409, never 500, on every route a UI can use.
+func TestPendingSegmentedImportAnswers409OnEveryRoute(t *testing.T) {
+	env := newSegEnv(t, 1, 400, [2]int{0, 10}, [2]int{1000, 2500})
+	router := routerFor(env.svc)
+	call := func(method, path, body string) int {
+		req := httptest.NewRequest(method, path, strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		return rec.Code
+	}
+	checked := false
+	env.svc.seg.hook = func(idx int) error {
+		if idx != 1 {
+			return nil
+		}
+		checked = true
+		ids := `{"source_file_ids":["` + env.ids["ERRORLOG.1"] + `"]}`
+		for name, got := range map[string]int{
+			"sync import":  call("POST", "/api/cases/"+env.caseID+"/evidence/"+env.coll+"/import", ids),
+			"start import": call("POST", "/api/cases/"+env.caseID+"/evidence/"+env.coll+"/import/start", ids),
+			"delete files": call("DELETE", "/api/cases/"+env.caseID+"/evidence", ids),
+		} {
+			if got != 409 {
+				t.Errorf("%s answered %d, want 409", name, got)
+			}
+		}
+		if _, err := env.svc.DeleteCollection(env.caseID, env.coll); !errors.Is(err, ErrImportInProgress) {
+			t.Errorf("DeleteCollection = %v, want ErrImportInProgress", err)
+		}
+		if err := env.svc.DeleteCase(env.caseID); !errors.Is(err, ErrImportInProgress) {
+			t.Errorf("DeleteCase = %v, want ErrImportInProgress", err)
+		}
+		return nil
+	}
+	env.importAll(t)
+	if !checked {
+		t.Fatal("hook never ran")
+	}
+}
+
+// Dedup inside one importing source: an event whose hash was committed in an
+// EARLIER segment of the same source is a known event, not a second row. (The
+// MSSQL parser keys identity on the line, so repeated text cannot produce this
+// through a file; the store-level contract is tested directly.)
+func TestDeduplicateForImportSeesTheSourcesOwnEarlierSegments(t *testing.T) {
+	env := newSegEnv(t, 1, 100, [2]int{0, 5}, [2]int{1000, 1010})
+	src := env.ids["ERRORLOG"]
+	if err := env.svc.store.BeginSegmentedImport(src); err != nil {
+		t.Fatal(err)
+	}
+	mk := func(id string) model.Event {
+		return model.Event{ID: id, CaseID: env.caseID, CollectionID: env.coll, Timestamp: time.Date(2025, 1, 2, 3, 4, 5, 0, time.UTC),
+			Host: "H", EventType: "same", ArtifactType: model.ArtifactMSSQLLog, SourceFileID: src, SourceReference: "same-ref"}
+	}
+	st := env.svc.store
+	n1, o1, err := deduplicateForImport(st, env.caseID, env.coll, src, []model.Event{mk("first")}, nil)
+	if err != nil || len(n1) != 1 {
+		t.Fatalf("first: new=%d err=%v", len(n1), err)
+	}
+	if _, err := st.CommitSegment(context.Background(), src, store.SegmentCheckpoint{Index: 0, Records: 1}, store.SegmentPayload{Events: n1, Observations: o1}); err != nil {
+		t.Fatal(err)
+	}
+	n2, o2, err := deduplicateForImport(st, env.caseID, env.coll, src, []model.Event{mk("second")}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(n2) != 0 || len(o2) != 1 || o2[0].EventID != "first" {
+		t.Fatalf("second segment: new=%d observations=%+v, want 0 new and an observation of event \"first\"", len(n2), o2)
 	}
 }

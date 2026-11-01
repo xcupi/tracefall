@@ -64,8 +64,8 @@ func TestSegmentedStreamOutputCapBoundsARunNotTheSource(t *testing.T) {
 // The deadline of a segmented stream restarts after every consumed frame.
 func TestSegmentedStreamDeadlineIsProgressBased(t *testing.T) {
 	root, path := segLog(t, 2000) // 16 batches of <=128 events
-	slow := func(parsers.ParseResult) error { time.Sleep(100 * time.Millisecond); return nil }
-	sub := Subprocess{Exe: selfExe(t), Timeout: 600 * time.Millisecond}
+	slow := func(parsers.ParseResult) error { time.Sleep(250 * time.Millisecond); return nil }
+	sub := Subprocess{Exe: selfExe(t), Timeout: 2 * time.Second}
 	started := time.Now()
 	_, err := sub.RunStream(context.Background(), mssql.New(), root, path, parsers.ParseContext{}, slow)
 	var failure *ProcessFailure
@@ -80,7 +80,7 @@ func TestSegmentedStreamDeadlineIsProgressBased(t *testing.T) {
 	if cov.RecordsRead != 2000 {
 		t.Fatalf("records read = %d, want 2000", cov.RecordsRead)
 	}
-	if time.Since(started) <= 600*time.Millisecond {
+	if time.Since(started) <= 2*time.Second {
 		t.Fatalf("test did not exceed the absolute deadline (%s); it proves nothing", time.Since(started))
 	}
 }
@@ -89,10 +89,12 @@ func TestSegmentedStreamDeadlineIsProgressBased(t *testing.T) {
 func TestSegmentedStreamStallIsStopped(t *testing.T) {
 	root, path := segLog(t, 2000)
 	calls := 0
-	_, err := (Subprocess{Exe: selfExe(t), Timeout: 300 * time.Millisecond}).RunStream(WithSegmentedStream(context.Background()), mssql.New(), root, path, parsers.ParseContext{}, func(parsers.ParseResult) error {
+	// A consumer gets 3x the silence limit for one commit (1s -> 3s); 4s of
+	// no progress is a wedge and must be stopped.
+	_, err := (Subprocess{Exe: selfExe(t), Timeout: time.Second}).RunStream(WithSegmentedStream(context.Background()), mssql.New(), root, path, parsers.ParseContext{}, func(parsers.ParseResult) error {
 		calls++
 		if calls == 2 {
-			time.Sleep(900 * time.Millisecond) // no progress for longer than the stall limit
+			time.Sleep(4 * time.Second)
 		}
 		return nil
 	})
@@ -129,5 +131,22 @@ func TestSegmentedStreamCancellationIsNotAStall(t *testing.T) {
 	})
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("want context.Canceled, got %v", err)
+	}
+}
+
+// One slow but finite commit (longer than the silence limit, shorter than the
+// consumer budget) is NOT a stall: that is the review finding F2.
+func TestSegmentedStreamSlowCommitIsNotAStall(t *testing.T) {
+	root, path := segLog(t, 600)
+	calls := 0
+	cov, err := (Subprocess{Exe: selfExe(t), Timeout: time.Second}).RunStream(WithSegmentedStream(context.Background()), mssql.New(), root, path, parsers.ParseContext{}, func(parsers.ParseResult) error {
+		calls++
+		if calls == 2 {
+			time.Sleep(1500 * time.Millisecond)
+		}
+		return nil
+	})
+	if err != nil || cov == nil || cov.RecordsRead != 600 {
+		t.Fatalf("a slow commit must not trip the stall limit: cov=%+v err=%v", cov, err)
 	}
 }

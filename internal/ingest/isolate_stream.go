@@ -159,6 +159,12 @@ func (s Subprocess) RunStream(parent context.Context, p parsers.ArtifactParser, 
 			if readErr != nil {
 				break
 			}
+			if segmented {
+				// The consumer is committing durable work: allow it a longer
+				// budget than the worker's silence limit. A wedged commit is
+				// still stopped, and the analyst can always cancel.
+				stall.Reset(3 * s.timeout())
+			}
 			if err = sink(*frame.Batch); err != nil {
 				consumerErr = err
 				readErr = err
