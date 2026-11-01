@@ -991,6 +991,7 @@ const EVENT_CATEGORIES = {
   srum_network_usage: "network",
   srum_network_connection: "network",
   srum_push_notification: "other",
+  srum_sdp_network: "other",
   // Phase 4 additions.
   logon_explicit_credentials: "authentication",
   privileged_logon: "authentication",
@@ -9264,10 +9265,17 @@ function parseCoverageText(c) {
   // this explicit field list in parity with TestUI_ParseCoverageMeasuredParity.
   const measured = c.emitted_events != null ||
     ["records_read", "mapped", "unmapped", "undated", "records_failed", "chunks_read", "chunks_failed", "unlisted_records"].some(k => (c[k] ?? 0) !== 0) ||
-    c.limit_reached === true || (c.by_event || []).length > 0 ||
+    c.limit_reached === true || (c.by_event || []).length > 0 || (c.tables || []).length > 0 || (c.tables_unlisted ?? 0) !== 0 ||
     (!c.companion_of && c.hive_replay == null && !(c.notes || []).length);
   let text = measured ? `read=${c.records_read ?? 0} mapped=${c.mapped ?? 0} unmapped=${c.unmapped ?? 0} undated=${c.undated ?? 0} records_failed=${c.records_failed ?? 0} chunks_failed=${c.chunks_failed ?? 0} capped=${!!c.limit_reached}` : "Coverage not recorded";
   if ((c.notes || []).length) text += "; " + c.notes.join("; ");
+  if (measured && ((c.tables || []).length || c.tables_unlisted)) {
+    // Table census of a database source (SRUM): mirror model.ParseCoverage.TableSummary.
+    const tl = c.tables || [], total = tl.length + (c.tables_unlisted || 0);
+    text += `; table census: ${total} ${total === 1 ? "table" : "tables"}, ${tl.filter(t => t.interpreted).length} interpreted, ${tl.filter(t => !t.interpreted).reduce((a, t) => a + (t.rows || 0), 0)} rows not interpreted`;
+    if (c.tables_unlisted) text += `; ${c.tables_unlisted} more tables not listed, so these counts are lower bounds`;
+    if (c.database_state) text += "; database state: " + c.database_state;
+  }
   if (c.hive_replay) {
     text += "; hive transaction logs: " + c.hive_replay.state;
     if ((c.hive_replay.logs_applied || []).length) text += "; logs applied: " + c.hive_replay.logs_applied.length;

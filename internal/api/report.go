@@ -654,6 +654,12 @@ func reportCoverage(files []model.SourceFile) report.Coverage {
 			if c.UnlistedRecords > 0 {
 				summary += fmt.Sprintf("; %d records beyond the per-ID census limit", c.UnlistedRecords)
 			}
+			if ts := c.TableSummary(); ts != "" {
+				summary += "; table census: " + ts
+				if c.DatabaseState != "" {
+					summary += "; database state: " + c.DatabaseState
+				}
+			}
 			if hr := c.HiveReplay; hr != nil {
 				summary += "; hive transaction logs: " + hr.State
 				if hr.State == string(regf.RecoveryClean) && hr.Reason != "" {
@@ -824,6 +830,9 @@ func reportLimitations(d report.Data, in reportInputs) []string {
 		var details []string
 		if len(c.Notes) > 0 {
 			details = append(details, strings.Join(c.Notes, "; "))
+		}
+		if ts := c.TableSummary(); ts != "" {
+			details = append(details, "table census: "+ts+" (an uninterpreted table is not evidence of nothing)")
 		}
 		if c.Undated > 0 || c.RecordsFailed > 0 || c.ChunksFailed > 0 || c.LimitReached || c.UnlistedRecords > 0 {
 			details = append(details, fmt.Sprintf("parser coverage is incomplete; records_failed=%d chunks_failed=%d undated=%d capped=%t unmapped=%d. See source-level parser coverage before drawing conclusions.", c.RecordsFailed, c.ChunksFailed, c.Undated, c.LimitReached, c.Unmapped))

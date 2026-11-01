@@ -1,5 +1,7 @@
 package model
 
+import "fmt"
+
 // ParseCoverage records what a parser actually read, separately from timeline
 // events. Nil means not recorded (including older imports), never complete.
 type ParseCoverage struct {
@@ -19,6 +21,16 @@ type ParseCoverage struct {
 	LimitReached    bool            `json:"limit_reached"`
 	ByEvent         []CoverageEvent `json:"by_event,omitempty"`
 	UnlistedRecords int             `json:"unlisted_records,omitempty"`
+
+	// Tables is the table-level census of a database parser (SRUM): every
+	// provider table seen, its live rows and whether any row of it was
+	// interpreted. TablesUnlisted counts tables beyond the census limit.
+	// DatabaseState and CleanShutdown say how the database was last closed;
+	// CleanShutdown is nil when the parser does not record it.
+	Tables         []CoverageTable `json:"tables,omitempty"`
+	TablesUnlisted int             `json:"tables_unlisted,omitempty"`
+	DatabaseState  string          `json:"database_state,omitempty"`
+	CleanShutdown  *bool           `json:"clean_shutdown,omitempty"`
 
 	// HiveReplay is the transaction-log state of a registry hive: what the
 	// parser found when it opened it (clean, replayed, replayed_partial,
@@ -61,6 +73,44 @@ type HiveCompanion struct {
 	Detail    string `json:"detail,omitempty"`
 }
 
+// CoverageTable is one table of a database source: Rows live records,
+// Deleted records the engine marks deleted (never emitted), Interpreted whether
+// the parser turns the table's rows into events (Event names the type).
+type CoverageTable struct {
+	Table       string `json:"table"`
+	Rows        int    `json:"rows"`
+	Interpreted bool   `json:"interpreted"`
+	Event       string `json:"event,omitempty"`
+	Deleted     int    `json:"deleted,omitempty"`
+}
+
+// TableSummary is the census as one sentence: how many tables, how many were
+// interpreted and how many rows were not. It is empty when no census was
+// recorded, so a source without one never reads as fully counted.
+func (c *ParseCoverage) TableSummary() string {
+	if c == nil || (len(c.Tables) == 0 && c.TablesUnlisted == 0) {
+		return ""
+	}
+	n := len(c.Tables) + c.TablesUnlisted
+	interpreted, rows := 0, 0
+	for _, t := range c.Tables {
+		if t.Interpreted {
+			interpreted++
+		} else {
+			rows += t.Rows
+		}
+	}
+	noun := "tables"
+	if n == 1 {
+		noun = "table"
+	}
+	s := fmt.Sprintf("%d %s, %d interpreted, %d rows not interpreted", n, noun, interpreted, rows)
+	if c.TablesUnlisted > 0 {
+		s += fmt.Sprintf("; %d more tables not listed, so these counts are lower bounds", c.TablesUnlisted)
+	}
+	return s
+}
+
 type CoverageEvent struct {
 	Provider string `json:"provider"`
 	Channel  string `json:"channel"`
@@ -80,12 +130,12 @@ func (c *ParseCoverage) Measured() bool {
 	}
 	if c.EmittedEvents != nil || c.RecordsRead != 0 || c.Mapped != 0 || c.Unmapped != 0 ||
 		c.Undated != 0 || c.RecordsFailed != 0 || c.ChunksRead != 0 || c.ChunksFailed != 0 || c.LimitReached ||
-		len(c.ByEvent) > 0 || c.UnlistedRecords != 0 {
+		len(c.ByEvent) > 0 || c.UnlistedRecords != 0 || len(c.Tables) > 0 || c.TablesUnlisted != 0 {
 		return true
 	}
 	return c.CompanionOf == "" && c.HiveReplay == nil && len(c.Notes) == 0
 }
 
 func (c *ParseCoverage) Incomplete() bool {
-	return c != nil && (len(c.Notes) > 0 || c.Unmapped > 0 || c.Undated > 0 || c.RecordsFailed > 0 || c.ChunksFailed > 0 || c.LimitReached || c.UnlistedRecords > 0)
+	return c != nil && (len(c.Notes) > 0 || c.Unmapped > 0 || c.Undated > 0 || c.RecordsFailed > 0 || c.ChunksFailed > 0 || c.LimitReached || c.UnlistedRecords > 0 || c.TablesUnlisted > 0)
 }

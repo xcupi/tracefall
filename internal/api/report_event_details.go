@@ -13,6 +13,10 @@ func reportEventDetails(e model.Event) []report.KV {
 	switch e.EventType {
 	case model.EventWebRequest:
 		keys = append(keys, "method", "request_in_capture", "response_utc", "http_host", "uri", "status", "filename", "file_signature", "reassembly", "reassembly_note", "response_sha256", "response_size", "partial_content", "hash_of", "records_outcome")
+	case model.EventSRUMNetworkUsage, model.EventSRUMNetworkConnection, model.EventSRUMSDPNetwork:
+		// SRUM network columns are interval counters, not flows: the report must
+		// carry what the row does not show wherever it cites one.
+		keys = append(keys, "evidence_meaning", "limitations", "time_basis")
 	case model.EventClockObservation:
 		keys = append(keys, "source", "role", "subject_ip", "peer_ip", "observed_utc", "capture_utc", "meaning")
 	case model.EventMemoryFileContent:

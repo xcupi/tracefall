@@ -12,7 +12,7 @@ import (
 // Deliberate parity contract: JS must mirror model.ParseCoverage.Measured,
 // including historical {}, metadata-only and each nonzero measurement field.
 func TestUI_ParseCoverageMeasuredParity(t *testing.T) {
-	raws := []string{`null`, `{}`, `{"emitted_events":0}`, `{"notes":["reader caveat"]}`, `{"hive_replay":{"state":"clean"}}`, `{"hive_replay":{"state":"replayed"}}`, `{"hive_replay":{"state":"not_recoverable"},"notes":["recovery caveat"]}`, `{"companion_of":"SYSTEM"}`, `{"unknown_future":0,"another_unknown":false}`, `{"by_event":[{}],"notes":["caveat"]}`, `{"limit_reached":true,"notes":["caveat"]}`}
+	raws := []string{`null`, `{}`, `{"emitted_events":0}`, `{"notes":["reader caveat"]}`, `{"hive_replay":{"state":"clean"}}`, `{"hive_replay":{"state":"replayed"}}`, `{"hive_replay":{"state":"not_recoverable"},"notes":["recovery caveat"]}`, `{"companion_of":"SYSTEM"}`, `{"unknown_future":0,"another_unknown":false}`, `{"by_event":[{}],"notes":["caveat"]}`, `{"limit_reached":true,"notes":["caveat"]}`, `{"tables":[{}],"notes":["caveat"]}`, `{"tables_unlisted":1,"notes":["caveat"]}`}
 	for _, key := range []string{"records_read", "mapped", "unmapped", "undated", "records_failed", "chunks_read", "chunks_failed", "unlisted_records"} {
 		raws = append(raws, `{"`+key+`":1,"notes":["caveat"]}`)
 	}

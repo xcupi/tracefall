@@ -12,11 +12,21 @@
 // reported as a number and never given a name.
 //
 // Only the tables with a documented layout are interpreted (application
-// resource usage, network data usage, network connectivity, push notifications).
-// Every other table is counted and named in the parse notes, not guessed at.
+// resource usage, network data usage, network connectivity, push notifications,
+// and the SDP network provider, whose columns are also checked against the
+// database before a row is read). Every other table is counted, listed in the
+// coverage census and named in the parse notes, not guessed at. docs/srum-coverage.md
+// lists each table seen and why it is or is not interpreted.
+//
+// Network columns are interval totals by application, interface or object. They
+// are not flows: nothing in this package states or implies a destination, a
+// transfer or an outcome, and the events say so (evidence_meaning, limitations).
 // Records the engine has marked deleted are not emitted; their number is noted.
 //
-// The timestamps are the database's own (UTC, as a JET date-time). A database
+// The timestamps are the database's own: a JET date-time (OLE Automation date)
+// with no zone, read as UTC, which the SRUM service writes at the end of an
+// aggregation interval. They have not been calibrated against the host's real
+// clock or any other artifact. A database
 // copied while Windows was running can lack its newest records, which are still
 // in the SRU log files; the database header says when that is possible.
 package srum
@@ -51,6 +61,8 @@ const (
 	maxEvents    = 5_000_000
 	maxRawBytes  = 8 << 10
 	maxNotes     = 24
+	// maxCensusTables bounds the table census kept with the parse.
+	maxCensusTables = 64
 )
 
 type Parser struct{}
@@ -79,6 +91,7 @@ const (
 	kindNetUse
 	kindNetConn
 	kindPush
+	kindSDPNet
 )
 
 // The table names are the GUIDs of the SRUM providers, which do not change
@@ -88,7 +101,50 @@ var tableKinds = map[string]kind{
 	"{973F5D5C-1D90-4944-BE8E-24B94231A174}": kindNetUse,
 	"{DD6636C4-8929-4683-974E-22C046A43763}": kindNetConn,
 	"{D10CA2FE-6FCF-4F6D-848E-B2E99266FA86}": kindPush,
+	"{EEE2F477-0659-5C47-EF03-6D6BEFD441B3}": kindSDPNet,
 }
+
+// eventTypes names what each interpreted table becomes, for the census.
+var eventTypes = map[kind]string{
+	kindApp: model.EventSRUMAppUsage, kindNetUse: model.EventSRUMNetworkUsage, kindNetConn: model.EventSRUMNetworkConnection,
+	kindPush: model.EventSRUMPushNotification, kindSDPNet: model.EventSRUMSDPNetwork,
+}
+
+// requiredColumns is the layout a table must have before it is read, for the
+// tables whose layout is checked against the database rather than assumed.
+// The first four columns are the SRUM common ones.
+var requiredColumns = map[kind][]struct {
+	name string
+	typ  ese.ColType
+}{
+	kindSDPNet: {
+		{"AutoIncId", ese.TypeInt32}, {"TimeStamp", ese.TypeDateTime}, {"AppId", ese.TypeInt32}, {"UserId", ese.TypeInt32},
+		{"BytesInBound", ese.TypeInt64}, {"BytesOutBound", ese.TypeInt64}, {"BytesTotal", ese.TypeInt64},
+	},
+}
+
+// layoutMatches reports whether the table has every column the interpretation
+// reads, with the documented type. A table that does not is counted, not read.
+func layoutMatches(t *ese.Table, k kind) bool {
+	for _, c := range requiredColumns[k] {
+		col := t.Column(c.name)
+		if col == nil || col.Type != c.typ {
+			return false
+		}
+	}
+	return true
+}
+
+// Texts every network event carries so that a counter is never read as more
+// than it is. Destination and outcome come from network evidence, never from
+// SRUM.
+const (
+	meaningNetUse  = "Bytes the SRUM service recorded for one application on one network interface during an interval ending at the row time. An interval total by application and interface, not a flow."
+	meaningNetConn = "SRUM recorded that a network interface profile was connected, for the stated seconds, in an interval ending at the row time. An interval record of connectivity, not a flow."
+	meaningSDPNet  = "Inbound, outbound and total byte counters the SRUM SDP network provider wrote for one object (public tools describe it as, for example, a network adapter) during an interval ending at the row time. An interval total by object, not a flow."
+	limitsNet      = "Not a flow: carries no destination, remote address, protocol, port or content, and no direction beyond sent/received (in/out). It does not show that data left the host, that any remote party received it, or what happened to it. A destination or an outcome must come from network evidence, never from SRUM."
+	timeBasis      = "End of the aggregation interval, written by the SRUM service as a JET date-time (OLE Automation date: an 8-byte float of days since 1899-12-30; no zone is stored and the value is read as UTC). Not the moment of any action. The time has not been calibrated against the host's real clock or any other artifact."
+)
 
 type idEntry struct {
 	typ  int64
@@ -238,11 +294,23 @@ func (Parser) parse(ctx context.Context, absPath string, sink parsers.RecordSink
 	sort.Strings(names)
 	var deleted, unreadable int
 	moreTables := 0
+	var census []model.CoverageTable
+	addCensus := func(row model.CoverageTable) {
+		if len(census) < maxCensusTables {
+			census = append(census, row)
+		} else {
+			cov.TablesUnlisted++
+		}
+	}
 	for _, name := range names {
 		t := db.Table(name)
 		k, known := tableKinds[strings.ToUpper(name)]
 		if !known && !strings.HasPrefix(name, "{") {
 			continue // the engine's own tables, the id map, the checkpoint table
+		}
+		if known && !layoutMatches(t, k) {
+			note(fmt.Sprintf("table %s: its columns are not the documented layout, so it was counted and not interpreted", name))
+			known = false
 		}
 		if !known {
 			stats, err := t.Scan(func(ese.Row) error { return ctx.Err() })
@@ -253,6 +321,7 @@ func (Parser) parse(ctx context.Context, absPath string, sink parsers.RecordSink
 			cov.Unmapped += stats.Live
 			deleted += stats.Defunct
 			unreadable += stats.Unreadable
+			addCensus(model.CoverageTable{Table: name, Rows: stats.Live, Deleted: stats.Defunct})
 			if stats.Live > 0 {
 				if len(notes) < maxNotes {
 					note(fmt.Sprintf("table %s: %d records not interpreted (no known layout)", name, stats.Live))
@@ -311,7 +380,12 @@ func (Parser) parse(ctx context.Context, absPath string, sink parsers.RecordSink
 		}
 		deleted += stats.Defunct
 		unreadable += stats.Unreadable
+		addCensus(model.CoverageTable{Table: name, Rows: stats.Live, Interpreted: true, Event: eventTypes[k], Deleted: stats.Defunct})
 	}
+	cov.Tables = census
+	clean := db.State == ese.StateCleanShutdown
+	cov.CleanShutdown = &clean
+	cov.DatabaseState = state
 	if moreTables > 0 {
 		note(fmt.Sprintf("%d more tables with records were not interpreted", moreTables))
 	}
@@ -383,6 +457,7 @@ func build(r ese.Row, k kind, table string, ids map[int64]idEntry, state string)
 	}
 
 	ev := model.Event{ArtifactType: model.ArtifactSRUM, Parser: parserName, SourceReference: ref, Confidence: 0.9}
+	extra["time_basis"] = timeBasis
 
 	put("TimeStamp")
 	ts := get("TimeStamp")
@@ -398,7 +473,13 @@ func build(r ese.Row, k kind, table string, ids map[int64]idEntry, state string)
 	put("UserId")
 	if v := get("AppId"); !v.Null && v.Err == nil {
 		extra["app_id"] = strconv.FormatInt(v.Int(), 10)
-		resolveApp(&ev, extra, ids, v.Int())
+		if k == kindSDPNet {
+			resolveSDPObject(extra, ids, v.Int())
+		} else {
+			resolveApp(&ev, extra, ids, v.Int())
+		}
+	} else if k == kindSDPNet {
+		extra["sdp_object_resolved"] = "false"
 	} else {
 		extra["app_resolved"] = "false"
 	}
@@ -424,6 +505,7 @@ func build(r ese.Row, k kind, table string, ids map[int64]idEntry, state string)
 		iface(r, extra, &raw)
 		num("L2ProfileId", "l2_profile_id")
 		num("L2ProfileFlags", "l2_profile_flags")
+		extra["evidence_meaning"], extra["limitations"] = meaningNetUse, limitsNet
 	case kindNetConn:
 		ev.EventType = model.EventSRUMNetworkConnection
 		num("ConnectedTime", "connected_seconds")
@@ -438,6 +520,13 @@ func build(r ese.Row, k kind, table string, ids map[int64]idEntry, state string)
 		iface(r, extra, &raw)
 		num("L2ProfileId", "l2_profile_id")
 		num("L2ProfileFlags", "l2_profile_flags")
+		extra["evidence_meaning"], extra["limitations"] = meaningNetConn, limitsNet
+	case kindSDPNet:
+		ev.EventType = model.EventSRUMSDPNetwork
+		num("BytesInBound", "bytes_in_bound")
+		num("BytesOutBound", "bytes_out_bound")
+		num("BytesTotal", "bytes_total")
+		extra["evidence_meaning"], extra["limitations"] = meaningSDPNet, limitsNet
 	case kindPush:
 		ev.EventType = model.EventSRUMPushNotification
 		num("NotificationType", "notification_type")
@@ -463,6 +552,29 @@ func iface(r ese.Row, extra map[string]string, raw *[]string) {
 	it := luid >> 48
 	extra["interface_type"] = strconv.FormatUint(it, 10)
 	extra["interface_type_name"] = ifTypes[it]
+}
+
+// resolveSDPObject names the object an SDP row is about. The provider's ids are
+// of a type no cited source documents, and the object is not necessarily a
+// program, so it is never given a process name or path: the stored text is
+// shown as written, and an id the map does not hold stays a number.
+func resolveSDPObject(extra map[string]string, ids map[int64]idEntry, id int64) {
+	extra["sdp_object_resolved"] = "false"
+	e, ok := ids[id]
+	if !ok {
+		return
+	}
+	extra["sdp_object_id_type"] = idTypeName(e.typ)
+	if len(e.blob) == 0 {
+		return
+	}
+	text, ok := utf16Text(e.blob)
+	if !ok || e.typ == 3 {
+		extra["sdp_object_raw"] = hex.EncodeToString(e.blob)
+		return
+	}
+	extra["sdp_object"] = text
+	extra["sdp_object_resolved"] = "true"
 }
 
 func resolveApp(ev *model.Event, extra map[string]string, ids map[int64]idEntry, id int64) {

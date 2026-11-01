@@ -1023,6 +1023,10 @@ const (
 	// EventSRUMPushNotification is a push notification delivered to an
 	// application, with its payload size.
 	EventSRUMPushNotification = "srum_push_notification"
+	// EventSRUMSDPNetwork is one row of the SRUM "SDP Network Provider" table:
+	// inbound, outbound and total byte counters that the SRUM service wrote for
+	// an interval. The row names an object (see the srum docs), not a flow.
+	EventSRUMSDPNetwork = "srum_sdp_network"
 	// EventServiceMessage is a service message a daemon wrote to the system
 	// log and that bears on security or integrity: a database running with
 	// a passwordless administrator account, corrupt tables, a server
