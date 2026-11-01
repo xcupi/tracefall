@@ -1711,9 +1711,10 @@ through `cmdsem.Redact`, is capped at 2 KiB, and never enters `CommandLine` or
 `FilePath` of the event: a CmdLine resource is a command-line string, not a file
 and not a process start. `detection_id` is carried so several records of one
 detection are counted once by the rule; the records themselves stay separate
-events (the EVTX record id is part of their identity). Every other Defender ID
-(5007 configuration change, scan and update records, 1000-1002, 1150/1151) stays
-unmapped on purpose.
+events (the EVTX record id is part of their identity). Defender 5007 (configuration change) is mapped only for security-relevant settings, and
+5004 and 1013 are mapped as configuration/history records (see
+[evtx-coverage.md](evtx-coverage.md)); every other Defender ID (scan and update records,
+1000-1002, 1150/1151) stays unmapped on purpose.
 
 The support log reader streams the file (UTF-16LE/BE with or without a BOM, or
 UTF-8) with caps: 1 GiB scanned, 32K characters per line, 100000 events. Past a

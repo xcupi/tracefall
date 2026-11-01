@@ -261,7 +261,10 @@ deduplication and every detection rule consistent across sources.
 
 **Event IDs normalized.** Security 4624, 4625, **4634**, **4647**, 4648,
 4672, 4688, 4768, 4769, 4776; PowerShell 4103 and 4104; System 7045
-(Service Control Manager); Sysmon 1, 3, 11, 12/13 and 22.
+(Service Control Manager); Sysmon 1, 3, 11, 12/13 and 22. This list is the
+original core only: the full, current table of mapped and deliberately
+unmapped `(provider, channel, EventID)` families, with what each does and
+does not mean, is [evtx-coverage.md](evtx-coverage.md).
 
 **4634 and 4647 are new in this phase.** Both map to `EventLogoff` and
 close a session that 4624 opened — without them, "who was at this
