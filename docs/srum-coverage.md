@@ -39,7 +39,7 @@ How this is held, and where it is tested:
 | Consumer | Reads SRUM bytes? | Result |
 |---|---|---|
 | `internal/detect` (all rules) | No. No rule names a SRUM event type, artifact or counter key. | Nothing to fix. |
-| `internal/correlate` | No counter. The *entity* correlation (`entity.go`, `entity := e.ProcessName`) groups events by process name across artifact types, so a SRUM row whose application resolved to the same name is listed among them. It reads only the name; its sentence says nothing about traffic. Rows of the SDP table have no process name and never enter it. | Finding recorded, not a bytes consumer; pinned by `TestNoRuleCorrelationOrInvestigationConsumesSRUMNetworkCounters`. No change made (changing detection scope is out of this slice). |
+| `internal/correlate` | No counter. The *entity* correlation (`entity.go:34`, `entity := e.ProcessName`) groups events by process name across artifact types, so a SRUM row whose application resolved to the same name is listed among them. It reads only the name; its sentence says nothing about traffic. Rows of the SDP table have no process name and never enter it. | Finding recorded, not a bytes consumer; pinned by `TestNoRuleCorrelationOrInvestigationConsumesSRUMNetworkCounters`. No change made (changing detection scope is out of this slice). |
 | `internal/investigate` (scoring, summaries) | No. | Nothing to fix. |
 | `internal/narrative` | No. The packet reads only an allow-list of `Extra` keys (`logon_type`, `outcome`, `action`). | Pinned by `TestNarrativePacketNeverCarriesSRUMCounters`. |
 | `internal/report`, `internal/api/report*.go` | Not the counters. The report shows the limits (above). Process name or path, if any, is the event summary. | Added the limits to the report details. |
