@@ -193,6 +193,8 @@ func (p Parser) eventFor(r ntfs.UsnRecord, source string) (model.Event, model.Ra
 		"event_source":    "NTFS USN change journal ($UsnJrnl:$J)",
 		"usn_source_file": source,
 		"record_type":     recordKind(r.FileAttributes),
+		// What this row does and does not show.
+		"evidence_caveat": "A USN record states that the volume recorded a change to this file name and which reasons it recorded; it does not state who or what made the change, and it does not describe what the content became.",
 	}
 	if names := ntfs.UsnSourceNames(r.SourceInfo); len(names) > 0 {
 		extra["usn_source_info"] = strings.Join(names, "|")

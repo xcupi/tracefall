@@ -214,6 +214,14 @@ func (p Parser) eventsFor(r ntfs.Record, name ntfs.FileName, fullPath string, pa
 		"record_type":         recordType(r),
 		"mft_source_file":     source,
 	}
+	// What this row does and does not show. $STANDARD_INFORMATION times are
+	// writable by ordinary software, so they are an observation of what the
+	// table says, not proof of when something happened.
+	caveat := "These times are the filesystem's own record: $STANDARD_INFORMATION times can be set by software (timestomping), so they are what the table says, not proof of when the event happened; $FILE_NAME times are context for comparison, not separate events."
+	if !r.InUse {
+		caveat += " This record is marked free (not in use): a free record is not a deletion instant and is not a statement that, or when, the file was removed."
+	}
+	base["evidence_caveat"] = caveat
 	if !pathComplete {
 		base["path_resolution"] = "incomplete: the parent directory chain could not be walked to the volume root"
 	}
