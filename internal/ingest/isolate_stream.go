@@ -238,6 +238,24 @@ func (s Subprocess) RunStream(parent context.Context, p parsers.ArtifactParser, 
 	if emitted != received || (emitted > 0 && cov.Mapped == 0) || emitted < cov.Mapped || cov.RecordsRead < 0 || cov.Mapped < 0 || cov.Unmapped < 0 || cov.Mapped > cov.RecordsRead || cov.Unmapped != cov.RecordsRead-cov.Mapped || cov.Undated != undated {
 		return cov, &ProcessFailure{Reason: "stream coverage does not match received records"}
 	}
+	if n := cov.Ntfs; n != nil && n.Source != model.NtfsSourceLogFile {
+		// The reason classes must account for exactly the unmapped records, and a
+		// worker cannot report a failed source as a clean end of stream.
+		classes := []int{n.UnmappedNonBase, n.UnmappedNoName, n.UnmappedNoTime, n.UnmappedUndated, n.UnmappedUnsupported}
+		sum := 0
+		for _, k := range classes {
+			if k < 0 || k > cov.Unmapped {
+				return cov, &ProcessFailure{Reason: "stream coverage does not match received records"}
+			}
+			sum += k
+		}
+		if sum != cov.Unmapped || n.ZeroSlots < 0 || n.FreeMapped < 0 || n.FreeMapped > cov.Mapped || n.AttributeListRecords < 0 || n.NonRecordBytes < 0 {
+			return cov, &ProcessFailure{Reason: "stream coverage does not match received records"}
+		}
+	}
+	if cov.Ntfs != nil && cov.Ntfs.Failed {
+		return cov, &ProcessFailure{Reason: "worker reported a failed source without an error"}
+	}
 	if cov.LimitReached || cov.RecordsFailed != 0 || cov.ChunksFailed != 0 {
 		return cov, &ProcessFailure{Reason: "worker reported incomplete stream coverage without an error"}
 	}
