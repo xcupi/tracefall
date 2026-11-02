@@ -1520,7 +1520,7 @@ func (s *Service) importEvidence(caseID, collectionID string, sourceFileIDs []st
 					unprocessed = len(sourceFileIDs) - i
 					break
 				}
-				_ = s.store.MarkSourceFileFailed(id)
+				s.markStagedFailure(id, err)
 				errs = append(errs, fmt.Sprintf("%s: %v", sf.Path, err))
 				failures = append(failures, parseFailure(sf, ParseStageParse, err))
 				prog.fileParsed(0, true)

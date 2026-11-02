@@ -57,6 +57,16 @@ type NtfsCoverage struct {
 	FailureOffset *int64 `json:"failure_offset,omitempty"`
 }
 
+// IsNtfsArtifact reports whether an artifact type is one of the three NTFS
+// metadata sources that carry NtfsCoverage.
+func IsNtfsArtifact(artifactType string) bool {
+	return artifactType == ArtifactMFT || artifactType == ArtifactUsnJournal || artifactType == ArtifactLogFile
+}
+
+// NtfsFailedWithoutDetail is the sentence for an NTFS source that failed
+// before any coverage could be recorded (a crashed or killed worker).
+const NtfsFailedWithoutDetail = "FAILED: this source produced no events; it is not evidence of no activity (NTFS coverage detail: not recorded)"
+
 var ntfsFailureText = map[string]string{
 	NtfsFailureNotAJournal: "the file is not a USN change journal ($UsnJrnl:$J): no structurally valid journal record was found",
 	NtfsFailureNotAnMFT:    "the file is not an $MFT: no coherent FILE record was found",

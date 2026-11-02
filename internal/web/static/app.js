@@ -7022,7 +7022,7 @@ function evidenceDetails(f) {
       ${row("Embedded hash (from container)", f.embedded_hash)}
       ${row("Source collection", collectionLabel(f.collection_id))}
       ${row("Events imported", f.event_count ? String(f.event_count) : "")}
-      ${row("Parser coverage", parseCoverageText(f.parse_coverage))}
+      ${row("Parser coverage", parseCoverageText(f.parse_coverage) + (["ntfs_mft", "ntfs_usnjrnl", "ntfs_logfile"].includes(f.artifact_type) && !f.parse_coverage?.ntfs ? "; NTFS coverage detail: not recorded" : ""))}
     </div>
     ${renderCapabilityBoundary(f)}`;
 }
@@ -9239,7 +9239,7 @@ function renderSourceFileProvenance(p) {
     ${row("Artifact type", esc(artifactLabel(sf.artifact_type)))}
     ${row("Parser", sf.parser ? `<span class="mono small">${esc(sf.parser)}</span>` : `<span class="muted small">${esc(LEGACY_UNAVAILABLE)}</span>`)}
     ${row("Status", esc(SOURCE_FILE_STATUS_LABELS[sf.import_status] || sf.import_status))}
-    ${row("Parser coverage", esc(parseCoverageText(sf.parse_coverage)))}
+    ${row("Parser coverage", esc(parseCoverageText(sf.parse_coverage) + (["ntfs_mft", "ntfs_usnjrnl", "ntfs_logfile"].includes(sf.artifact_type) && !sf.parse_coverage?.ntfs ? "; NTFS coverage detail: not recorded" : "")))}
     ${row("Imported", sf.imported_at ? esc(fmtTime(sf.imported_at)) : `<span class="muted small">Not recorded</span>`)}
     ${sf.deleted ? row("Deleted", esc(fmtTime(sf.deleted_at))) : ""}
     ${row("File hash (SHA-256)", sf.sha256 ? `<span class="mono small">${esc(sf.sha256)}</span>` : `<span class="muted small">Not recorded</span>`)}
@@ -9265,10 +9265,51 @@ function parseCoverageText(c) {
   // this explicit field list in parity with TestUI_ParseCoverageMeasuredParity.
   const measured = c.emitted_events != null ||
     ["records_read", "mapped", "unmapped", "undated", "records_failed", "chunks_read", "chunks_failed", "unlisted_records"].some(k => (c[k] ?? 0) !== 0) ||
-    c.limit_reached === true || (c.by_event || []).length > 0 || (c.tables || []).length > 0 || (c.tables_unlisted ?? 0) !== 0 ||
+    c.limit_reached === true || (c.by_event || []).length > 0 || (c.tables || []).length > 0 || (c.tables_unlisted ?? 0) !== 0 || c.ntfs != null ||
     (!c.companion_of && c.hive_replay == null && !(c.notes || []).length);
   let text = measured ? `read=${c.records_read ?? 0} mapped=${c.mapped ?? 0} unmapped=${c.unmapped ?? 0} undated=${c.undated ?? 0} records_failed=${c.records_failed ?? 0} chunks_failed=${c.chunks_failed ?? 0} capped=${!!c.limit_reached}` : "Coverage not recorded";
   if ((c.notes || []).length) text += "; " + c.notes.join("; ");
+  if (c.ntfs) {
+    // Mirror model.ParseCoverage.NtfsSummary (kept in parity by TestUI_NtfsSummaryParity).
+    const n = c.ntfs, N = v => v ?? 0;
+    const label = { mft: "$MFT", usn: "$UsnJrnl:$J", logfile: "$LogFile" }[n.source] || "NTFS source";
+    const why = { not_a_usn_journal: "the file is not a USN change journal ($UsnJrnl:$J): no structurally valid journal record was found",
+      not_an_mft: "the file is not an $MFT: no coherent FILE record was found",
+      not_a_logfile: "the file is not an NTFS $LogFile: no coherent restart page was found",
+      corrupt: "the structure is damaged and was refused rather than guessed at",
+      unsupported_version: "the record version is not decoded by this build",
+      limit: "a safety limit was reached", other: "the parser stopped with an error" };
+    const emitted = c.emitted_events != null ? c.emitted_events : N(c.mapped);
+    const parts = [];
+    if (n.failed) {
+      let t = `${label}: FAILED, this source produced no events; it is not evidence of no activity`;
+      if (why[n.failure_class]) { t += ` (${why[n.failure_class]}`; if (n.failure_offset != null) t += `; at offset ${n.failure_offset}`; t += ")"; }
+      parts.push(t);
+    }
+    if (n.source === "logfile") {
+      parts.push(`${label}: ${N(n.log_records)} log records decoded, ${N(n.log_records_retained)} kept as detail; log records carry no timestamp, so this is transaction metadata and not a timeline (${emitted} events)`);
+    } else {
+      parts.push(`${label}: ${N(c.records_read)} records read, ${N(c.mapped)} mapped, ${N(c.unmapped)} unmapped, ${emitted} events emitted`);
+      const w = [];
+      const add = (k, t) => { if (N(k) > 0) w.push(`${k} ${t}`); };
+      add(n.unmapped_non_base, "extension (non-base) records, which belong to a base record");
+      add(n.unmapped_no_name, "without a file name");
+      add(n.unmapped_no_time, "without a standard-information time");
+      add(n.unmapped_undated, "without a usable timestamp");
+      add(n.unmapped_unsupported_version, "of a record version not decoded");
+      if (w.length) parts.push("unmapped because: " + w.join("; "));
+      if (N(n.zero_slots) > 0) parts.push(`${n.zero_slots} empty slots were skipped and are not counted as records`);
+      if (N(n.free_mapped) > 0) parts.push(`${n.free_mapped} mapped records are marked free (not in use); they are emitted labelled as free, and a free record is not a deletion time`);
+      if (N(n.attribute_list_records) > 0) parts.push(`${n.attribute_list_records} records with an attribute list, whose names and sizes may be incomplete`);
+    }
+    if (N(n.non_record_bytes) > 0) {
+      let t = `${n.non_record_bytes} bytes were not decoded as journal records`;
+      if (n.first_non_record_offset != null) t += ` (first at offset ${n.first_non_record_offset})`;
+      parts.push(t + "; source coverage is not complete");
+    }
+    if (c.limit_reached) parts.push("reading stopped at a safety limit; the rest of the source was not read");
+    text += "; " + parts.join("; ");
+  }
   if (measured && ((c.tables || []).length || c.tables_unlisted)) {
     // Table census of a database source (SRUM): mirror model.ParseCoverage.TableSummary.
     const tl = c.tables || [], total = tl.length + (c.tables_unlisted || 0);

@@ -5,6 +5,7 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	"io"
@@ -212,7 +213,12 @@ func (s *Service) stageStream(caseID, collectionID string, sf model.SourceFile, 
 	if err != nil {
 		spool.close()
 		if cov != nil && cov.LimitReached {
-			return pendingImport{}, &ingest.ProcessFailure{Reason: err.Error()}
+			err = &ingest.ProcessFailure{Reason: err.Error()}
+		}
+		if cov != nil && cov.Ntfs != nil && cov.Ntfs.Failed {
+			// Keep what the parser measured: a failed NTFS source stays
+			// explainable (class, offset, bytes) instead of reading as nothing.
+			return pendingImport{}, &coverageFailure{err: err, cov: cov}
 		}
 		return pendingImport{}, err
 	}
@@ -252,4 +258,24 @@ func (p pendingImport) eachBatch(visit func([]model.Event, []model.RawEvidence) 
 		}
 		return visit(b.Events, b.Raw)
 	})
+}
+
+// coverageFailure carries the parser's coverage alongside a failed source.
+type coverageFailure struct {
+	err error
+	cov *model.ParseCoverage
+}
+
+func (e *coverageFailure) Error() string { return e.err.Error() }
+func (e *coverageFailure) Unwrap() error { return e.err }
+
+// markStagedFailure marks a source failed, keeping coverage when the failure
+// carried it.
+func (s *Service) markStagedFailure(id string, err error) {
+	var cf *coverageFailure
+	if errors.As(err, &cf) {
+		_ = s.store.MarkSourceFileFailedWithCoverage(id, cf.cov)
+		return
+	}
+	_ = s.store.MarkSourceFileFailed(id)
 }

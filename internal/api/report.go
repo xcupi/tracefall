@@ -648,6 +648,12 @@ func reportCoverage(files []model.SourceFile) report.Coverage {
 			if len(c.Notes) > 0 {
 				summary += "; " + strings.Join(c.Notes, "; ")
 			}
+			if ns := c.NtfsSummary(); ns != "" {
+				summary += "; " + ns
+			} else if model.IsNtfsArtifact(sf.ArtifactType) {
+				// Imported before NTFS detail was recorded: unknown, not complete.
+				summary += "; NTFS coverage detail: not recorded"
+			}
 			for _, v := range c.ByEvent {
 				summary += fmt.Sprintf("; %s/%s %d: %d read, %d mapped", v.Channel, v.Provider, v.EventID, v.Records, v.Mapped)
 			}
@@ -680,6 +686,12 @@ func reportCoverage(files []model.SourceFile) report.Coverage {
 				summary += "; hive transaction logs: not recorded"
 			}
 			out.ParserDiagnostics = append(out.ParserDiagnostics, report.KV{Key: sf.Path, Value: summary})
+		}
+	}
+	for _, sf := range files {
+		if sf.ParseCoverage == nil && sf.ImportStatus == model.SourceFileFailed && model.IsNtfsArtifact(sf.ArtifactType) {
+			// The worker died before it could report: still a coverage fact.
+			out.ParserDiagnostics = append(out.ParserDiagnostics, report.KV{Key: sf.Path, Value: model.NtfsFailedWithoutDetail})
 		}
 	}
 	sort.Slice(out.ParserDiagnostics, func(i, j int) bool { return out.ParserDiagnostics[i].Key < out.ParserDiagnostics[j].Key })
@@ -817,6 +829,10 @@ func reportLimitations(d report.Data, in reportInputs) []string {
 	unmappedOnly, unmappedRecords := 0, 0
 	for _, sf := range in.sourceFiles {
 		c := sf.ParseCoverage
+		if c == nil && sf.ImportStatus == model.SourceFileFailed && model.IsNtfsArtifact(sf.ArtifactType) {
+			problems = append(problems, sf.Path+": "+model.NtfsFailedWithoutDetail)
+			continue
+		}
 		if !c.Incomplete() {
 			continue
 		}
@@ -833,6 +849,9 @@ func reportLimitations(d report.Data, in reportInputs) []string {
 		}
 		if ts := c.TableSummary(); ts != "" {
 			details = append(details, "table census: "+ts+" (an uninterpreted table is not evidence of nothing)")
+		}
+		if ns := c.NtfsSummary(); ns != "" {
+			details = append(details, ns)
 		}
 		if c.Undated > 0 || c.RecordsFailed > 0 || c.ChunksFailed > 0 || c.LimitReached || c.UnlistedRecords > 0 {
 			details = append(details, fmt.Sprintf("parser coverage is incomplete; records_failed=%d chunks_failed=%d undated=%d capped=%t unmapped=%d. See source-level parser coverage before drawing conclusions.", c.RecordsFailed, c.ChunksFailed, c.Undated, c.LimitReached, c.Unmapped))

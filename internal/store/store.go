@@ -694,6 +694,25 @@ func (s *Store) MarkSourceFileFailed(id string) error {
 	return err
 }
 
+// MarkSourceFileFailedWithCoverage records a failed source together with what
+// the parser measured before it stopped, so the failure stays explainable. The
+// stored coverage states zero emitted events: nothing from a failed source is
+// imported, whatever batches the parser had already produced.
+func (s *Store) MarkSourceFileFailedWithCoverage(id string, coverage *model.ParseCoverage) error {
+	if coverage == nil {
+		return s.MarkSourceFileFailed(id)
+	}
+	c := *coverage
+	zero := 0
+	c.EmittedEvents = &zero
+	b, err := json.Marshal(&c)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.Exec(`UPDATE source_files SET import_status = ?, parse_coverage_json = ? WHERE id = ? AND import_status <> `+importingSQL, model.SourceFileFailed, string(b), id)
+	return err
+}
+
 // SoftDeleteSourceFile marks a source file removed as of deletedAt
 // without deleting the row -- see model.SourceFile.DeletedAt's doc
 // comment. Active listings (ListSourceFiles, ListSourceFilesByCollection)
