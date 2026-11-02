@@ -32,7 +32,7 @@ How this is held, and where it is tested:
   plumbing files names SRUM; if a case with huge counters produces a finding, a
   non-entity correlation or an investigation that cites them or words a transfer;
   if the narrative packet carries a counter; or if a line of `app.js` that names
-  SRUM words a transfer.
+  SRUM words a transfer. The guard is a tripwire, not proof: it matches names and string constructions, and a determined change can still avoid it. Only code review shows that no decision reads SRUM counters; the consumer audit in HANDOFF was clean at the reviewed commit.
 
 ### Audit of every consumer of SRUM events
 
@@ -150,7 +150,9 @@ the Zimmerman SrumECmd README lists `NetworkBytes` among the tables seen on
 Server 2022 and says "What they measure is in `ExeInfo` (for example `Total`, a
 volume, a network adapter)"
 (<https://github.com/EricZimmerman/Srum/blob/master/README.md>). (b) Every column
-read exists in both databases with the documented type. (c) Decoded values equal
+read exists in both databases examined, with the ESE type found there; the cited sources name the
+columns but none of them documents the column types, so the types are observed, not documented,
+and "byte counters" is the wording of public tools, whose unit and scope were not verified here. (c) Decoded values equal
 the second decoder (see Verification). (d) What a row does and does not show is
 stated here and in each event.
 
@@ -214,7 +216,7 @@ is not interpreted is counted the same way.
 examined, so they were not re-verified against real data in this slice.
 
 A table that is known by GUID is read only when the columns it needs are present
-with the documented type; this check is new for the SDP table. A table with the
+with the type observed in the databases examined; this check is new for the SDP table. A table with the
 same GUID and another layout is counted, not interpreted, and a note says so
 (`TestParse_SDPNetworkWithAnotherSchemaStaysCountedNotInterpreted`). The four
 earlier tables keep their previous behaviour.

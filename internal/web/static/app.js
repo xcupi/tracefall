@@ -991,7 +991,7 @@ const EVENT_CATEGORIES = {
   srum_network_usage: "network",
   srum_network_connection: "network",
   srum_push_notification: "other",
-  srum_sdp_network: "other",
+  srum_sdp_network: "network",
   // Phase 4 additions.
   logon_explicit_credentials: "authentication",
   privileged_logon: "authentication",

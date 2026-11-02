@@ -49,3 +49,14 @@ func TestParseCoverageMeasuredMetricsWithMetadata(t *testing.T) {
 		})
 	}
 }
+
+// A census that could not list every table must never read as complete.
+func TestIncompleteWhenTablesAreUnlisted(t *testing.T) {
+	c := &ParseCoverage{Tables: []CoverageTable{{Table: "{T}", Rows: 1, Interpreted: true}}, TablesUnlisted: 3}
+	if !c.Incomplete() {
+		t.Error("coverage with unlisted tables reads as complete")
+	}
+	if (&ParseCoverage{Tables: []CoverageTable{{Table: "{T}", Rows: 1, Interpreted: true}}}).Incomplete() {
+		t.Error("a fully listed, fully interpreted census must not read as incomplete")
+	}
+}

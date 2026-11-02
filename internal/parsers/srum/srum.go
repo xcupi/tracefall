@@ -141,8 +141,8 @@ func layoutMatches(t *ese.Table, k kind) bool {
 const (
 	meaningNetUse  = "Bytes the SRUM service recorded for one application on one network interface during an interval ending at the row time. An interval total by application and interface, not a flow."
 	meaningNetConn = "SRUM recorded that a network interface profile was connected, for the stated seconds, in an interval ending at the row time. An interval record of connectivity, not a flow."
-	meaningSDPNet  = "Inbound, outbound and total byte counters the SRUM SDP network provider wrote for one object (public tools describe it as, for example, a network adapter) during an interval ending at the row time. An interval total by object, not a flow."
-	limitsNet      = "Not a flow: carries no destination, remote address, protocol, port or content, and no direction beyond sent/received (in/out). It does not show that data left the host, that any remote party received it, or what happened to it. A destination or an outcome must come from network evidence, never from SRUM."
+	meaningSDPNet  = "Inbound, outbound and total counters the SRUM SDP network provider wrote for one object (public tools call them byte counters and the object, for example, a network adapter; the unit, the scope and what the object is have NOT been verified here) during an interval ending at the row time. An interval total by object, not a flow."
+	limitsNet      = "Not a flow: carries no destination, remote address, protocol, port or content, and no direction beyond the sent and received counters as stored (how they relate to in and out is not verified). It does not show that data left the host, that any remote party received it, or what happened to it. A destination or an outcome must come from network evidence, never from SRUM."
 	limitsSDPTotal = "BytesTotal is shown as stored: it is not the sum of the inbound and outbound counters in the databases examined, and no cited source explains it, so it is neither added to nor compared with them."
 	timeBasis      = "End of the aggregation interval, written by the SRUM service as a JET date-time (OLE Automation date: an 8-byte float of days since 1899-12-30; no zone is stored and the value is read as UTC). Not the moment of any action. The time has not been calibrated against the host's real clock or any other artifact."
 )
@@ -573,6 +573,10 @@ func resolveSDPObject(extra map[string]string, ids map[int64]idEntry, id int64) 
 	if !ok || e.typ == 3 {
 		extra["sdp_object_raw"] = hex.EncodeToString(e.blob)
 		return
+	}
+	if len(text) > 512 {
+		text = text[:512]
+		extra["sdp_object_truncated"] = "true"
 	}
 	extra["sdp_object"] = text
 	extra["sdp_object_resolved"] = "true"

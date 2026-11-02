@@ -136,6 +136,12 @@ func TestNarrativePacketNeverCarriesSRUMCounters(t *testing.T) {
 // them may so much as name a SRUM event type or a SRUM counter.
 var consumerDirs = []string{"detect", "correlate", "investigate", "report", "narrative", "attck", "egress", "enrich", "gate", "authseq", "clockskew"}
 
+// Dynamic ways to build a counter or event-type name defeat the literal match
+// above, so they are matched too: a prefix or concatenation that spells part of
+// a counter or SRUM type. This guard is a tripwire, not proof: only code review
+// shows that no decision reads SRUM counters.
+var dynamicNames = regexp.MustCompile(`(?i)"(bytes|srum)[_a-z]*"\s*\+|\+\s*"(_?sent|_?recv|_?received|_?network_usage|_?sdp[_a-z]*)"|(HasPrefix|Contains|Index)\([^)]*"(bytes|srum)`)
+
 var forbiddenInConsumers = regexp.MustCompile(`EventSRUM|ArtifactSRUM|srum_(app|network|sdp|push)|"(bytes_sent|bytes_received|bytes_in_bound|bytes_out_bound|bytes_total)"`)
 
 func TestNoDecisionCodeNamesSRUMOrItsCounters(t *testing.T) {
@@ -199,6 +205,41 @@ func TestUIStringsAboutSRUMStateNoTransfer(t *testing.T) {
 		l := strings.ToLower(line)
 		if (strings.Contains(l, "srum") || strings.Contains(l, "bytes_sent") || strings.Contains(l, "bytes_received") || strings.Contains(l, "bytes_in_bound") || strings.Contains(l, "bytes_out_bound")) && claim.MatchString(line) {
 			t.Errorf("app.js:%d words a transfer next to SRUM: %s", i+1, strings.TrimSpace(line))
+		}
+	}
+}
+
+func TestNoDecisionCodeBuildsCounterNamesDynamically(t *testing.T) {
+	for _, d := range consumerDirs {
+		dir := filepath.Join("..", d)
+		if _, err := os.Stat(dir); err != nil {
+			continue
+		}
+		filepath.WalkDir(dir, func(p string, de fs.DirEntry, err error) error {
+			if err != nil || de.IsDir() || !strings.HasSuffix(p, ".go") || strings.HasSuffix(p, "_test.go") {
+				return nil
+			}
+			b, _ := os.ReadFile(p)
+			for i, line := range strings.Split(string(b), "\n") {
+				if dynamicNames.MatchString(line) {
+					t.Errorf("%s:%d builds or matches a SRUM counter or type name dynamically: %s", p, i+1, strings.TrimSpace(line))
+				}
+			}
+			return nil
+		})
+	}
+}
+
+// The matcher itself must catch the constructions it exists for.
+func TestDynamicNameMatcherCatchesTheBypasses(t *testing.T) {
+	for _, s := range []string{`k := "bytes_" + dir`, `k := "srum" + "_network_usage"`, `if strings.HasPrefix(key, "bytes") {`, `x := base + "_sent"`} {
+		if !dynamicNames.MatchString(s) {
+			t.Errorf("not caught: %s", s)
+		}
+	}
+	for _, s := range []string{`x := "hello" + name`, `strings.HasPrefix(p, "/tmp")`} {
+		if dynamicNames.MatchString(s) {
+			t.Errorf("false positive: %s", s)
 		}
 	}
 }
