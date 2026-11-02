@@ -123,6 +123,13 @@ func (p Parser) Parse(absPath string) (parsers.ParseResult, error) {
 		return parsers.ParseResult{}, fmt.Errorf("logfile: %w", err)
 	}
 
+	// The log yields no timeline events by design; say so as a measured zero,
+	// with the records it did decode, rather than leaving the source silent.
+	zero := 0
+	out.Coverage = &model.ParseCoverage{
+		EmittedEvents: &zero, RecordsRead: summary.RecordsParsed, Unmapped: summary.RecordsParsed,
+		Ntfs: &model.NtfsCoverage{Source: model.NtfsSourceLogFile, LogRecords: summary.RecordsParsed, LogRecordsRetained: retained},
+	}
 	out.Raw = append(out.Raw, model.RawEvidence{
 		SourceReference: "logfile:summary",
 		Raw:             summaryBlob(summary, source, retained),
