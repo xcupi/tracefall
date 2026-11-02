@@ -383,9 +383,9 @@ func recordType(r ntfs.Record) string {
 func timestampMeaning(label string) string {
 	switch label {
 	case "created":
-		return "$STANDARD_INFORMATION creation time (file birth)"
+		return "$STANDARD_INFORMATION creation time as recorded (the attribute user-level tools can change; not proof of when the file first existed)"
 	case "modified":
-		return "$STANDARD_INFORMATION modification time (file content last written)"
+		return "$STANDARD_INFORMATION modification time as recorded (the attribute user-level tools can change; not proof of when content was last written)"
 	case "changed":
 		return "$STANDARD_INFORMATION MFT change time (record metadata last changed)"
 	case "accessed":

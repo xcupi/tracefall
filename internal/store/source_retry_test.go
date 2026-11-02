@@ -44,3 +44,25 @@ func TestFailedSourceRetryRefusesHistoricalPartialRows(t *testing.T) {
 		})
 	}
 }
+
+// A failed source keeps the coverage the parser measured, but never claims it
+// emitted events: whatever batches existed were discarded (added after review).
+func TestMarkSourceFileFailedWithCoverageForcesZeroEmitted(t *testing.T) {
+	s := openTest(t)
+	seedCaseAndSourceFile(t, s)
+	five := 5
+	if err := s.MarkSourceFileFailedWithCoverage("sf-1", &model.ParseCoverage{RecordsRead: 9, EmittedEvents: &five}); err != nil {
+		t.Fatal(err)
+	}
+	sf, err := s.GetSourceFile("sf-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := sf.ParseCoverage
+	if sf.ImportStatus != model.SourceFileFailed || c == nil || c.RecordsRead != 9 || c.EmittedEvents == nil || *c.EmittedEvents != 0 {
+		t.Fatalf("status=%s coverage=%+v", sf.ImportStatus, c)
+	}
+	if five != 5 {
+		t.Error("the caller's coverage must not be modified")
+	}
+}

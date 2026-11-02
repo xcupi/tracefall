@@ -259,3 +259,10 @@ API. Results, counts only:
   says nothing about other volumes, cluster sizes or Windows versions.
 - The 1 GiB wire and staging budgets were not changed and not re-measured here;
   a source that exceeds them still fails as a limit.
+- The full-size run: `/analyze` on a source of about 4 million events did not finish in 50 minutes
+  and `report.html` took about 22 to 26 minutes at that size, so findings and correlations were
+  compared before and after only on reduced copies. The slowness was not investigated here.
+- The non-record word count for the readable `$J` is 537 in Tracefall and 515 in the second
+  decoder; the difference is attributed to the counting unit and was not further resolved.
+- `$MFT` timestamps are the `$STANDARD_INFORMATION` values as recorded; these can be changed by
+  user-level tools and are never read as proof of creation or last write.

@@ -123,3 +123,19 @@ func TestReport_NTFSSourceShowsEveryReasonClass(t *testing.T) {
 		}
 	}
 }
+
+// A failed NTFS source whose worker died before reporting has NO stored
+// coverage; the report must still list it, and in the limitations (added after
+// independent review: the diagnostics entry had no test).
+func TestReport_FailedNTFSSourceWithNoStoredCoverageIsStillListed(t *testing.T) {
+	sf := model.SourceFile{Path: "vol/$Extend/$J", ArtifactType: model.ArtifactUsnJournal, ImportStatus: model.SourceFileFailed}
+	got := reportCoverage([]model.SourceFile{sf})
+	if len(got.ParserDiagnostics) != 1 || got.ParserDiagnostics[0].Key != sf.Path ||
+		!strings.Contains(got.ParserDiagnostics[0].Value, "not evidence of no activity") {
+		t.Fatalf("failed source with no coverage omitted or unworded: %+v", got.ParserDiagnostics)
+	}
+	lim := strings.Join(reportLimitations(report.Data{}, reportInputs{sourceFiles: []model.SourceFile{sf}}), "\n")
+	if !strings.Contains(lim, "not evidence of no activity") {
+		t.Errorf("limitations omit the failed source: %s", lim)
+	}
+}

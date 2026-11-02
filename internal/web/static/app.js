@@ -7022,7 +7022,7 @@ function evidenceDetails(f) {
       ${row("Embedded hash (from container)", f.embedded_hash)}
       ${row("Source collection", collectionLabel(f.collection_id))}
       ${row("Events imported", f.event_count ? String(f.event_count) : "")}
-      ${row("Parser coverage", parseCoverageText(f.parse_coverage) + (["ntfs_mft", "ntfs_usnjrnl", "ntfs_logfile"].includes(f.artifact_type) && !f.parse_coverage?.ntfs ? "; NTFS coverage detail: not recorded" : ""))}
+      ${row("Parser coverage", parseCoverageText(f.parse_coverage) + (["ntfs_mft", "ntfs_usnjrnl", "ntfs_logfile"].includes(f.artifact_type) && !f.parse_coverage?.ntfs ? "; NTFS coverage detail: not recorded" + (f.import_status === "failed" ? "; this source produced no events, which is not evidence of no activity" : "") : ""))}
     </div>
     ${renderCapabilityBoundary(f)}`;
 }
@@ -9239,7 +9239,7 @@ function renderSourceFileProvenance(p) {
     ${row("Artifact type", esc(artifactLabel(sf.artifact_type)))}
     ${row("Parser", sf.parser ? `<span class="mono small">${esc(sf.parser)}</span>` : `<span class="muted small">${esc(LEGACY_UNAVAILABLE)}</span>`)}
     ${row("Status", esc(SOURCE_FILE_STATUS_LABELS[sf.import_status] || sf.import_status))}
-    ${row("Parser coverage", esc(parseCoverageText(sf.parse_coverage) + (["ntfs_mft", "ntfs_usnjrnl", "ntfs_logfile"].includes(sf.artifact_type) && !sf.parse_coverage?.ntfs ? "; NTFS coverage detail: not recorded" : "")))}
+    ${row("Parser coverage", esc(parseCoverageText(sf.parse_coverage) + (["ntfs_mft", "ntfs_usnjrnl", "ntfs_logfile"].includes(sf.artifact_type) && !sf.parse_coverage?.ntfs ? "; NTFS coverage detail: not recorded" + (sf.import_status === "failed" ? "; this source produced no events, which is not evidence of no activity" : "") : "")))}
     ${row("Imported", sf.imported_at ? esc(fmtTime(sf.imported_at)) : `<span class="muted small">Not recorded</span>`)}
     ${sf.deleted ? row("Deleted", esc(fmtTime(sf.deleted_at))) : ""}
     ${row("File hash (SHA-256)", sf.sha256 ? `<span class="mono small">${esc(sf.sha256)}</span>` : `<span class="muted small">Not recorded</span>`)}
