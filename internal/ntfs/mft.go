@@ -627,7 +627,33 @@ type ScanOptions struct {
 	// Progress is called periodically with the number of records read so
 	// far. Nil disables reporting.
 	Progress func(recordsRead int)
+	// EmptySlot is called for every slot that holds no record (all zero or
+	// not a usable FILE record) and is skipped, so a caller can state how many
+	// slots were not counted as records. Nil disables it.
+	EmptySlot func(index int)
 }
+
+// OffsetError carries the byte offset in the source at which a structural
+// refusal happened. Its message is the wrapped error's, unchanged; callers
+// read the offset with ErrorOffset.
+type OffsetError struct {
+	Offset int64
+	Err    error
+}
+
+func (e *OffsetError) Error() string { return e.Err.Error() }
+func (e *OffsetError) Unwrap() error { return e.Err }
+
+// ErrorOffset returns the source offset recorded by the nearest OffsetError.
+func ErrorOffset(err error) (int64, bool) {
+	var oe *OffsetError
+	if errors.As(err, &oe) {
+		return oe.Offset, true
+	}
+	return 0, false
+}
+
+func atOffset(off int64, err error) error { return &OffsetError{Offset: off, Err: err} }
 
 // ErrCancelled is returned by Scan when Cancelled reported true.
 var ErrCancelled = errors.New("ntfs: scan cancelled")
@@ -713,7 +739,7 @@ func Scan(path string, opts ScanOptions, fn func(Record) error) error {
 			if n < 48 {
 				break
 			}
-			return fmt.Errorf("%w: trailing partial record of %d bytes", ErrCorrupt, n)
+			return atOffset(int64(index)*int64(recordSize), fmt.Errorf("%w: trailing partial record of %d bytes", ErrCorrupt, n))
 		}
 		if rerr != nil {
 			return rerr
@@ -728,22 +754,25 @@ func Scan(path string, opts ScanOptions, fn func(Record) error) error {
 					}
 				}
 				if nonzero {
-					return fmt.Errorf("%w: non-FILE nonzero slot %d", ErrCorrupt, index)
+					return atOffset(int64(index)*int64(recordSize), fmt.Errorf("%w: non-FILE nonzero slot %d", ErrCorrupt, index))
 				}
 			} else if !Sniff(buf) {
-				return fmt.Errorf("%w: inconsistent FILE header at slot %d", ErrCorrupt, index)
+				return atOffset(int64(index)*int64(recordSize), fmt.Errorf("%w: inconsistent FILE header at slot %d", ErrCorrupt, index))
 			}
 		}
 		rec, ok, perr := ParseRecord(buf, uint64(index), lim)
 		if perr != nil {
 			if opts.Strict {
-				return perr
+				return atOffset(int64(index)*int64(recordSize), perr)
 			}
 			// One unparseable record must not end the scan.
 			rec = Record{RecordNumber: uint64(index), Warnings: []string{perr.Error()}}
 			ok = true
 		}
 		if !ok && len(rec.Warnings) == 0 {
+			if opts.EmptySlot != nil {
+				opts.EmptySlot(index)
+			}
 			continue // unused slack
 		}
 		if err := fn(rec); err != nil {

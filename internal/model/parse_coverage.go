@@ -43,6 +43,10 @@ type ParseCoverage struct {
 	// that was extracted only to be read together with the named hive. The file
 	// is not independent evidence: it produces no events and is not a gap.
 	CompanionOf string `json:"companion_of,omitempty"`
+
+	// Ntfs is the filesystem-specific account of an $MFT, $UsnJrnl:$J or
+	// $LogFile. Nil means not recorded (older imports), never complete.
+	Ntfs *NtfsCoverage `json:"ntfs,omitempty"`
 }
 
 // HiveReplay records how a registry hive was read with respect to its
@@ -130,12 +134,12 @@ func (c *ParseCoverage) Measured() bool {
 	}
 	if c.EmittedEvents != nil || c.RecordsRead != 0 || c.Mapped != 0 || c.Unmapped != 0 ||
 		c.Undated != 0 || c.RecordsFailed != 0 || c.ChunksRead != 0 || c.ChunksFailed != 0 || c.LimitReached ||
-		len(c.ByEvent) > 0 || c.UnlistedRecords != 0 || len(c.Tables) > 0 || c.TablesUnlisted != 0 {
+		len(c.ByEvent) > 0 || c.UnlistedRecords != 0 || len(c.Tables) > 0 || c.TablesUnlisted != 0 || c.Ntfs != nil {
 		return true
 	}
 	return c.CompanionOf == "" && c.HiveReplay == nil && len(c.Notes) == 0
 }
 
 func (c *ParseCoverage) Incomplete() bool {
-	return c != nil && (len(c.Notes) > 0 || c.Unmapped > 0 || c.Undated > 0 || c.RecordsFailed > 0 || c.ChunksFailed > 0 || c.LimitReached || c.UnlistedRecords > 0 || c.TablesUnlisted > 0)
+	return c != nil && (len(c.Notes) > 0 || c.Unmapped > 0 || c.Undated > 0 || c.RecordsFailed > 0 || c.ChunksFailed > 0 || c.LimitReached || c.UnlistedRecords > 0 || c.TablesUnlisted > 0 || c.Ntfs.incomplete())
 }

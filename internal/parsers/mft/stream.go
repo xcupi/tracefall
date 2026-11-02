@@ -130,7 +130,7 @@ func (d *directoryReader) path(ctx context.Context, n ntfs.FileName) (string, bo
 // ceiling (minimum valid stride 512), not a memory-retention ceiling.
 func (p Parser) ParseStream(ctx context.Context, path string, _ parsers.ParseContext, sink parsers.RecordSink) (*model.ParseCoverage, error) {
 	emitted := 0
-	cov := &model.ParseCoverage{EmittedEvents: &emitted}
+	cov := &model.ParseCoverage{EmittedEvents: &emitted, Ntfs: &model.NtfsCoverage{Source: model.NtfsSourceMFT}}
 	lim := p.limits
 	lim.StrictNames = true
 	lim.MaxRecords = int(lim.MaxFileBytes/512) + 1
@@ -140,6 +140,7 @@ func (p Parser) ParseStream(ctx context.Context, path string, _ parsers.ParseCon
 		if !cov.LimitReached {
 			cov.RecordsFailed++
 		}
+		ntfs.RecordFailure(cov.Ntfs, err, nil)
 		return cov, err
 	}
 	defer d.f.Close()
@@ -158,14 +159,25 @@ func (p Parser) ParseStream(ctx context.Context, path string, _ parsers.ParseCon
 		return err
 	}
 	cancelled := func() bool { return ctx.Err() != nil || (p.cancelled != nil && p.cancelled()) }
-	err = ntfs.Scan(path, ntfs.ScanOptions{Strict: true, Limits: lim, Cancelled: cancelled}, func(r ntfs.Record) error {
+	err = ntfs.Scan(path, ntfs.ScanOptions{Strict: true, Limits: lim, Cancelled: cancelled, EmptySlot: func(int) { cov.Ntfs.ZeroSlots++ }}, func(r ntfs.Record) error {
 		cov.RecordsRead++
 		if len(r.Warnings) > 0 {
-			return fmt.Errorf("%w: MFT record %d: %s", ntfs.ErrCorrupt, r.RecordNumber, strings.Join(r.Warnings, "; "))
+			return &ntfs.OffsetError{Offset: int64(r.RecordNumber) * int64(d.stride), Err: fmt.Errorf("%w: MFT record %d: %s", ntfs.ErrCorrupt, r.RecordNumber, strings.Join(r.Warnings, "; "))}
 		}
 		n, ok := r.BestName()
-		if !r.IsBaseRecord() || !ok || !r.HasSI || !r.SI.Any() {
+		switch {
+		case !r.IsBaseRecord():
+			// Extension records belong to their base record.
 			cov.Unmapped++
+			cov.Ntfs.UnmappedNonBase++
+			return nil
+		case !ok:
+			cov.Unmapped++
+			cov.Ntfs.UnmappedNoName++
+			return nil
+		case !r.HasSI || !r.SI.Any():
+			cov.Unmapped++
+			cov.Ntfs.UnmappedNoTime++
 			return nil
 		}
 		full, complete, err := d.path(ctx, n)
@@ -183,6 +195,12 @@ func (p Parser) ParseStream(ctx context.Context, path string, _ parsers.ParseCon
 			}
 		}
 		cov.Mapped++
+		if !r.InUse {
+			cov.Ntfs.FreeMapped++
+		}
+		if r.HasAttributeList {
+			cov.Ntfs.AttributeListRecords++
+		}
 		emitted += len(events)
 		batch.Events = append(batch.Events, events...)
 		batch.Raw = append(batch.Raw, raw...)
@@ -201,6 +219,9 @@ func (p Parser) ParseStream(ctx context.Context, path string, _ parsers.ParseCon
 		cov.LimitReached = errors.Is(err, ntfs.ErrLimitExceeded) || errors.Is(err, ntfs.ErrCancelled) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 		if !sinkFailed && !cov.LimitReached {
 			cov.RecordsFailed++
+		}
+		if !sinkFailed {
+			ntfs.RecordFailure(cov.Ntfs, err, nil)
 		}
 		cov.Notes = append(cov.Notes, "MFT stream did not reach complete EOF; emitted batches are partial coverage.")
 	}

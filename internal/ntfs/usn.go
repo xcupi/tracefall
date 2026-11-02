@@ -407,7 +407,7 @@ func ScanUsnJournal(path string, opts UsnScanOptions, fn func(UsnRecord) error) 
 			if major >= 2 && major <= 4 {
 				length := u32(buf, 0)
 				if length < usnMinRecordV2 || length > usnMaxRecord || length%8 != 0 {
-					return fmt.Errorf("%w: invalid USN record length at %d", ErrCorrupt, fileOffset)
+					return atOffset(fileOffset, fmt.Errorf("%w: invalid USN record length at %d", ErrCorrupt, fileOffset))
 				}
 			}
 		}
@@ -432,7 +432,7 @@ func ScanUsnJournal(path string, opts UsnScanOptions, fn func(UsnRecord) error) 
 			return rerr
 		case perr != nil:
 			if opts.Strict {
-				return perr
+				return atOffset(fileOffset, perr)
 			}
 			// Truncated tail. Everything before it stands.
 			return nil
@@ -445,7 +445,7 @@ func ScanUsnJournal(path string, opts UsnScanOptions, fn func(UsnRecord) error) 
 				if opts.NonRecordRegion != nil {
 					opts.NonRecordRegion(fileOffset, n)
 				} else if opts.Strict {
-					return fmt.Errorf("%w: nonzero undecodable USN bytes at %d", ErrCorrupt, fileOffset)
+					return atOffset(fileOffset, fmt.Errorf("%w: nonzero undecodable USN bytes at %d", ErrCorrupt, fileOffset))
 				}
 			}
 			// Sparse zeros or an unrecognizable region: step to the next
@@ -456,7 +456,7 @@ func ScanUsnJournal(path string, opts UsnScanOptions, fn func(UsnRecord) error) 
 
 		if opts.Strict {
 			if (rec.MajorVersion != 2 && rec.MajorVersion != 3) || rec.MinorVersion != 0 {
-				return ErrUnsupportedUSNVersion
+				return atOffset(fileOffset, ErrUnsupportedUSNVersion)
 			}
 			no := 58
 			nl := 56
@@ -466,20 +466,20 @@ func ScanUsnJournal(path string, opts UsnScanOptions, fn func(UsnRecord) error) 
 			}
 			off, n := int(u16(buf, no)), int(u16(buf, nl))
 			if n/2 > lim.MaxNameChars {
-				return fmt.Errorf("%w: USN filename exceeds %d UTF-16 code units at %d", ErrLimitExceeded, lim.MaxNameChars, fileOffset)
+				return atOffset(fileOffset, fmt.Errorf("%w: USN filename exceeds %d UTF-16 code units at %d", ErrLimitExceeded, lim.MaxNameChars, fileOffset))
 			}
 			if n == 0 || n%2 != 0 || off%2 != 0 || off < no+2 || off+n > size {
-				return fmt.Errorf("%w: invalid USN filename at %d", ErrCorrupt, fileOffset)
+				return atOffset(fileOffset, fmt.Errorf("%w: invalid USN filename at %d", ErrCorrupt, fileOffset))
 			}
 			for i := off; i < off+n; i += 2 {
 				c := u16(buf, i)
 				if c >= 0xd800 && c <= 0xdbff {
 					if i+2 >= off+n || u16(buf, i+2) < 0xdc00 || u16(buf, i+2) > 0xdfff {
-						return fmt.Errorf("%w: invalid UTF-16 at %d", ErrCorrupt, fileOffset)
+						return atOffset(fileOffset, fmt.Errorf("%w: invalid UTF-16 at %d", ErrCorrupt, fileOffset))
 					}
 					i += 2
 				} else if c >= 0xdc00 && c <= 0xdfff {
-					return fmt.Errorf("%w: invalid UTF-16 at %d", ErrCorrupt, fileOffset)
+					return atOffset(fileOffset, fmt.Errorf("%w: invalid UTF-16 at %d", ErrCorrupt, fileOffset))
 				}
 			}
 		}

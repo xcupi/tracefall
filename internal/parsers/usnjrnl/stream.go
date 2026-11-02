@@ -13,7 +13,7 @@ import (
 // ParseStream keeps only one synchronous batch. Legacy Parse retains its event
 // ceiling; import instead relies on the unchanged worker and staging budgets.
 func (p Parser) ParseStream(ctx context.Context, path string, _ parsers.ParseContext, sink parsers.RecordSink) (*model.ParseCoverage, error) {
-	cov := &model.ParseCoverage{}
+	cov := &model.ParseCoverage{EmittedEvents: new(int), Ntfs: &model.NtfsCoverage{Source: model.NtfsSourceUSN}}
 	var batch parsers.ParseResult
 	sinkFailed := false
 	flush := func() error {
@@ -41,16 +41,19 @@ func (p Parser) ParseStream(ctx context.Context, path string, _ parsers.ParseCon
 		cov.RecordsRead++
 		if r.MajorVersion != 2 && r.MajorVersion != 3 {
 			cov.Unmapped++
+			cov.Ntfs.UnmappedUnsupported++
 			return nil
 		}
 		if r.Timestamp.IsZero() {
 			cov.Unmapped++
+			cov.Ntfs.UnmappedUndated++
 			return nil
 		}
 		e, raw := p.eventFor(r, filepath.Base(path))
 		batch.Events = append(batch.Events, e)
 		batch.Raw = append(batch.Raw, raw)
 		cov.Mapped++
+		*cov.EmittedEvents++
 		if len(batch.Events) >= 128 {
 			return flush()
 		}
@@ -58,6 +61,10 @@ func (p Parser) ParseStream(ctx context.Context, path string, _ parsers.ParseCon
 	})
 	if skippedBytes > 0 {
 		cov.Notes = append(cov.Notes, fmt.Sprintf("USN contains %d bytes in nonzero non-record alignment words (first at offset %d); these bytes were not decoded as journal records. Source coverage is incomplete.", skippedBytes, firstSkipped))
+	}
+	cov.Ntfs.NonRecordBytes = skippedBytes
+	if firstSkipped >= 0 {
+		cov.Ntfs.FirstNonRecordOffset = &firstSkipped
 	}
 	if ctx.Err() != nil {
 		err = ctx.Err()
@@ -69,6 +76,13 @@ func (p Parser) ParseStream(ctx context.Context, path string, _ parsers.ParseCon
 		cov.LimitReached = errors.Is(err, ntfs.ErrLimitExceeded) || errors.Is(err, ntfs.ErrCancelled) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 		if !cov.LimitReached && !sinkFailed {
 			cov.RecordsFailed++
+		}
+		if !sinkFailed {
+			var at *int64
+			if firstSkipped >= 0 {
+				at = &firstSkipped
+			}
+			ntfs.RecordFailure(cov.Ntfs, err, at)
 		}
 		cov.Notes = append(cov.Notes, "USN stream did not reach complete EOF; emitted batches are partial coverage.")
 	}
