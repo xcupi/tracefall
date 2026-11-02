@@ -103,3 +103,23 @@ func TestNtfsCoverage_LogFileSummaryDoesNotClaimEvents(t *testing.T) {
 		t.Errorf("logfile summary overclaims: %s", s)
 	}
 }
+
+// A source whose only record is the NTFS detail is still a measurement, and the
+// sentence for a worker that died before reporting says the same thing.
+func TestNtfsCoverage_NtfsDetailAloneIsAMeasurement(t *testing.T) {
+	c := &ParseCoverage{Notes: []string{"caveat"}, Ntfs: &NtfsCoverage{Source: NtfsSourceMFT}}
+	if !c.Measured() {
+		t.Error("NTFS detail must count as measured even beside notes")
+	}
+	if (&ParseCoverage{Notes: []string{"caveat"}}).Measured() {
+		t.Error("notes alone are not a measurement")
+	}
+	for _, want := range []string{"FAILED", "this source produced no events", "not evidence of no activity", "not recorded"} {
+		if !strings.Contains(NtfsFailedWithoutDetail, want) {
+			t.Errorf("NtfsFailedWithoutDetail lacks %q", want)
+		}
+	}
+	if !IsNtfsArtifact(ArtifactMFT) || !IsNtfsArtifact(ArtifactUsnJournal) || !IsNtfsArtifact(ArtifactLogFile) || IsNtfsArtifact(ArtifactSRUM) {
+		t.Error("IsNtfsArtifact")
+	}
+}

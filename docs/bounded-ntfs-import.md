@@ -76,6 +76,20 @@ slots no longer collapse distinct observations. Recollection of identical
 records still deduplicates while retaining every raw record and observation.
 Old cases are not reconstructed or rehashed: use a fresh-case reimport.
 
+## Source-specific coverage and failure (NTFS coverage)
+
+MFT, USN and `$LogFile` sources now persist an `ntfs` object inside
+`parse_coverage` (reason classes for unmapped records, empty slots, free
+records, attribute-list records, non-record bytes with the first offset, and,
+for a failed source, the failure class and byte offset). A failed source keeps
+that record, states zero emitted events, and is listed in the report's coverage
+diagnostics and limitations with the sentence "this source produced no events;
+it is not evidence of no activity". Old imports without it read as "not
+recorded". See [ntfs-coverage.md](ntfs-coverage.md) for the fields, the
+diagnosis of a failed journal, the second-decoder comparison and the list of
+what was not verified. The event ceilings above are still legacy-`Parse`-only:
+no triage import path (folder, ZIP, AD1, disk image) reaches them.
+
 ## Validation and outstanding gates
 
 Tests cover bounded batches, legacy fidelity, tied-record persistence and

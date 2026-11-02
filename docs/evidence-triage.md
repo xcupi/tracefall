@@ -1899,6 +1899,39 @@ network 17,998 and 54,006). The rows of the three SDP tables that stay
 uninterpreted are counted (for the first database 161,546 of 424,057). Details
 and the list of what was not verified: [srum-coverage.md](srum-coverage.md).
 
+### NTFS metadata files (`mft@1`, `usnjrnl@1`, `logfile@1`)
+
+Standalone `$MFT`, `$UsnJrnl:$J` (KAPE writes it as `$Extend/$J`) and `$LogFile`
+are discovered by name or by content, in a folder, a ZIP upload, an AD1 container
+or a disk image, and are all imported through the bounded stream described in
+[bounded-ntfs-import.md](bounded-ntfs-import.md): the legacy 200,000 (MFT) and
+300,000 (USN) event ceilings apply to the legacy `Parse` only and no import path
+reaches them. Support is **per source**, not blanket: a file named like one of
+these but holding other data (for example `$MFT`-style records where a journal
+should be) is imported as a *failed* source.
+
+- `$MFT`: up to four events per base record (`$STANDARD_INFORMATION` created,
+  modified, MFT-changed, accessed); `$FILE_NAME` times are context. Free records
+  are emitted and labelled free; a free record is not a deletion instant.
+  Standard-information times can be set by software, so they are what the table
+  says, not proof.
+- `$UsnJrnl:$J`: one event per record; it shows that the volume recorded a change
+  to a file name and which reasons it recorded, not who made it and not what the
+  content became.
+- `$LogFile`: no timeline events (no timestamps); decoded records are counted.
+
+Each source records what it read and what it could not map: records read,
+mapped, unmapped with the reason class (extension records, no name, no time,
+undecoded version, no timestamp), empty slots, free records, attribute-list
+records, non-record bytes with their first offset, and, for a failed source, the
+class, the byte offset and the sentence *"this source produced no events; it is
+not evidence of no activity"*. This is shown in the source details, the files API
+and the report's coverage section; an older import reads "NTFS coverage detail:
+not recorded". Fields, the diagnosis of a failed journal, the comparison with a
+second decoder (record counts, in-use/free split, event counts per type, time
+range and at least 2,500 sampled records per source, 0 mismatches) and the list of what
+was not verified: [ntfs-coverage.md](ntfs-coverage.md).
+
 ### IE / Edge Legacy WebCache (`webcache@1`)
 
 Reads `WebCacheV01.dat` (and `WebCacheV24.dat`), an ESE database. `Containers`
